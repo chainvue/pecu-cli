@@ -213,6 +213,14 @@ pub fn gallery(ui: &Ui) {
                 "      both ends kept — both ends get compared",
                 palette.muted,
             ),
+        )
+        // The only value the renderer is allowed to shorten, and the only one
+        // where the tail is what identifies it.
+        .path(
+            "path",
+            std::path::Path::new(
+                "/var/lib/somewhere/rather/deeply/nested/verus-pecu/keys/cold-storage.json",
+            ),
         );
     ui.panel(&formatting);
 }

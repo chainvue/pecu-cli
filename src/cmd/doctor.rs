@@ -12,17 +12,13 @@ use serde_json::json;
 use verus_sdk::network::{ChainInfo, ChainReader, RpcError};
 
 use crate::cli::sdk_rev;
-use crate::config::{tildify, Settings};
+use crate::config::Settings;
 use crate::node::{self, NodeError};
 use crate::ui::{fmt, Panel, Text, Ui};
 
 /// A tip older than this is worth pointing at: VRSCTEST aims for a block a
 /// minute, so ten of them missing means the node is stuck or syncing.
 const STALE_AFTER: Duration = Duration::from_secs(600);
-
-/// Cells the label column and its gutter take up, so a path can be shortened to
-/// what is left. `verus-sdk` is the longest label in this report.
-const LABEL_COLUMN: usize = 12;
 
 /// What the node told us, or why it did not.
 struct NodeReport {
@@ -125,30 +121,17 @@ fn render(ui: &Ui, settings: &Settings, report: &Result<NodeReport, NodeError>) 
             .push("read-only — spending is off for this profile", palette.warn)
     };
 
-    // Paths are the one thing here that can be arbitrarily long, and a line
-    // wider than the panel breaks the frame. Shortened from the middle: the tail
-    // of a path is the part that identifies it.
     let key_count = paths.key_count();
-    let keys_suffix = format!("({})", fmt::plural(key_count, "key", "keys"));
-    let path_budget = |reserved: usize| theme.width.saturating_sub(LABEL_COLUMN + reserved);
-    let fit = |path: &std::path::Path, reserved: usize| {
-        fmt::fit(&tildify(path), path_budget(reserved), glyphs.ellipsis)
-    };
-
     let mut panel = Panel::new("LOCAL")
         .row("profile", Text::of(&profile.name, palette.accent))
         .row("node", Text::of(&profile.node, palette.value))
         .row("currency", Text::of(&profile.currency, palette.value))
         .row("spending", spend)
+        .path("config", &paths.config_file())
+        .path("keys", &paths.keys_dir())
         .row(
-            "config",
-            Text::of(fit(&paths.config_file(), 0), palette.value),
-        )
-        .row(
-            "keys",
-            Text::of(fit(&paths.keys_dir(), keys_suffix.len() + 1), palette.value)
-                .space()
-                .push(keys_suffix, palette.muted),
+            "stored keys",
+            Text::of(fmt::plural(key_count, "key", "keys"), palette.value),
         )
         .section("BUILD")
         .row("pecu", Text::of(env!("CARGO_PKG_VERSION"), palette.value))

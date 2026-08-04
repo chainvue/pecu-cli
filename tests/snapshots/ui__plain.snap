@@ -38,3 +38,4 @@ FORMATTING
   amount    0.00000001   one satoshi, eight places, never a float
   height    3,481,207       grouped; amounts deliberately are not
   address   RXyz9k2mP...7Qa4      both ends kept — both ends get compared
+  path      /var/lib/somewhere/rather/deeply/nested/verus-pecu/keys/cold-storage.json

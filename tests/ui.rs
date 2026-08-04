@@ -12,6 +12,10 @@ fn gallery(theme: &str) -> String {
         .args(["dev", "ui", "--theme", theme])
         .env("PECU_WIDTH", "84")
         .env_remove("NO_COLOR")
+        // The gallery renders a path row, and path rendering collapses $HOME to
+        // `~`. Without a HOME there is nothing to collapse, so the snapshot does
+        // not depend on whose machine ran it.
+        .env_remove("HOME")
         .assert()
         .success();
     String::from_utf8(output.get_output().stdout.clone()).expect("output should be utf-8")

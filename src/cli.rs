@@ -160,16 +160,48 @@ pub enum DevCommand {
 #[derive(Debug, Subcommand)]
 pub enum KeyCommand {
     /// Create a new key in the encrypted keystore
-    Gen,
-    /// Import an existing WIF
-    Import,
+    Gen {
+        /// Name to file it under
+        #[arg(long, short = 'l', default_value = "default")]
+        label: String,
+
+        /// Back the key with a 24-word recovery phrase, so it can be typed back
+        /// in if the keystore is lost
+        #[arg(long)]
+        from_phrase: bool,
+
+        /// Print the recovery phrase. It is shown once and never stored
+        #[arg(long, requires = "from_phrase")]
+        show_phrase: bool,
+    },
+
+    /// Import an existing key, read from a prompt rather than the command line
+    Import {
+        /// Name to file it under
+        #[arg(long, short = 'l')]
+        label: String,
+
+        /// Read a 24-word recovery phrase instead of a WIF
+        #[arg(long)]
+        phrase: bool,
+    },
+
     /// List stored keys
     List,
+
     /// Show one key's public details
-    Show,
-    /// Reveal a stored private key
-    Export,
-    /// Work with BIP-39 recovery phrases
+    Show {
+        /// Which key
+        label: String,
+    },
+
+    /// Print a stored private key in the clear
+    Export {
+        /// Which key
+        label: String,
+    },
+
+    /// Generate a recovery phrase and show what it maps to, storing nothing
     Phrase,
 }
 

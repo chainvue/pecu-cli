@@ -6,14 +6,13 @@
 
 pub mod dev;
 pub mod doctor;
+pub mod key;
 
 use clap::CommandFactory;
 use miette::Diagnostic;
 use thiserror::Error;
 
-use crate::cli::{
-    Cli, Command, DevCommand, IdCommand, KeyCommand, PlanCommand, TxCommand, WalletCommand,
-};
+use crate::cli::{Cli, Command, DevCommand, IdCommand, PlanCommand, TxCommand, WalletCommand};
 use crate::config::Settings;
 use crate::ui::Ui;
 
@@ -59,17 +58,12 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
 
         Command::Doctor => doctor::run(&ui, &Settings::resolve(&cli.globals)?),
 
-        Command::Key { command } => Err(NotYet::at(
-            match command {
-                KeyCommand::Gen => "key gen",
-                KeyCommand::Import => "key import",
-                KeyCommand::List => "key list",
-                KeyCommand::Show => "key show",
-                KeyCommand::Export => "key export",
-                KeyCommand::Phrase => "key phrase",
-            },
-            "M3",
-        )),
+        Command::Key { command } => key::run(
+            &ui,
+            &Settings::resolve(&cli.globals)?,
+            &cli.globals,
+            command,
+        ),
 
         Command::Wallet { command } => Err(NotYet::at(
             match command {

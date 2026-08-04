@@ -5,6 +5,7 @@
 //! otherwise. Callers never branch on the skin — they describe what the block
 //! contains, and the renderer decides how it looks.
 
+use crate::ui::fmt;
 use crate::ui::table::Table;
 use crate::ui::text::Text;
 use crate::ui::theme::Theme;
@@ -28,6 +29,17 @@ enum Item {
     Row {
         label: String,
         value: Text,
+    },
+    /// A label/value pair whose value is a filesystem path.
+    ///
+    /// Kept apart from [`Item::Row`] because a path is the one value that may be
+    /// shortened: it can be arbitrarily long, and the renderer is the only thing
+    /// that knows both the label column and the width it has to fit into. An
+    /// address or a hash is never shortened this way — silently cutting one is
+    /// worse than a ragged frame.
+    Path {
+        label: String,
+        path: String,
     },
     /// A line that spans the panel.
     Line(Text),
@@ -60,6 +72,17 @@ impl Panel {
         self.items.push(Item::Row {
             label: label.into(),
             value,
+        });
+        self
+    }
+
+    /// A row holding a path, shortened from the middle if it will not fit and
+    /// with `$HOME` collapsed to `~`.
+    #[must_use]
+    pub fn path(mut self, label: impl Into<String>, path: &std::path::Path) -> Self {
+        self.items.push(Item::Path {
+            label: label.into(),
+            path: crate::config::tildify(path),
         });
         self
     }
@@ -114,7 +137,7 @@ impl Panel {
         self.items
             .iter()
             .filter_map(|item| match item {
-                Item::Row { label, .. } => Some(label.chars().count()),
+                Item::Row { label, .. } | Item::Path { label, .. } => Some(label.chars().count()),
                 _ => None,
             })
             .max()
@@ -141,6 +164,21 @@ impl Panel {
                         .push(value.render(), Default::default());
                     // `value` is already escaped, so its width has to be carried
                     // rather than re-measured off the string.
+                    drawn.push(Drawn::Content(Text::preformatted(
+                        assembled.render(),
+                        label_width + LABEL_GUTTER + value.width(),
+                    )));
+                }
+                Item::Path { label, path } => {
+                    // Fitted against the theme's ceiling rather than the final
+                    // panel width, which is not known yet — and cannot be
+                    // smaller than this, so the row is guaranteed to fit.
+                    let budget = theme.width.saturating_sub(label_width + LABEL_GUTTER);
+                    let shown = fmt::fit(path, budget, theme.glyphs.ellipsis);
+                    let value = Text::of(shown, palette.muted);
+                    let assembled = Text::of(pad(label, label_width), palette.label)
+                        .push(" ".repeat(LABEL_GUTTER), palette.label)
+                        .push(value.render(), Default::default());
                     drawn.push(Drawn::Content(Text::preformatted(
                         assembled.render(),
                         label_width + LABEL_GUTTER + value.width(),
@@ -248,6 +286,15 @@ impl Panel {
                     out.push_str(&pad(label, label_width));
                     out.push_str(&" ".repeat(LABEL_GUTTER));
                     out.push_str(&value.render());
+                    out.push('\n');
+                }
+                // No frame to break, so the path goes out whole. Piped output
+                // is likelier to be fed to something than read.
+                Item::Path { label, path } => {
+                    out.push_str("  ");
+                    out.push_str(&pad(label, label_width));
+                    out.push_str(&" ".repeat(LABEL_GUTTER));
+                    out.push_str(path);
                     out.push('\n');
                 }
                 Item::Table(table) => {

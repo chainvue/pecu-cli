@@ -3,8 +3,13 @@
 use assert_cmd::Command;
 use predicates::str::contains;
 
+/// Every invocation is pointed at a throwaway config root. Nothing here should
+/// write anything, but a test suite that *could* touch a real keystore is one
+/// refactor away from doing it.
 fn pecu() -> Command {
-    Command::cargo_bin("pecu").expect("the pecu binary should be built")
+    let mut command = Command::cargo_bin("pecu").expect("the pecu binary should be built");
+    command.env("PECU_HOME", tempfile::tempdir().expect("a temp dir").keep());
+    command
 }
 
 #[test]
@@ -48,14 +53,15 @@ fn long_version_names_the_pinned_sdk_revision() {
 
 #[test]
 fn unimplemented_commands_say_so_and_exit_non_zero() {
-    // `key gen` rather than an implemented command, so this stays offline and
-    // keeps testing the stub path as milestones land.
+    // Deliberately the last command scheduled to land, so this needs updating
+    // as rarely as possible. When `id read` ships, delete this test — there
+    // will be no stub left for it to be about.
     pecu()
-        .args(["key", "gen"])
+        .args(["id", "read"])
         .assert()
         .failure()
         .stderr(contains("not implemented"))
-        .stderr(contains("M3"));
+        .stderr(contains("M8"));
 }
 
 #[test]
@@ -70,10 +76,11 @@ fn completions_generate_for_zsh() {
 #[test]
 fn global_flags_are_accepted_after_the_subcommand() {
     // --json and friends are declared global; regression guard against someone
-    // moving them onto the root command only.
+    // moving them onto the root command only. `key list` because it is the
+    // cheapest implemented command that needs neither a node nor a passphrase.
     pecu()
-        .args(["key", "gen", "--json", "--dry-run", "--explain", "-y"])
+        .args(["key", "list", "--json", "--dry-run", "--explain", "-y"])
         .assert()
-        .failure()
-        .stderr(contains("not implemented"));
+        .success()
+        .stdout(contains("\"keys\""));
 }

@@ -49,7 +49,7 @@ make run ARGS="doctor"
 | Command | Does | Status |
 |---|---|---|
 | `pecu doctor` | Node reachability, chain tip, config paths, build info | ✅ done |
-| `pecu key gen\|import\|list\|show\|export\|phrase` | Encrypted keystore (Argon2id + ChaCha20-Poly1305) | M3 |
+| `pecu key gen\|import\|list\|show\|export\|phrase` | Encrypted keystore (Argon2id + ChaCha20-Poly1305) | ✅ done |
 | `pecu wallet balance\|utxos` | Spendable, immature and token balances | M4 |
 | `pecu tx explain` | Says what every output in a transaction actually *is* | M4 |
 | `pecu send` | Transparent sends, native and token | M5 |
@@ -91,6 +91,71 @@ It exits non-zero when the node cannot be reached, but still prints the local
 half — "my setting is being ignored" and "the node is down" are different
 problems, and the output should tell them apart. `pecu doctor --json` gives the
 same report as machine-readable data, including when the node is down.
+
+### `pecu key`
+
+Keys live in an encrypted keystore: one file per key at
+`~/.config/verus-pecu/keys/<label>.json`, mode `0600`.
+
+```sh
+pecu key gen --label demo                          # a random key
+pecu key gen --label paper --from-phrase --show-phrase   # recoverable from paper
+pecu key list
+pecu key show demo
+pecu key export demo --yes                         # prints the private key
+pecu key phrase                                    # a phrase, stored nowhere
+```
+
+```
+┌─ RECOVERY PHRASE ───────────────────────────────┐
+│  1. pudding    7. caution  13. away   19. pizza │
+│  2. elite      8. nest     14. level  20. use   │
+│  3. nothing    9. crumble  15. spell  21. sauce │
+│  4. rent      10. focus    16. pair   22. dwarf │
+│  5. solution  11. action   17. first  23. nasty │
+│  6. device    12. aim      18. try    24. camp  │
+└─────────────────────────────────────────────────┘
+  ▸ write this down, on paper, now — it is shown once and is not stored
+```
+
+**How it is protected.** Argon2id (19 MiB, 2 passes, 1 lane — the OWASP
+interactive figure) derives a key from your passphrase; ChaCha20-Poly1305 seals
+the 32 private key bytes under it. The envelope's metadata — version, label,
+address, compression flag — is authenticated as associated data, so editing the
+address in a key file produces a decryption failure rather than a key that
+silently belongs to a different address than it claims. The KDF parameters
+travel with each file, so raising the cost later never strands an old key.
+
+That defends a stolen file against an offline guess. It does not defend a running
+process: once unlocked, the key is in memory, held in `Zeroizing` wrappers and
+wiped on drop, which narrows the window without closing it.
+
+**Where the entropy comes from.** `verus-keys` deliberately offers no
+`PrivateKey::generate` — where the bytes come from is the most security-critical
+decision a wallet makes, and a library that picks quietly moves it somewhere
+nobody reviews. So it is in `src/keystore.rs`, in the open, and it is the OS
+CSPRNG via `getrandom`.
+
+**Two key schedules, one phrase.** The same 24 words drive both sides of Verus by
+different routes: the shielded side goes BIP-39 → seed → ZIP-32, and the
+transparent side ignores BIP-39 entirely and hashes the phrase text *verbatim*.
+`pecu key phrase` shows all three so the difference is visible. Because the text
+is hashed verbatim, an imported phrase is never trimmed.
+
+**Secrets never go on the command line.** A WIF or a phrase in `argv` lands in
+your shell history and in the process list of every other user on the machine, so
+`key import` reads from a no-echo prompt, or from stdin when it is piped:
+
+```sh
+pecu key export demo --yes --json | jq -r .wif | pecu key import --label copy
+```
+
+`PECU_PASSPHRASE` supplies the encryption passphrase for scripts and tests. It
+deliberately does *not* supply the imported key — `key import` needs two
+different secrets in one run, and one variable cannot provide both without
+silently using the same value for each.
+
+`key export` refuses to run without `--yes`, and says why first.
 
 ## Configuration
 

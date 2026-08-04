@@ -3,6 +3,7 @@
 mod cli;
 mod cmd;
 mod config;
+mod keystore;
 mod node;
 mod ui;
 
