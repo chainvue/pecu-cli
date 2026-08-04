@@ -15,6 +15,7 @@ macro_rules! sdk_rev {
         "ae08bc0c806747c088104c003feee9b01171dd05"
     };
 }
+pub(crate) use sdk_rev;
 
 const ABOUT: &str = "A Verus wallet for the terminal — the example app for the Verus Rust SDK";
 

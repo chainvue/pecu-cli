@@ -5,6 +5,7 @@
 //! `pecu --help` is an honest map of what this build can do.
 
 pub mod dev;
+pub mod doctor;
 
 use clap::CommandFactory;
 use miette::Diagnostic;
@@ -13,6 +14,7 @@ use thiserror::Error;
 use crate::cli::{
     Cli, Command, DevCommand, IdCommand, KeyCommand, PlanCommand, TxCommand, WalletCommand,
 };
+use crate::config::Settings;
 use crate::ui::Ui;
 
 /// A command that exists in the tree but has not been built yet.
@@ -55,7 +57,7 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
             Ok(())
         }
 
-        Command::Doctor => Err(NotYet::at("doctor", "M2")),
+        Command::Doctor => doctor::run(&ui, &Settings::resolve(&cli.globals)?),
 
         Command::Key { command } => Err(NotYet::at(
             match command {

@@ -48,12 +48,14 @@ fn long_version_names_the_pinned_sdk_revision() {
 
 #[test]
 fn unimplemented_commands_say_so_and_exit_non_zero() {
+    // `key gen` rather than an implemented command, so this stays offline and
+    // keeps testing the stub path as milestones land.
     pecu()
-        .arg("doctor")
+        .args(["key", "gen"])
         .assert()
         .failure()
         .stderr(contains("not implemented"))
-        .stderr(contains("M2"));
+        .stderr(contains("M3"));
 }
 
 #[test]
@@ -70,7 +72,7 @@ fn global_flags_are_accepted_after_the_subcommand() {
     // --json and friends are declared global; regression guard against someone
     // moving them onto the root command only.
     pecu()
-        .args(["doctor", "--json", "--dry-run", "--explain", "-y"])
+        .args(["key", "gen", "--json", "--dry-run", "--explain", "-y"])
         .assert()
         .failure()
         .stderr(contains("not implemented"));

@@ -48,7 +48,7 @@ make run ARGS="doctor"
 
 | Command | Does | Status |
 |---|---|---|
-| `pecu doctor` | Node reachability, chain tip, config paths, build info | M2 |
+| `pecu doctor` | Node reachability, chain tip, config paths, build info | ✅ done |
 | `pecu key gen\|import\|list\|show\|export\|phrase` | Encrypted keystore (Argon2id + ChaCha20-Poly1305) | M3 |
 | `pecu wallet balance\|utxos` | Spendable, immature and token balances | M4 |
 | `pecu tx explain` | Says what every output in a transaction actually *is* | M4 |
@@ -57,6 +57,70 @@ make run ARGS="doctor"
 | `pecu id show\|register\|update\|revoke\|recover` | VerusID lifecycle | M7 |
 | `pecu id login\|publish\|read` | Sign-in with VerusID, and VDXF data | M8 |
 | `pecu completions <shell>` | Shell completion script | ✅ done |
+
+### `pecu doctor`
+
+The first thing to run. It answers the three questions in the order they go
+wrong: where are my files, what was this binary built from, and is the node
+answering.
+
+```
+┌─ LOCAL ─────────────────────────────────────────────┐
+│ profile     testnet                                 │
+│ node        https://api.verustest.net               │
+│ currency    VRSCTEST                                │
+│ spending    ✓ spending allowed                      │
+│ config      ~/.config/verus-pecu/config.toml        │
+│ keys        ~/.config/verus-pecu/keys (0 keys)      │
+├─ BUILD ─────────────────────────────────────────────┤
+│ pecu        0.1.0                                   │
+│ verus-sdk   ae08bc0                                 │
+│ features    network                                 │
+├─ NODE ──────────────────────────────────────────────┤
+│ chain       VRSCTEST                                │
+│ daemon      1.2.17-3                                │
+│ tip         ▸ 1,176,514   mined 82s ago             │
+│ sync        ✓ in sync                               │
+│ mempool     0 transactions                          │
+│ latency     232 ms                                  │
+└─────────────────────────────────────────────────────┘
+  ▸ no config file yet — running on the built-in profiles
+```
+
+It exits non-zero when the node cannot be reached, but still prints the local
+half — "my setting is being ignored" and "the node is down" are different
+problems, and the output should tell them apart. `pecu doctor --json` gives the
+same report as machine-readable data, including when the node is down.
+
+## Configuration
+
+Everything resolves in one order: **command-line flag → environment → config
+file → built-in default**.
+
+There is no config file until you make one; the `testnet` and `mainnet` profiles
+are built in. Files live under `$PECU_HOME`, else `$XDG_CONFIG_HOME/verus-pecu`,
+else `~/.config/verus-pecu` — XDG rather than the platform convention, because
+`~/.config` is where someone reaching for a terminal wallet will look.
+
+```toml
+# ~/.config/verus-pecu/config.toml
+default_profile = "testnet"
+
+[profiles.testnet]
+node = "https://api.verustest.net"
+
+# Built in, but shipped unable to spend: moving real coins from an example app
+# should take a deliberate act, not a forgotten --profile.
+[profiles.mainnet]
+allow_spend = true
+```
+
+A profile that appears only in the file inherits testnet's defaults for whatever
+it leaves out. Unknown keys are refused rather than ignored, so a typo is an
+error instead of a setting that silently does nothing.
+
+`$PECU_HOME` also makes the tests hermetic — they point it at a temporary
+directory and cannot see, or damage, a real keystore.
 
 ### Global flags
 

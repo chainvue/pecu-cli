@@ -2,6 +2,8 @@
 
 mod cli;
 mod cmd;
+mod config;
+mod node;
 mod ui;
 
 use clap::Parser;
