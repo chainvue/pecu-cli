@@ -1,0 +1,6 @@
+# Matches the toolchain verus-rust-sdk pins. Honoured by rustup; a Homebrew or
+# distro-packaged cargo ignores this file, which is why Cargo.toml also carries
+# `rust-version = "1.95"` — that one is enforced by cargo itself.
+[toolchain]
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]

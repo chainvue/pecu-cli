@@ -1,0 +1,36 @@
+[package]
+name = "verus-pecu-cli"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+license = "Apache-2.0"
+description = "A hacker-flavoured Verus CLI wallet — the example app for the Verus Rust SDK"
+publish = false
+
+[[bin]]
+name = "pecu"
+path = "src/main.rs"
+
+[dependencies]
+# The SDK this whole program exists to demonstrate. Pinned by rev: the crate is
+# in early development and is not on crates.io, so "latest main" is not a
+# reproducible dependency.
+verus-sdk = { git = "https://github.com/chainvue/verus-rust-sdk", rev = "ae08bc0c806747c088104c003feee9b01171dd05", features = [
+    "network",
+] }
+
+anstream = "0.6"
+anstyle = "1.0"
+clap = { version = "4.5", features = ["derive", "wrap_help", "env"] }
+clap_complete = "4.5"
+miette = { version = "7", features = ["fancy"] }
+owo-colors = "4"
+thiserror = "2"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+
+[profile.release]
+strip = true
+lto = "thin"

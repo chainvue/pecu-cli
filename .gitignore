@@ -1,0 +1,15 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# insta review leftovers
+**/*.snap.new
+
+# never let real key material or plans into the repo
+*.wif
+*.key
+/keys/
+/scratch/
+.env
+.env.*
+!.env.example
