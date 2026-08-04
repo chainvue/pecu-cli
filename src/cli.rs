@@ -141,6 +141,19 @@ pub enum Command {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
+
+    /// Helpers for working on pecu itself
+    #[command(hide = true)]
+    Dev {
+        #[command(subcommand)]
+        command: DevCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DevCommand {
+    /// Render every widget in the UI kit
+    Ui,
 }
 
 #[derive(Debug, Subcommand)]

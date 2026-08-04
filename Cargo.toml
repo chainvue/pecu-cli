@@ -24,11 +24,13 @@ anstyle = "1.0"
 clap = { version = "4.5", features = ["derive", "wrap_help", "env"] }
 clap_complete = "4.5"
 miette = { version = "7", features = ["fancy"] }
-owo-colors = "4"
+terminal_size = "0.4"
 thiserror = "2"
+unicode-width = "0.2"
 
 [dev-dependencies]
 assert_cmd = "2"
+insta = "1"
 predicates = "3"
 
 [profile.release]

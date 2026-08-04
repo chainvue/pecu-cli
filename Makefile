@@ -2,7 +2,7 @@
 # Nothing here needs a network connection except the `testnet` target.
 
 .DEFAULT_GOAL := help
-.PHONY: help check fmt fmt-check lint test testnet build run clean
+.PHONY: help check fmt fmt-check lint test testnet snapshots gallery build run clean
 
 help: ## Show this help
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  \033[32m%-12s\033[0m %s\n", $$1, $$2}'
@@ -23,6 +23,12 @@ test: ## Offline tests only — must pass with the network unplugged
 
 testnet: ## Tests that talk to api.verustest.net
 	cargo test -- --ignored
+
+snapshots: ## Accept the current UI output as the new snapshots
+	INSTA_UPDATE=always cargo test --test ui
+
+gallery: ## Eyeball the UI kit in the phosphor skin
+	cargo run -q -- dev ui --theme phosphor
 
 build: ## Debug build
 	cargo build

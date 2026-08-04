@@ -2,6 +2,7 @@
 
 mod cli;
 mod cmd;
+mod ui;
 
 use clap::Parser;
 

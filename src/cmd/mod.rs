@@ -4,11 +4,16 @@
 //! answers with [`NotYet`] rather than a panic or a silent no-op, so
 //! `pecu --help` is an honest map of what this build can do.
 
+pub mod dev;
+
 use clap::CommandFactory;
 use miette::Diagnostic;
 use thiserror::Error;
 
-use crate::cli::{Cli, Command, IdCommand, KeyCommand, PlanCommand, TxCommand, WalletCommand};
+use crate::cli::{
+    Cli, Command, DevCommand, IdCommand, KeyCommand, PlanCommand, TxCommand, WalletCommand,
+};
+use crate::ui::Ui;
 
 /// A command that exists in the tree but has not been built yet.
 #[derive(Debug, Error, Diagnostic)]
@@ -33,7 +38,16 @@ impl NotYet {
 }
 
 pub fn dispatch(cli: Cli) -> miette::Result<()> {
+    let ui = Ui::new(cli.globals.theme, cli.globals.json);
+
     match &cli.command {
+        Command::Dev { command } => match command {
+            DevCommand::Ui => {
+                dev::gallery(&ui);
+                Ok(())
+            }
+        },
+
         Command::Completions { shell } => {
             let mut command = Cli::command();
             let name = command.get_name().to_string();

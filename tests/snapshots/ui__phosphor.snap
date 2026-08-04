@@ -1,0 +1,45 @@
+---
+source: tests/ui.rs
+expression: "gallery(\"phosphor\")"
+---
+  ┌─┐┌─┐┌─┐┬ ┬   verus wallet
+  ├─┘├┤ │  │ │   widget gallery
+  ┴  └─┘└─┘└─┘
+
+┌─ WALLET ───────────────────────────────────────────┐
+│ addr   RXyz9k2mP…7Qa4                              │
+│ tip    ▸ 3,481,207        node ✓ api.verustest.net │
+├────────────────────────────────────────────────────┤
+│ SPENDABLE  312.50000000  VRSCTEST  (4 utxos)       │
+│ IMMATURE     6.00000000  VRSCTEST  (1 coinbase)    │
+├─ TOKENS ───────────────────────────────────────────┤
+│ 1200.00000000  pecu@    iJhCe4Ap7…y8Kd             │
+│    0.50000000  bridge@  i3f7QwErT…V2Lm             │
+└────────────────────────────────────────────────────┘
+  ▸ 2 CryptoCondition outputs carry no currency
+
+┌─ UTXOS ───────────────────────────────────────────────┐
+│ OUTPOINT                   AMOUNT   CONF  STATUS      │
+│ 9f2c1ab4de…21d4e9:0  250.00000000  1,204  ✓ spendable │
+│ 41bd8e0092…d7a2f6:1    6.00000000     37  ▲ immature  │
+└───────────────────────────────────────────────────────┘
+
+┌─ OUTPUTS ─────────────────────────────────────────────────┐
+│ #0 0.10000000 → RXyz9k2mP…7Qa4                            │
+│ #1 0.00000000 the VerusID pecu@ itself — 1-of-1 signature │
+│ #2 0.00000000 eval 2 — MAY HOLD CURRENCY                  │
+│                                                           │
+│ a blank line inside the frame, for grouping               │
+└───────────────────────────────────────────────────────────┘
+
+status lines → outside any frame, so they compose with anything
+  ✓ broadcast accepted by the node
+  ▲ expiry is 0 — this transaction stays minable forever
+  ✗ wrong passphrase
+  ▸ keys live in ~/.config/verus-pecu/keys
+
+┌─ FORMATTING ──────────────────────────────────────────────────────────┐
+│ amount    0.00000001   one satoshi, eight places, never a float       │
+│ height    3,481,207       grouped; amounts deliberately are not       │
+│ address   RXyz9k2mP…7Qa4      both ends kept — both ends get compared │
+└───────────────────────────────────────────────────────────────────────┘
