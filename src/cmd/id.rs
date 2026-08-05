@@ -1090,7 +1090,7 @@ fn timelock_panel(ui: &Ui, panel: Panel, timelock: Timelock, tip: Option<u32>) -
 /// one it is depends on `FLAG_LOCKED`. The SDK makes this a type precisely so
 /// the pairing cannot be got wrong; this is the one place that reconstructs it
 /// from a rendering, and it follows `Timelock::of` exactly.
-fn timelock_of(identity: &serde_json::Value) -> Timelock {
+pub(crate) fn timelock_of(identity: &serde_json::Value) -> Timelock {
     let flags = identity.get("flags").and_then(|v| v.as_u64()).unwrap_or(0);
     let after = identity
         .get("timelock")

@@ -708,6 +708,14 @@ nothing, after the transaction is built and signed. A stolen key cannot shorten
 a lock either — that was measured too, and it is the property the whole feature
 rests on.
 
+**A timelocked identity cannot spend its own funds**, and that is refused here
+rather than by consensus. `send --from-identity` on a locked identity used to
+build and sign a perfectly good transaction and then collect
+`mandatory-script-verify-flag-failed`, which names neither the identity nor the
+height. It now says which and until when — reported upstream as
+chainvue/verus-rust-sdk#107, since the SDK has the predicate for it and the
+send flow does not use it.
+
 **An over-long delay is refused rather than clamped.** Consensus caps it at
 `MAX_UNLOCK_DELAY` (~22 years). The daemon's own helper silently clamps instead
 of erroring, which can hand back a lock decades shorter than the one asked for;

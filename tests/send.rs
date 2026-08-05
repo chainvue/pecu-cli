@@ -328,6 +328,64 @@ fn an_identity_funded_payment_returns_its_change_to_the_identity() {
     );
 }
 
+/// A timelocked identity cannot spend, and it should not take consensus to say so.
+///
+/// `prepare_send_from_identity` does not check the timelock: it builds and signs
+/// happily, and the daemon answers `mandatory-script-verify-flag-failed`, naming
+/// neither the identity nor the height. Measured against a locked
+/// `pecurevoke1@` on VRSCTEST before this guard existed.
+///
+/// Skipped when the identity happens to be unlocked, because it releases itself
+/// — this asserts the guard when there is something to guard against, rather
+/// than depending on a chain state that expires.
+#[test]
+#[ignore = "talks to api.verustest.net"]
+fn a_timelocked_identity_is_refused_before_the_transaction_is_built() {
+    let Ok(funded) = std::env::var("PECU_FUNDED_HOME") else {
+        eprintln!("PECU_FUNDED_HOME is not set — skipping");
+        return;
+    };
+
+    let shown = Command::cargo_bin("pecu")
+        .expect("built")
+        .env("PECU_HOME", &funded)
+        .args(["id", "show", "pecurevoke1@"])
+        .assert()
+        .success();
+    let state = String::from_utf8_lossy(&shown.get_output().stdout).into_owned();
+    if !state.contains("locked for") {
+        eprintln!("pecurevoke1@ is not locked right now — skipping");
+        return;
+    }
+
+    let assertion = Command::cargo_bin("pecu")
+        .expect("built")
+        .env("PECU_HOME", &funded)
+        .args([
+            "send",
+            "--from-identity",
+            "pecurevoke1@",
+            "--from",
+            "rescued",
+            "--to",
+            CHAIN_IDENTITY,
+            "--amount",
+            "0.1",
+            "--dry-run",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assertion.get_output().stderr).into_owned();
+
+    assert!(stderr.contains("timelocked"), "{stderr}");
+    // Named, and not blamed on the node.
+    assert!(stderr.contains("pecurevoke1@"), "{stderr}");
+    assert!(
+        !stderr.contains("pecu doctor"),
+        "a locked identity is not a node problem:\n{stderr}"
+    );
+}
+
 /// The funded path. Set `PECU_FUNDED_HOME` to a config root holding a key with
 /// a little VRSCTEST in it — the Discord faucet is the way to get some — and
 /// this will build, sign and *not* broadcast a real payment.
