@@ -20,8 +20,8 @@ use thiserror::Error;
 use verus_sdk::decode::{decode_output_script, OutputKind};
 use verus_sdk::money::Amount;
 use verus_sdk::network::{
-    currency_names, native_currency, spendable, AddressUtxo, ChainReader, FlowError, Funding,
-    MempoolDelta, RpcError, SignedAmount, TokenBalances,
+    currency_names, history, native_currency, spendable, AddressUtxo, ChainReader, FlowError,
+    Funding, HistoryEntry, MempoolDelta, RpcError, SignedAmount, TokenBalances,
 };
 use verus_sdk::send::CurrencyId;
 use verus_sdk::verus_keys::{Address, AddressKind};
@@ -846,6 +846,230 @@ pub fn utxos(
     ui.panel(&panel);
     ui.explain_panel();
     Ok(())
+}
+
+/// `pecu wallet history` — every transaction that touched an address.
+///
+/// Read-only and, unlike a balance, cumulative: this is what happened rather
+/// than what is left. The SDK nets each transaction down to its effect on the
+/// addresses asked about, which is the number a reader wants — a transaction
+/// that spent a 10-coin output and took 9.9 back moved 0.1, not 10.
+pub fn history_command(
+    ui: &Ui,
+    settings: &Settings,
+    args: &crate::cli::HistoryArgs,
+) -> miette::Result<()> {
+    let address = resolve_address(
+        settings,
+        args.target.address.as_deref(),
+        args.target.key.as_deref(),
+    )?;
+    let node = node::connect(&settings.profile)?;
+
+    // `None` asks the node for the whole chain. That is the honest default for
+    // a fresh address and a very large reply for an old one, which is what
+    // `--from-height` is for; the error already names `max_response_mb`.
+    //
+    // An open-ended range is closed at the tip rather than at `u32::MAX`: the
+    // daemon refuses that outright with `-1: JSON integer out of range`, which
+    // reads as a broken node rather than as an argument it dislikes.
+    let range = match (args.from_height, args.to_height) {
+        (None, None) => None,
+        (from, Some(to)) => Some((from.unwrap_or(0), to)),
+        (Some(from), None) => {
+            ui.sdk("node.block_count()");
+            let tip = node.block_count().map_err(|source| {
+                node::NodeError::request("reading the tip", &settings.profile.node, source)
+            })?;
+            ui.sdk_result(fmt::height(tip.into()));
+            Some((from, tip))
+        }
+    };
+
+    ui.sdk(format!(
+        "verus_sdk::network::history(&node, [{address:?}], {range:?})"
+    ));
+    let entries = history(&node, &[address.as_str()], range)
+        .map_err(|source| WalletError::flow("reading the history", &address, source))?;
+    ui.sdk_result(format!("{} entries", entries.len()));
+
+    // Newest last, because a terminal scrolls: the most recent thing should be
+    // the thing still on screen. `--limit` therefore drops from the *front*.
+    let shown: &[HistoryEntry] = if entries.len() > args.limit {
+        &entries[entries.len() - args.limit..]
+    } else {
+        &entries
+    };
+    let dropped = entries.len() - shown.len();
+
+    // One request, for every currency across every row that will be printed.
+    let mut wanted: BTreeSet<CurrencyId> = BTreeSet::new();
+    for entry in shown {
+        for currency in entry.net_currencies.keys() {
+            if let Ok(parsed) = currency.parse::<Address>() {
+                wanted.insert(CurrencyId::from_bytes(parsed.hash()));
+            }
+        }
+    }
+    let names = if wanted.is_empty() {
+        Default::default()
+    } else {
+        currency_names(&node, wanted).unwrap_or_default()
+    };
+
+    if ui.is_json() {
+        emit_json(&serde_json::json!({
+            "address": address,
+            "entries": entries.iter().map(|entry| serde_json::json!({
+                "txid": entry.txid.to_string(),
+                "height": entry.height,
+                "block_index": entry.block_index,
+                "block_time": entry.block_time,
+                "net_satoshis": entry.net_native.to_sat(),
+                "spent_something": entry.spent_something,
+                "outgoing": entry.is_outgoing(),
+                "net_currencies": entry.net_currencies.iter().map(|(currency, value)| {
+                    serde_json::json!({ "currency": currency, "satoshis": value.to_sat() })
+                }).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+            // The whole list is serialised; `--limit` only shortens the render.
+            "count": entries.len(),
+        }));
+        return Ok(());
+    }
+
+    let palette = ui.theme.palette;
+    let glyphs = ui.theme.glyphs;
+
+    if entries.is_empty() {
+        ui.note(format!("{address} has no transactions in that range"));
+        ui.explain_panel();
+        return Ok(());
+    }
+
+    let now = now_seconds();
+    let mut table = Table::new(vec![
+        Column::right("height"),
+        Column::right("when"),
+        Column::right("change"),
+        Column::left("transaction"),
+    ]);
+    for entry in shown {
+        table.push(vec![
+            Text::of(fmt::height(entry.height.into()), palette.muted),
+            Text::of(age(now, entry.block_time), palette.muted),
+            change(ui, entry, &names, &settings.profile.currency),
+            Text::of(
+                fmt::hash(&entry.txid.to_string(), glyphs.ellipsis),
+                palette.value,
+            ),
+        ]);
+    }
+
+    let mut panel = Panel::new("HISTORY")
+        .row("address", Text::of(&address, palette.value))
+        .row(
+            "found",
+            Text::of(
+                fmt::plural(entries.len(), "transaction", "transactions"),
+                palette.accent,
+            ),
+        )
+        .rule()
+        .table(table);
+
+    if dropped > 0 {
+        // Said out loud. A truncated list that does not admit it reads as the
+        // whole history, and "my old payment is missing" is the wrong lesson.
+        panel = panel.note(Text::of(
+            format!(
+                "{dropped} older {} not shown — raise --limit, or narrow with --from-height",
+                if dropped == 1 { "entry" } else { "entries" }
+            ),
+            palette.warn,
+        ));
+    }
+    if shown
+        .iter()
+        .any(|entry| entry.net_native == SignedAmount::ZERO && entry.spent_something)
+    {
+        panel = panel.note(Text::of(
+            "a change of +0.00000000 that still spent something is a transfer to yourself: \
+             the value came back, and only the fee left",
+            palette.muted,
+        ));
+    }
+    panel = panel.note(Text::of(
+        "net effect per transaction, not gross: an output spent and mostly returned as \
+         change counts as what actually moved",
+        palette.muted,
+    ));
+
+    ui.panel(&panel);
+    ui.explain_panel();
+    Ok(())
+}
+
+/// The change column: the native leg, then any token legs.
+fn change(
+    ui: &Ui,
+    entry: &HistoryEntry,
+    names: &BTreeMap<CurrencyId, String>,
+    native: &str,
+) -> Text {
+    let palette = ui.theme.palette;
+    let glyphs = ui.theme.glyphs;
+    let style = if entry.is_outgoing() {
+        palette.warn
+    } else {
+        palette.ok
+    };
+
+    // Zero native is not "nothing happened" — a token-only transfer moves no
+    // native value at all — so the native leg is dropped when there are tokens
+    // to show instead of printing a misleading 0.
+    let mut text = if entry.net_native != SignedAmount::ZERO || entry.net_currencies.is_empty() {
+        Text::of(fmt::signed(entry.net_native.to_sat()), style)
+            .space()
+            .push(native, palette.muted)
+    } else {
+        Text::new()
+    };
+
+    for (currency, value) in &entry.net_currencies {
+        if text.width() > 0 {
+            text = text.push("  ", palette.muted);
+        }
+        let label = currency
+            .parse::<Address>()
+            .ok()
+            .map(|parsed| CurrencyId::from_bytes(parsed.hash()))
+            .and_then(|id| names.get(&id).cloned())
+            .map(|name| format!("{}@", fmt::untrusted(&name, NAME_BUDGET, glyphs.ellipsis)))
+            .unwrap_or_else(|| fmt::address(currency, glyphs.ellipsis));
+        text = text
+            .push(fmt::signed(value.to_sat()), style)
+            .space()
+            .push(label, palette.accent);
+    }
+    text
+}
+
+/// How long ago a block was mined, from its own timestamp.
+///
+/// Miner-chosen and only loosely monotonic, which is why it is shown as a rough
+/// age rather than a clock time — and why a block a little in the future is
+/// rendered as "just now" instead of a negative duration.
+fn age(now: u64, block_time: i64) -> String {
+    let then = u64::try_from(block_time).unwrap_or(0);
+    format!("{} ago", fmt::duration(now.saturating_sub(then)))
+}
+
+fn now_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
 }
 
 fn outpoint(ui: &Ui, txid: &str, vout: u32) -> Text {

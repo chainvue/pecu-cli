@@ -85,6 +85,7 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
                     target.address.as_deref(),
                     target.key.as_deref(),
                 ),
+                WalletCommand::History(args) => wallet::history_command(&ui, &settings, args),
             }
         }
 

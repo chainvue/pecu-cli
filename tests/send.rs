@@ -226,6 +226,106 @@ fn a_name_nobody_registered_is_refused_before_a_key_is_unlocked() {
         .stderr(contains("nothing on this chain is called"));
 }
 
+#[test]
+fn a_token_cannot_be_sent_out_of_an_identity_yet() {
+    let home = home();
+    generate(&home, "demo");
+    // `prepare_send_from_identity` takes no currency. Accepting both flags and
+    // silently ignoring one would send the native coin when a token was asked
+    // for, which is the wrong asset rather than a failure.
+    pecu(&home)
+        .args([
+            "send",
+            "--from-identity",
+            "alice@",
+            "--currency",
+            "bridge@",
+            "--to",
+            CHAIN_IDENTITY,
+            "--amount",
+            "1",
+            "--node",
+            DEAD_NODE,
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("cannot be used with"));
+}
+
+#[test]
+fn spending_from_an_identity_still_needs_a_key_to_sign_with() {
+    let home = home();
+    // The identity owns the money; a key still proves the authority.
+    pecu(&home)
+        .args([
+            "send",
+            "--from-identity",
+            "alice@",
+            "--to",
+            CHAIN_IDENTITY,
+            "--amount",
+            "1",
+            "--node",
+            DEAD_NODE,
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("no key to spend from"));
+}
+
+/// Paying out of a VerusID's own funds, which is the other half of the
+/// `HELD BY ID` row in `wallet balance`.
+#[test]
+#[ignore = "talks to api.verustest.net; needs the key for pecucli7@"]
+fn an_identity_funded_payment_returns_its_change_to_the_identity() {
+    let Ok(funded) = std::env::var("PECU_FUNDED_HOME") else {
+        eprintln!("PECU_FUNDED_HOME is not set — skipping");
+        return;
+    };
+
+    let assertion = Command::cargo_bin("pecu")
+        .expect("built")
+        .env("PECU_HOME", &funded)
+        .args([
+            "send",
+            "--from-identity",
+            "pecucli7@",
+            "--to",
+            "RComfCn4wHHsGR8vWBAU7T1r3tHHyxN9Hm",
+            "--amount",
+            "0.01",
+            "--dry-run",
+            "--json",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+    let document: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+
+    // The payer is the identity, not the signing key. A consumer reconciling
+    // balances against `from` would otherwise debit the wrong address.
+    assert_eq!(document["from"], "pecucli7@", "{document:#}");
+    assert_eq!(document["from_identity"], "pecucli7@");
+    assert_eq!(document["broadcast"], false);
+
+    // Two outputs: the payment, and the change going back to the identity as a
+    // pay-to-identity output rather than to the key that signed.
+    assert_eq!(document["outputs"], 2, "{document:#}");
+    let hex = document["hex"].as_str().expect("signed hex");
+
+    let explained = Command::cargo_bin("pecu")
+        .expect("built")
+        .env("PECU_HOME", &funded)
+        .args(["tx", "explain", hex, "--json"])
+        .assert()
+        .success();
+    let out = String::from_utf8_lossy(&explained.get_output().stdout).into_owned();
+    assert!(
+        out.contains("i7r29bDQfrwjkTxjv4bcYD6B1ZV7WZ4kGo"),
+        "the change did not go back to the identity:\n{out}"
+    );
+}
+
 /// The funded path. Set `PECU_FUNDED_HOME` to a config root holding a key with
 /// a little VRSCTEST in it — the Discord faucet is the way to get some — and
 /// this will build, sign and *not* broadcast a real payment.

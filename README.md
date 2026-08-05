@@ -64,9 +64,9 @@ before blaming the command — `cargo run` is usually what you are measuring.
 |---|---|---|
 | `pecu doctor` | Node reachability, chain tip, config paths, build info | ✅ done |
 | `pecu key gen\|import\|list\|show\|export\|phrase` | Encrypted keystore (Argon2id + ChaCha20-Poly1305) | ✅ done |
-| `pecu wallet balance\|utxos` | Spendable, withheld, token and unconfirmed balances | ✅ done |
+| `pecu wallet balance\|utxos\|history` | Spendable, withheld, token and unconfirmed balances; the transaction log | ✅ done |
 | `pecu tx explain` | Says what every output in a transaction actually *is* | ✅ done |
-| `pecu send` | Transparent sends, native and token | ✅ done |
+| `pecu send` | Transparent sends: native, token, or out of a VerusID's own funds | ✅ done |
 | `pecu plan send` / `pecu sign` / `pecu broadcast` | The air-gap trio, over files or QR codes | ✅ done |
 | `pecu id show\|register` | Read an identity; register one (two-phase, resumable) | ✅ done |
 | `pecu id update\|revoke\|recover` | The rest of the lifecycle | M7b |
@@ -170,6 +170,7 @@ pecu wallet balance --address iJhCezBExJHvtyH3fGhNnt2NhU4Ztkf2yq
 pecu wallet balance --key demo    # the address of a stored key
 pecu wallet balance               # the sole stored key, if there is exactly one
 pecu wallet utxos --key demo
+pecu wallet history --key demo --from-height 1176000
 ```
 
 ```
@@ -258,6 +259,36 @@ satoshi.
 - **Several stored keys are refused, not guessed between.** Picking one silently
   would report the wrong address's balance.
 
+`pecu wallet history` is the other view: what happened, rather than what is
+left.
+
+```
+┌─ HISTORY ──────────────────────────────────────────────────────┐
+│ address   RComfCn4wHHsGR8vWBAU7T1r3tHHyxN9Hm                   │
+│ found     19 transactions                                      │
+├────────────────────────────────────────────────────────────────┤
+│    HEIGHT        WHEN                CHANGE  TRANSACTION       │
+│ 1,177,072  1h 44m ago  -0.00010000 VRSCTEST  97985193dc…242fe5 │
+│ 1,177,079  1h 35m ago  -0.00010000 VRSCTEST  e0c5c6972e…beb532 │
+│ 1,177,175  4m 40s ago  -1.00010000 VRSCTEST  ea47ee557a…b5b8b3 │
+│ 1,177,178  3m 13s ago  +0.40000000 VRSCTEST  2e10e7944e…7a8bc5 │
+└────────────────────────────────────────────────────────────────┘
+```
+
+- **Net per transaction, not gross.** An output spent and mostly returned as
+  change counts as what actually moved, which is the number a reader wants.
+- **A `+0.00000000` that still spent something is a transfer to yourself** — the
+  value came back and only the fee left. The panel says so when it happens,
+  because a zero that means "nothing happened" and a zero that means "you paid a
+  fee" are different answers.
+- **A token-only transfer moves no native value at all**, so the change column
+  shows the token leg instead of a misleading `0`.
+- **An open-ended `--from-height` is closed at the tip**, not at `u32::MAX` — the
+  daemon refuses that with `-1: JSON integer out of range`, which reads as a
+  broken node rather than as an argument it dislikes.
+- `--limit` drops from the *front*: a terminal scrolls, so the most recent entry
+  should be the one still on screen. When it truncates, it says how many it hid.
+
 A long-lived mining address can have a UTXO set far past the SDK's 8 MiB reply
 ceiling. That is a memory bound against a hostile node, not a bug; raise it for a
 profile with `max_response_mb` and the error says so.
@@ -303,6 +334,44 @@ straight back:
 ```sh
 pecu send --to bob@ --amount 0.1 --dry-run --json | jq -r .hex | pecu tx explain -
 ```
+
+**Paying out of a VerusID's own funds** is the other half of the `HELD BY ID`
+row in `wallet balance`. Money flows *into* an identity with an ordinary
+`--to alice@`; getting it back out needs `--from-identity`, because the inputs
+are pay-to-identity outputs and each carries a fulfillment rather than a
+scriptSig:
+
+```sh
+pecu send --from-identity alice@ --to RXyz…7Qa4 --amount 1 --from alicekey
+```
+
+```
+┌─ REVIEW ──────────────────────────────────────────────────────┐
+│ from        pecucli7@ (the identity's own funds)              │
+│ signed by   RComfCn4wHHsGR8vWBAU7T1r3tHHyxN9Hm (faucet)       │
+│ to          RJ7gsKDjUjPS8XZzENqmQMmWJRLuTnw5hp                │
+│ amount      0.10000000 VRSCTEST                               │
+│ change      0.49980000 VRSCTEST                               │
+├─ OUTPUTS AS BUILT ────────────────────────────────────────────┤
+│ #0 0.10000000 VRSCTEST                                        │
+│      → RJ7gsKDjUjPS8XZzENqmQMmWJRLuTnw5hp                     │
+│ #1 0.49980000 VRSCTEST                                        │
+│      → i7r29bDQ… held for a VerusID, not a key                │
+└───────────────────────────────────────────────────────────────┘
+```
+
+The identity owns the money and the key proves the authority, so the panel names
+both — `from` is the payer and `signed by` is the signer, and conflating them on
+a spend-confirmation panel would misstate whose balance is about to drop. The
+change goes back to the identity, not to the key. `--json` carries
+`from_identity` for the same reason.
+
+The SDK refuses ahead of time everything the chain would refuse later with a
+message naming nothing: a revoked identity, a key the identity does not list, or
+fewer distinct keys than its `minimumsignatures`. That last one currently means
+`pecu send` cannot spend from a multi-signature identity at all — it signs with
+one key — and the error says so rather than building something that dies at the
+daemon.
 
 **The dry run is enforced by the SDK's types, not by remembering.**
 `flows::prepare_send` takes a `ChainReader` and no `Broadcaster`, so what it

@@ -17,7 +17,8 @@ use thiserror::Error;
 use verus_sdk::decode::{decode_output_script, OutputKind};
 use verus_sdk::money::{Amount, Utxo};
 use verus_sdk::network::{
-    prepare_send, prepare_send_token, spendable, ChainReader, FlowError, RpcError, Unsent,
+    prepare_send, prepare_send_from_identity, prepare_send_token, spendable, ChainReader,
+    FlowError, RpcError, Unsent,
 };
 use verus_sdk::send::CurrencyId;
 use verus_sdk::verus_keys::{Address, AddressKind, PrivateKey};
@@ -28,6 +29,9 @@ use crate::config::Settings;
 use crate::keystore::{self, Envelope, Keystore};
 use crate::node::{self, Node};
 use crate::ui::{fmt, Panel, Text, Ui};
+
+/// How much of an identity name is ever printed on the review panel.
+const IDENTITY_BUDGET: usize = 40;
 
 #[derive(Debug, Error, Diagnostic)]
 pub enum SendError {
@@ -151,9 +155,10 @@ fn attempt(ui: &Ui, settings: &Settings, globals: &Globals, args: &SendArgs) -> 
     let secret = keystore::passphrase(&format!("passphrase for `{}`", envelope.label), false)?;
     let key = envelope.unlock(&secret)?;
 
-    let unsent = match currency {
-        None => build_native(ui, &node, &key, &recipient, amount)?,
-        Some(currency) => build_token(ui, &node, &key, &recipient, amount, currency)?,
+    let unsent = match (&args.from_identity, currency) {
+        (Some(identity), _) => build_from_identity(ui, &node, &key, identity, &recipient, amount)?,
+        (None, None) => build_native(ui, &node, &key, &recipient, amount)?,
+        (None, Some(currency)) => build_token(ui, &node, &key, &recipient, amount, currency)?,
     };
 
     let decoded =
@@ -163,11 +168,23 @@ fn attempt(ui: &Ui, settings: &Settings, globals: &Globals, args: &SendArgs) -> 
     // point on each path below. The signed hex is the one thing here that cannot
     // be recovered afterwards, so every exit carries it — including the failing
     // one, where it is what lets you find out what actually happened.
-    let plan = plan_json(&unsent, &decoded, &envelope.address);
+    let plan = plan_json(
+        &unsent,
+        &decoded,
+        args.from_identity.as_deref().unwrap_or(&envelope.address),
+        args.from_identity.as_deref(),
+    );
 
     if !ui.is_json() {
         ui.panel(&review(
-            ui, settings, &envelope, &recipient, amount, &unsent, &decoded,
+            ui,
+            settings,
+            &envelope,
+            args.from_identity.as_deref(),
+            &recipient,
+            amount,
+            &unsent,
+            &decoded,
         ));
     }
 
@@ -328,6 +345,97 @@ fn build_native(
     Ok(unsent)
 }
 
+/// Pay out of what a VerusID holds, rather than out of the key's own address.
+///
+/// A different signature from an ordinary spend: the inputs are the identity's
+/// pay-to-identity outputs, each carrying a fulfillment rather than a
+/// scriptSig, and the surplus returns to the identity rather than to the key.
+/// This is the everyday shape of money on Verus — funds live under an identity
+/// — and it is the other half of what `wallet balance` reports as HELD BY ID.
+///
+/// The SDK refuses ahead of time everything the chain would refuse later with a
+/// message that names nothing: a revoked identity, a key the identity does not
+/// list, or fewer distinct keys than its `minimumsignatures`.
+fn build_from_identity(
+    ui: &Ui,
+    node: &Node,
+    key: &PrivateKey,
+    identity: &str,
+    to: &Recipient,
+    amount: Amount,
+) -> Result<Unsent<verus_sdk::network::Sent>, miette::Report> {
+    ui.sdk(format!(
+        "verus_sdk::network::prepare_send_from_identity(&node, &[&key], {identity:?}, {:?}, {})",
+        to.address,
+        amount.to_coins_string()
+    ));
+    let unsent = prepare_send_from_identity(node, &[key], identity, &to.address, amount)
+        .map_err(|source| identity_spend_error(identity, source))?;
+    ui.sdk_result(format!(
+        "Unsent<Sent> {{ txid: {}, fee: {}, change: {} }}",
+        unsent.outcome.txid, unsent.outcome.fee, unsent.outcome.change
+    ));
+    Ok(unsent)
+}
+
+/// Turn the SDK's pre-flight refusals into something that says what to do.
+fn identity_spend_error(identity: &str, source: FlowError) -> SendError {
+    use verus_sdk::verus_tx::TxError;
+
+    // `TxError::InsufficientFunds`, not `FlowError::InsufficientFunds`. The
+    // identity path funds itself from the identity's own outputs and runs out
+    // inside the builder, so the flow-level variant — the one the ordinary send
+    // produces — is never reached here.
+    //
+    // It needs its own wording either way. The ordinary message ends "value
+    // held by a VerusID cannot be moved by this key", which is exactly what
+    // this command is doing, and repeating it would contradict the operation
+    // being attempted.
+    if let FlowError::Tx(verus_sdk::verus_tx::TxError::InsufficientFunds {
+        required,
+        available,
+    }) = &source
+    {
+        return SendError::Insufficient {
+            address: identity.to_string(),
+            advice: format!(
+                "{identity} itself holds {} and {} is needed including the fee. This spends what \
+                 the identity holds, not what the signing key holds — pay the identity to fund \
+                 it, and `pecu wallet balance` on its i-address is the figure that matters.",
+                fmt::sats(*available),
+                fmt::sats(*required),
+            ),
+        };
+    }
+
+    let advice = match &source {
+        FlowError::NoSuchIdentity(_) => {
+            "check the name — `pecu id show <name@>` reads it off the chain".to_string()
+        }
+        FlowError::Tx(TxError::AlreadyRevoked) => {
+            "a revoked identity cannot spend. Its recovery authority can restore it first"
+                .to_string()
+        }
+        FlowError::Tx(TxError::NotAPrimaryAddress { address }) => format!(
+            "{address} is not one of {identity}'s primary addresses — `pecu id show {identity}` \
+             lists them, and `pecu key list` shows what you hold"
+        ),
+        // Worth spelling out rather than leaving as a count: this command takes
+        // one key, so an m-of-n identity cannot be spent from here at all yet.
+        FlowError::Tx(TxError::NotEnoughSigners { supplied, required }) => format!(
+            "{identity} needs {required} signatures and this supplied {supplied}. \
+             `pecu send` signs with one key, so a multi-signature identity needs the air-gap \
+             path — `pecu plan send` and `pecu sign` — once that learns identity inputs"
+        ),
+        _ => "run `pecu doctor`, or point somewhere else with --node".to_string(),
+    };
+    SendError::Flow {
+        what: "building the identity-funded payment",
+        advice,
+        source: Box::new(source),
+    }
+}
+
 fn build_token(
     ui: &Ui,
     node: &Node,
@@ -400,6 +508,7 @@ fn review(
     ui: &Ui,
     settings: &Settings,
     from: &Envelope,
+    identity: Option<&str>,
     to: &Recipient,
     amount: Amount,
     unsent: &Unsent<verus_sdk::network::Sent>,
@@ -409,13 +518,35 @@ fn review(
     let glyphs = ui.theme.glyphs;
     let currency = &settings.profile.currency;
 
-    let mut panel = Panel::new("REVIEW")
-        .row(
+    // Who the money leaves, which is not always the key that signs for it.
+    // Naming the signing key here while an identity paid would misstate the
+    // payer on the one panel whose job is to be checked before a spend.
+    let mut panel = Panel::new("REVIEW");
+    panel = match identity {
+        None => panel.row(
             "from",
             Text::of(&from.address, palette.value)
                 .space()
                 .push(format!("({})", from.label), palette.muted),
-        )
+        ),
+        Some(identity) => panel
+            .row(
+                "from",
+                Text::of(
+                    fmt::untrusted(identity, IDENTITY_BUDGET, glyphs.ellipsis),
+                    palette.accent,
+                )
+                .space()
+                .push("(the identity's own funds)", palette.muted),
+            )
+            .row(
+                "signed by",
+                Text::of(&from.address, palette.value)
+                    .space()
+                    .push(format!("({})", from.label), palette.muted),
+            ),
+    };
+    panel = panel
         .row("to", Text::of(&to.shown, palette.accent))
         .row(
             "amount",
@@ -611,9 +742,14 @@ fn plan_json(
     unsent: &Unsent<verus_sdk::network::Sent>,
     decoded: &Option<TxV4>,
     from: &str,
+    identity: Option<&str>,
 ) -> serde_json::Value {
     serde_json::json!({
+        // Who the money leaves. For an identity-funded payment that is the
+        // identity, not the key that signed for it — a consumer reconciling
+        // balances against `from` would otherwise debit the wrong address.
         "from": from,
+        "from_identity": identity,
         "txid": unsent.txid,
         "fee": unsent.outcome.fee.to_sat(),
         "change": unsent.outcome.change.to_sat(),
@@ -716,7 +852,7 @@ mod tests {
         }
     }
 
-    fn rendered() -> String {
+    fn rendered_for(identity: Option<&str>) -> String {
         let ui = Ui::new(ThemeFlag::Phosphor, false, false);
         let settings =
             Settings::resolve_in(Paths::at("/nonexistent"), None, None).expect("builtin");
@@ -739,12 +875,17 @@ mod tests {
             &ui,
             &settings,
             &envelope(),
+            identity,
             &recipient,
             Amount::from_sat(10_000_000),
             &unsent,
             &Some(transaction),
         );
         panel.render(&ui.theme)
+    }
+
+    fn rendered() -> String {
+        rendered_for(None)
     }
 
     #[test]
@@ -865,5 +1006,39 @@ mod tests {
         );
         assert_eq!(document["outcome"], "unknown");
         assert_eq!(document["hex"], "0400008085202f89");
+    }
+
+    #[test]
+    fn an_identity_funded_review_names_the_identity_as_the_payer() {
+        let out = crate::ui::text::strip_ansi(&rendered_for(Some("pecucli7@")));
+        // The money leaves the identity; the key only proves the authority.
+        // Naming the key as `from` would misstate whose balance drops, on the
+        // one panel whose entire job is to be read before a spend.
+        assert!(out.contains("from"), "{out}");
+        assert!(out.contains("pecucli7@"), "{out}");
+        assert!(out.contains("the identity's own funds"), "{out}");
+        assert!(out.contains("signed by"), "{out}");
+    }
+
+    #[test]
+    fn an_ordinary_review_does_not_claim_an_identity_paid() {
+        let out = crate::ui::text::strip_ansi(&rendered());
+        assert!(!out.contains("the identity's own funds"), "{out}");
+        assert!(!out.contains("signed by"), "{out}");
+    }
+
+    #[test]
+    fn the_identity_funded_review_frame_stays_rectangular() {
+        let out = crate::ui::text::strip_ansi(&rendered_for(Some("pecucli7@")));
+        let widths: Vec<usize> = out
+            .lines()
+            .filter(|line| line.starts_with(['\u{250c}', '\u{2502}', '\u{251c}', '\u{2514}']))
+            .map(UnicodeWidthStr::width)
+            .collect();
+        assert!(!widths.is_empty(), "nothing was framed:\n{out}");
+        assert!(
+            widths.windows(2).all(|pair| pair[0] == pair[1]),
+            "ragged frame {widths:?}:\n{out}"
+        );
     }
 }

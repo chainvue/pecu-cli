@@ -205,6 +205,86 @@ fn utxos_list_the_outputs_behind_the_balance() {
 }
 
 #[test]
+fn history_needs_an_address_like_every_other_read() {
+    let home = home();
+    pecu(&home)
+        .args(["wallet", "history"])
+        .assert()
+        .failure()
+        .stderr(contains("no address to look at"));
+}
+
+#[test]
+#[ignore = "talks to api.verustest.net"]
+fn history_lists_what_this_project_actually_did() {
+    let home = home();
+    // The funded address, if this machine has it. Any address works for the
+    // shape assertions; only the known-txid one needs ours.
+    let target = std::env::var("PECU_FUNDED_ADDRESS")
+        .unwrap_or_else(|_| "RComfCn4wHHsGR8vWBAU7T1r3tHHyxN9Hm".to_string());
+
+    let assertion = pecu(&home)
+        .args([
+            "wallet",
+            "history",
+            "--address",
+            &target,
+            "--from-height",
+            "1176000",
+            "--json",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+    let document: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+
+    let entries = document["entries"].as_array().expect("entries");
+    assert!(!entries.is_empty(), "{document:#}");
+
+    // Oldest first, and the SDK promises it — a wallet that renders these in
+    // node order would show a shuffled ledger.
+    let heights: Vec<u64> = entries
+        .iter()
+        .map(|entry| entry["height"].as_u64().expect("a height"))
+        .collect();
+    assert!(
+        heights.windows(2).all(|pair| pair[0] <= pair[1]),
+        "not oldest-first: {heights:?}"
+    );
+
+    // The 100-coin identity registration this project paid for. Net, so it is
+    // the whole cost rather than the gross value of the inputs it consumed.
+    let registration = entries
+        .iter()
+        .find(|entry| entry["net_satoshis"].as_i64().unwrap_or(0) < -10_000_000_000i64);
+    if let Some(entry) = registration {
+        assert_eq!(entry["outgoing"], true, "{entry:#}");
+        assert_eq!(entry["spent_something"], true, "{entry:#}");
+    }
+}
+
+#[test]
+#[ignore = "talks to api.verustest.net"]
+fn an_open_ended_range_is_closed_at_the_tip_not_at_u32_max() {
+    let home = home();
+    // `u32::MAX` as the end height comes back from the daemon as
+    // `-1: JSON integer out of range`, which reads as a broken node rather
+    // than as an argument it dislikes. It has to be closed at the tip instead.
+    pecu(&home)
+        .args([
+            "wallet",
+            "history",
+            "--address",
+            "RComfCn4wHHsGR8vWBAU7T1r3tHHyxN9Hm",
+            "--from-height",
+            "1176000",
+            "--json",
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
 #[ignore = "talks to api.verustest.net"]
 fn the_mempool_is_actually_readable_through_the_public_node() {
     // The guard that matters most here, and the one an assertion on a *pending*

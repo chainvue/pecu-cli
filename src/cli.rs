@@ -176,6 +176,12 @@ pub struct SendArgs {
     /// Send a token instead of the chain's own currency
     #[arg(long, short = 'c', value_name = "NAME@|i-ADDRESS")]
     pub currency: Option<String>,
+
+    /// Pay out of funds a VerusID holds, rather than out of the key's own
+    /// address. `--from` then names a key that is one of its primary
+    /// addresses: the identity owns the money, the key proves the authority
+    #[arg(long, value_name = "NAME@|i-ADDRESS", conflicts_with = "currency")]
+    pub from_identity: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -238,6 +244,27 @@ pub enum WalletCommand {
         #[command(flatten)]
         target: WalletTarget,
     },
+    /// Every transaction that touched an address, oldest first
+    History(HistoryArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct HistoryArgs {
+    #[command(flatten)]
+    pub target: WalletTarget,
+
+    /// Start at this height. Without a range the whole chain is searched,
+    /// which on a busy address is a very large reply
+    #[arg(long, value_name = "HEIGHT")]
+    pub from_height: Option<u32>,
+
+    /// Stop at this height
+    #[arg(long, value_name = "HEIGHT")]
+    pub to_height: Option<u32>,
+
+    /// Show at most this many, most recent last
+    #[arg(long, short = 'n', value_name = "COUNT", default_value_t = 25)]
+    pub limit: usize,
 }
 
 /// Which address to look at. Read-only commands take an address, never a key —
