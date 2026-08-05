@@ -153,6 +153,26 @@ fn flow(what: &'static str, source: FlowError) -> LifecycleError {
         FlowError::NoSuchIdentity(_) => {
             "check the name; `pecu id show <name@>` reads it off the chain".to_string()
         }
+        // Caught before signing, and the commonest way to get these wrong.
+        // Falling through to "run `pecu doctor`" would send someone looking at
+        // the node when the node is fine and the key simply is not the one.
+        FlowError::Tx(TxError::NotAPrimaryAddress { .. }) => {
+            "`pecu id show <name@>` lists the addresses that control it, and `pecu key list` \
+             shows what you hold. A recovery may have handed the identity to different keys"
+                .to_string()
+        }
+        FlowError::Tx(TxError::NotEnoughSigners { supplied, required }) => format!(
+            "{supplied} of the {required} required signatures. These commands sign with one \
+             key, so an identity needing more than that cannot be changed from here yet"
+        ),
+        // The fee, not the identity. `--from` names the key that pays as well
+        // as the key that signs, so a correct authority with an empty address
+        // still cannot go anywhere.
+        FlowError::Tx(TxError::InsufficientFunds { required, .. }) => format!(
+            "the signing key pays the fee as well, and it holds nothing. Send it at least {} \
+             — `pecu key list` shows its address",
+            fmt::sats(*required)
+        ),
         // The pre-check the SDK does so consensus does not have to refuse
         // anonymously. Its message already names the authority and the
         // threshold, so this only has to say where to look.

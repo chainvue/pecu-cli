@@ -288,6 +288,8 @@ fn an_identity_funded_payment_returns_its_change_to_the_identity() {
         .env("PECU_HOME", &funded)
         .args([
             "send",
+            "--from",
+            "faucet",
             "--from-identity",
             "pecucli7@",
             "--to",
@@ -345,6 +347,8 @@ fn a_dry_run_builds_real_signed_bytes_without_sending_them() {
         .env("PECU_HOME", &funded)
         .args([
             "send",
+            "--from",
+            "faucet",
             "--to",
             CHAIN_IDENTITY,
             "--amount",
@@ -389,6 +393,8 @@ fn json_output_is_not_consent_to_spend() {
         .env("PECU_HOME", &funded)
         .args([
             "send",
+            "--from",
+            "faucet",
             "--to",
             CHAIN_IDENTITY,
             "--amount",
@@ -422,6 +428,8 @@ fn json_output_is_a_single_document() {
         .env("PECU_HOME", &funded)
         .args([
             "send",
+            "--from",
+            "faucet",
             "--to",
             CHAIN_IDENTITY,
             "--amount",

@@ -365,7 +365,7 @@ fn a_payment_in_flight_is_visible_before_it_confirms() {
         documents.into_iter().next().expect("one document")
     };
 
-    let before = run(&["wallet", "balance", "--json"]);
+    let before = run(&["wallet", "balance", "--key", "faucet", "--json"]);
     let address = before["address"].as_str().expect("an address").to_string();
     let confirmed = before["total_satoshis"].as_u64().expect("a total");
 
@@ -383,11 +383,11 @@ fn a_payment_in_flight_is_visible_before_it_confirms() {
     // To itself, so one address sees the input being spent, the payment and the
     // change — and so the test costs a fee rather than a payment.
     let sent = run(&[
-        "send", "--to", &address, "--amount", "0.001", "--yes", "--json",
+        "send", "--from", "faucet", "--to", &address, "--amount", "0.001", "--yes", "--json",
     ]);
     let txid = sent["txid"].as_str().expect("a txid").to_string();
 
-    let during = run(&["wallet", "balance", "--json"]);
+    let during = run(&["wallet", "balance", "--key", "faucet", "--json"]);
     let pending = &during["pending"];
     assert_eq!(pending["known"], true, "{during:#}");
     assert!(
@@ -410,7 +410,7 @@ fn a_payment_in_flight_is_visible_before_it_confirms() {
         "pending value leaked into the confirmed total:\n{during:#}"
     );
 
-    let outputs = run(&["wallet", "utxos", "--json"]);
+    let outputs = run(&["wallet", "utxos", "--key", "faucet", "--json"]);
     let listed = outputs["outputs"].as_array().expect("outputs");
     assert!(
         listed

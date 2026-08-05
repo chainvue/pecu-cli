@@ -18,6 +18,10 @@ const DEAD_NODE: &str = "https://127.0.0.1:1";
 const OURS: &str = "pecucli7@";
 const OURS_ADDRESS: &str = "i7r29bDQfrwjkTxjv4bcYD6B1ZV7WZ4kGo";
 
+/// The throwaway registered to prove revoke and recover, now held by a key
+/// the faucet does not control.
+const RESCUED: &str = "iATt9qRxvAwpZKFehmgofrPct8MnhZ6QQe";
+
 fn home() -> TempDir {
     tempfile::tempdir().expect("a temp dir")
 }
@@ -128,6 +132,55 @@ fn recovering_needs_min_sigs_to_come_with_the_addresses_it_counts() {
         .stderr(contains("--primary"));
 }
 
+/// Recovery really does take an identity away from whoever held it.
+///
+/// `pecurevoke1@` was registered under the faucet key, handed to `pecucli7@` as
+/// its recovery authority, revoked, and then recovered into a fresh key. The
+/// original key can no longer change it — which is the entire point of having a
+/// recovery authority, and the assertion is cheap because it is a refusal.
+///
+/// The full cycle, on VRSCTEST:
+/// register `9129ede5`, hand over `d6e95642`, revoke `8539a2e6`,
+/// recover `7cebc916`.
+#[test]
+#[ignore = "talks to api.verustest.net"]
+fn a_recovered_identity_no_longer_answers_to_the_keys_it_was_taken_from() {
+    let Ok(funded) = std::env::var("PECU_FUNDED_HOME") else {
+        eprintln!("PECU_FUNDED_HOME is not set — skipping");
+        return;
+    };
+
+    let assertion = Command::cargo_bin("pecu")
+        .expect("built")
+        .env("PECU_HOME", &funded)
+        .args([
+            "id",
+            "update",
+            RESCUED,
+            "--from",
+            "faucet",
+            "--min-sigs",
+            "1",
+            "--allow-authority-change",
+            "--dry-run",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assertion.get_output().stderr).into_owned();
+
+    // Short phrases only, and shorter than feels necessary: miette wraps at the
+    // terminal width, and both "primary addresses" and "pecu key list" land
+    // across a line break here.
+    assert!(stderr.contains("is not one of the identity"), "{stderr}");
+    // And the advice has to point at the identity, not at the node — the node
+    // is fine, the key is simply not the one any more.
+    assert!(stderr.contains("key list"), "{stderr}");
+    assert!(
+        !stderr.contains("pecu doctor"),
+        "a wrong key is not a node problem:\n{stderr}"
+    );
+}
+
 /// The consensus rule, caught before a fee is spent.
 ///
 /// `identity.cpp` refuses a revocation whose subject is its own recovery
@@ -145,7 +198,14 @@ fn revoking_an_identity_that_is_its_own_recovery_authority_is_refused_locally() 
     let assertion = Command::cargo_bin("pecu")
         .expect("built")
         .env("PECU_HOME", &funded)
-        .args(["id", "revoke", OURS_ADDRESS, "--dry-run"])
+        .args([
+            "id",
+            "revoke",
+            OURS_ADDRESS,
+            "--from",
+            "faucet",
+            "--dry-run",
+        ])
         .assert()
         .failure();
     let stderr = String::from_utf8_lossy(&assertion.get_output().stderr).into_owned();
@@ -167,7 +227,14 @@ fn recovering_an_identity_that_is_not_revoked_says_so() {
     Command::cargo_bin("pecu")
         .expect("built")
         .env("PECU_HOME", &funded)
-        .args(["id", "recover", OURS_ADDRESS, "--dry-run"])
+        .args([
+            "id",
+            "recover",
+            OURS_ADDRESS,
+            "--from",
+            "faucet",
+            "--dry-run",
+        ])
         .assert()
         .failure()
         .stderr(contains("not revoked"));
@@ -194,6 +261,8 @@ fn an_update_carries_through_every_field_it_was_not_told_to_change() {
             "id",
             "update",
             OURS_ADDRESS,
+            "--from",
+            "faucet",
             "--primary",
             "RComfCn4wHHsGR8vWBAU7T1r3tHHyxN9Hm",
             "--min-sigs",
