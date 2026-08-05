@@ -167,6 +167,7 @@ unlock anything cannot spend anything.
 
 ```sh
 pecu wallet balance --address iJhCezBExJHvtyH3fGhNnt2NhU4Ztkf2yq
+pecu wallet balance --address bob@   # a VerusID name is resolved
 pecu wallet balance --key demo    # the address of a stored key
 pecu wallet balance               # the sole stored key, if there is exactly one
 pecu wallet utxos --key demo
@@ -258,6 +259,21 @@ satoshi.
   answer a wallet must never give.
 - **Several stored keys are refused, not guessed between.** Picking one silently
   would report the wrong address's balance.
+
+**A VerusID name works wherever an address does**, and the panel says what it
+resolved to — an i-address alone does not tell you whether `bob@` meant the
+identity you had in mind:
+
+```
+│ address   iDxZS81ZCdqgdFVF6H1BfW43uov8ZUe222  (jbratchet.VRSCTEST@) │
+```
+
+The cost is that a typo'd *address* is no longer refused offline: anything that
+does not parse as one is looked up as a name first. The refusal is the same, one
+request later. What is **not** conflated is a missing identity and an
+unreachable node — only the daemon's own `-5` and `-8` mean "that names
+nothing", and anything else says the node failed rather than denying the
+identity exists.
 
 `pecu wallet history` is the other view: what happened, rather than what is
 left.
@@ -527,7 +543,7 @@ The success message says *broadcast*, not *registered* — the identity does not
 exist until the transaction is mined, and `id show` will say nothing is called
 that until then.
 
-### `pecu id update` · `revoke` · `recover`
+### `pecu id update` · `revoke` · `recover` · `unlock`
 
 ```sh
 pecu id update i7r29bDQ… --recovery guardian@ --allow-authority-change
@@ -598,9 +614,10 @@ holder, not for the recovery authority, not for anyone.
 **Timelocks: two forms, and one of them cannot be unlocked by hand.**
 
 ```sh
-pecu id update i7r29bDQ… --lock-until 1200000   # absolute height
-pecu id update i7r29bDQ… --unlock-delay 100     # locked until someone asks
-pecu id unlock i7r29bDQ…                        # ask
+pecu id update i7r29bDQ… --lock-until 1200000    # absolute height
+pecu id update i7r29bDQ… --unlock-delay 100      # locked until someone asks
+pecu id update i7r29bDQ… --clear-timelock        # remove one
+pecu id unlock i7r29bDQ… --extra-blocks 100      # ask, and wait longer than the floor
 ```
 
 `timelock` on an identity is **either an absolute height or a relative delay**,

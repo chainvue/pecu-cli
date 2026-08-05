@@ -22,6 +22,23 @@ PENDING
   NET       -0.75010000  VRSCTEST
   - pending: in this node's mempool, not in any block, and excluded from the totals above
 
+IDENTITY
+  name           pecu.VRSCTEST@
+  last change    block 1,177,214   2026-08-05 11:50 UTC  (1h 01m ago)
+
+TIMELOCK
+  unlock delay   10 blocks
+  state          ! locked, and no unlock requested
+  - the delay does not start until an unlock is asked for
+
+IDENTITY
+  name          dude.VRSCTEST@
+
+TIMELOCK
+  unlocked at   block 1,177,407
+  state         ok unlocked
+  - the height stays on the identity after a countdown finishes — a leftover, not a pending unlock
+
 UTXOS
   OUTPOINT                     AMOUNT   CONF  STATUS
   9f2c1ab4de...21d4e9:0  250.00000000  1,204  ok spendable

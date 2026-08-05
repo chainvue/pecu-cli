@@ -126,6 +126,55 @@ pub fn gallery(ui: &Ui) {
     ui.panel(&wallet);
     ui.blank();
 
+    // ── the identity panel, and the two timelock forms ──────────────────────
+    //
+    // Both forms are here because they are the pair most easily rendered
+    // wrongly: one field means an absolute height or a relative delay
+    // depending on a flag, and the tense has to follow. A countdown that has
+    // elapsed keeps its height forever, so "unlocked at" is as ordinary a
+    // state as "locked for N more".
+    let identity = Panel::new("IDENTITY")
+        .row("name", Text::of("pecu.VRSCTEST@", palette.accent))
+        .row(
+            "last change",
+            Text::of("block 1,177,214", palette.value)
+                .push("   ", palette.muted)
+                .push("2026-08-05 11:50 UTC", palette.value)
+                .push("  (1h 01m ago)", palette.muted),
+        )
+        .section("TIMELOCK")
+        .row("unlock delay", Text::of("10 blocks", palette.value))
+        .row(
+            "state",
+            Text::of(glyphs.warn, palette.warn)
+                .space()
+                .push("locked, and no unlock requested", palette.warn),
+        )
+        .note(Text::of(
+            "the delay does not start until an unlock is asked for",
+            palette.muted,
+        ));
+    ui.panel(&identity);
+    ui.blank();
+
+    let unlocked = Panel::new("IDENTITY")
+        .row("name", Text::of("dude.VRSCTEST@", palette.accent))
+        .section("TIMELOCK")
+        .row("unlocked at", Text::of("block 1,177,407", palette.value))
+        .row(
+            "state",
+            Text::of(glyphs.ok, palette.ok)
+                .space()
+                .push("unlocked", palette.ok),
+        )
+        .note(Text::of(
+            "the height stays on the identity after a countdown finishes — a leftover, not a \
+             pending unlock",
+            palette.muted,
+        ));
+    ui.panel(&unlocked);
+    ui.blank();
+
     // ── a table with headers, the shape `wallet utxos` will use ─────────────
     let mut utxos = Table::new(vec![
         Column::left("outpoint"),
