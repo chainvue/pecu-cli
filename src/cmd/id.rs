@@ -226,6 +226,10 @@ pub fn show(ui: &Ui, settings: &Settings, name: &str) -> miette::Result<()> {
         );
     }
     let mut self_held = false;
+    // Tracked separately from `self_held` because only this one decides whether
+    // the identity can be revoked at all. An identity may be its own revocation
+    // authority and still be revocable, provided somebody else can recover it.
+    let mut self_recovery = false;
     for (label, field) in [
         ("revocation", "revocationauthority"),
         ("recovery", "recoveryauthority"),
@@ -235,6 +239,7 @@ pub fn show(ui: &Ui, settings: &Settings, name: &str) -> miette::Result<()> {
             if authority == record.identity_address {
                 row = row.push("  (itself)", palette.warn);
                 self_held = true;
+                self_recovery |= field == "recoveryauthority";
             }
             panel = panel.row(label, row);
         }
@@ -260,13 +265,23 @@ pub fn show(ui: &Ui, settings: &Settings, name: &str) -> miette::Result<()> {
         );
     }
 
+    if self_recovery {
+        // The consensus rule, and the one fact about an identity that a reader
+        // is most likely to be wrong about. It is the *recovery* authority that
+        // decides this; self-revocation on its own is fine.
+        panel = panel.note(Text::of(
+            "this identity cannot be revoked: it is its own recovery authority, and consensus \
+             refuses a revocation nobody could undo",
+            palette.warn,
+        ));
+    }
     if self_held {
         // The authority is the identity, so it answers to the primary keys
-        // above: there is no independent guardian. It is not permanent — an
-        // update can repoint either authority — but it is worth noticing.
+        // above: there is no independent guardian. Those keys can still hand it
+        // to another VerusID, and that hand-off is one-way.
         panel = panel.note(Text::of(
             "an authority pointing at the identity itself answers to the same primary keys \
-             above; an identity update can repoint it",
+             above; they can hand it to another VerusID, but cannot take it back afterwards",
             palette.muted,
         ));
     }
@@ -669,22 +684,38 @@ fn cost_panel(
              first confirms",
             palette.muted,
         ))
-        // What the default actually costs you: there is no *independent*
-        // guardian. The revocation and recovery authority is the identity
-        // itself, so it answers to the same keys listed above -- lose those and
-        // nothing else can recover it.
+        // What the default actually costs you, and it is worse than "no
+        // independent guardian". A consensus rule in `identity.cpp` refuses a
+        // revocation whose subject is its own **recovery** authority, because
+        // nobody could recover it afterwards:
         //
-        // Deliberately not "this cannot be changed later", which is false. An
-        // identity update can repoint either authority; `verus_tx`'s own
-        // `UpdateParams::allow_authority_change` exists for exactly that.
-        // `RegistrationOptions` simply has no field to set them up front.
+        //     if (oldIdentity.IsRevocation(newIdentity) &&
+        //         oldIdentity.recoveryAuthority == oldIdentity.GetID() &&
+        //         !oldIdentity.HasTokenizedControl())
+        //
+        // So as registered this identity is unrevokable, full stop. The SDK
+        // refuses it too, as `TxError::RevocationWouldStrand`, before a
+        // signature exists.
+        //
+        // The trigger is *recovery*, not revocation: an identity may revoke
+        // itself as long as somebody else can recover it.
         .note(Text::of(
-            "both revocation and recovery will point at the identity itself, so the keys above \
-             are the only thing protecting it — there is no separate authority to fall back on",
+            "as registered this identity CANNOT BE REVOKED: it is its own recovery authority, \
+             and consensus refuses a revocation nobody could undo",
             palette.warn,
         ))
         .note(Text::of(
-            "an identity update can point either authority at another VerusID later",
+            "both authorities point at the identity itself, so the keys above are the only \
+             thing protecting it — there is nothing else to fall back on",
+            palette.warn,
+        ))
+        // The half of the old warning that really was false. An update signed
+        // by these primary keys can hand either authority to another VerusID —
+        // but only while the identity is still its own authority. Once one
+        // points elsewhere, these keys can no longer move it back.
+        .note(Text::of(
+            "you can point recovery at another VerusID later, which makes it revocable — but \
+             only while it is still its own authority. That hand-off is one-way",
             palette.muted,
         ))
 }

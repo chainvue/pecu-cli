@@ -157,16 +157,28 @@ fn an_identity_that_is_its_own_revocation_authority_is_flagged() {
     let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
 
     // Not obvious from the address alone — the same string appears three times
-    // and the reader has to notice. The marker must not claim the arrangement
-    // is permanent: an identity update can repoint either authority.
+    // and the reader has to notice.
     assert!(stdout.contains("(itself)"), "{stdout}");
-    assert!(stdout.contains("can repoint it"), "{stdout}");
+    assert!(stdout.contains("revocation"), "{stdout}");
+    assert!(stdout.contains("1-of-1"), "{stdout}");
+
+    // The consensus rule, and the fact this output was wrong about twice. An
+    // identity that is its own *recovery* authority cannot be revoked at all —
+    // `identity.cpp` refuses a revocation nobody could undo. This project first
+    // stated that as permanent for *both* authorities, then over-corrected and
+    // dropped it entirely, which traded a wrong claim for a missing one.
+    assert!(
+        stdout.contains("cannot be revoked"),
+        "an identity that is its own recovery authority is unrevokable, and the output does \
+         not say so:\n{stdout}"
+    );
+    // The half that really was false: the authorities are not frozen. Primary
+    // keys can hand either one to another VerusID — one-way.
     assert!(
         !stdout.contains("cannot be changed"),
         "the output claims authorities are unchangeable, which is false:\n{stdout}"
     );
-    assert!(stdout.contains("revocation"), "{stdout}");
-    assert!(stdout.contains("1-of-1"), "{stdout}");
+    assert!(stdout.contains("cannot take it back"), "{stdout}");
 }
 
 #[test]

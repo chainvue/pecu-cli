@@ -1,0 +1,684 @@
+//! `pecu id update` · `revoke` · `recover` — changing an identity after it exists.
+//!
+//! # Who may change what
+//!
+//! The identity output's condition is `1-of-3`, and consensus validates the
+//! three branches **independently**, each guarding its own fields:
+//!
+//! | changing | needs |
+//! |---|---|
+//! | `primary_addresses`, `min_sigs` | the primary condition |
+//! | `revocation_authority` | the revocation condition |
+//! | `recovery_authority` | the recovery condition |
+//!
+//! A freshly registered identity is all three at once, so its own primary keys
+//! satisfy every branch and can point either authority elsewhere. Once an
+//! authority names **another** identity, those keys can no longer move it, and
+//! there is no way to take it back. That is the direction with no undo.
+//!
+//! # The rule people get wrong
+//!
+//! An identity that is its **own recovery authority cannot be revoked at all**.
+//! Consensus refuses it, because nobody could undo it afterwards. The trigger is
+//! recovery, not revocation: an identity may revoke itself perfectly well as
+//! long as somebody else can recover it. The SDK refuses this before a signature
+//! exists, as `TxError::RevocationWouldStrand`.
+//!
+//! # Why every failure here is worth catching locally
+//!
+//! Consensus does not say which condition went unsatisfied. A revocation signed
+//! by the wrong authority comes back as:
+//!
+//! ```text
+//! -26: 16: mandatory-script-verify-flag-failed
+//! ```
+//!
+//! after the fee is spent, naming nothing. So the flows check the named
+//! authority's primary addresses and threshold before signing, and this module
+//! surfaces that check rather than the daemon's silence.
+//!
+//! That pre-check is **advisory whenever the authority is a different
+//! identity**, because every fact in it comes from the node. A lying node can
+//! fail a valid revocation or pass an invalid one. When the identity is still
+//! its own authority the check is offline — decoded from the output script — and
+//! that is the common case.
+
+use miette::Diagnostic;
+use thiserror::Error;
+use verus_sdk::network::{
+    current_identity, prepare_identity_recovery, prepare_identity_revocation,
+    prepare_identity_update, FlowError, Held, IdentityChange, Unsent,
+};
+use verus_sdk::verus_keys::{Address, AddressKind, PrivateKey};
+use verus_sdk::verus_tx::Destination;
+
+use crate::cli::{Globals, IdAuthorityArgs, IdRecoverArgs, IdUpdateArgs};
+use crate::config::Settings;
+use crate::keystore::{self, Envelope, Keystore};
+use crate::node::{self, Node};
+use crate::ui::{fmt, Panel, Text, Ui};
+
+/// How much of an identity name is ever printed.
+const NAME_BUDGET: usize = 40;
+
+#[derive(Debug, Error, Diagnostic)]
+pub enum LifecycleError {
+    #[error("no key to sign with")]
+    #[diagnostic(
+        code(pecu::no_key),
+        help("pass --from <label>, or make a key with `pecu key gen`")
+    )]
+    NoKey,
+
+    #[error("the keystore holds {count} keys, so there is no obvious one to sign with")]
+    #[diagnostic(
+        code(pecu::ambiguous_key),
+        help("name one with --from <label>; `pecu key list` shows them")
+    )]
+    AmbiguousKey { count: usize },
+
+    #[error("the `{profile}` profile is not allowed to spend")]
+    #[diagnostic(
+        code(pecu::spending_disabled),
+        help("this rewrites an identity on chain and pays a miner fee. Set `allow_spend = true` under [profiles.{profile}] in config.toml")
+    )]
+    SpendingDisabled { profile: String },
+
+    #[error("that update changes nothing")]
+    #[diagnostic(
+        code(pecu::empty_update),
+        help("name at least one field: --primary, --min-sigs, --revocation, --recovery. Publishing an identity unchanged still costs a fee")
+    )]
+    EmptyUpdate,
+
+    #[error("changing who controls `{name}` needs --allow-authority-change")]
+    #[diagnostic(
+        code(pecu::authority_change),
+        help("publishing primary addresses nobody holds, or a threshold nobody can meet, is the one mistake with no remedy — not for the holder, not for the recovery authority, not for anyone. Say --allow-authority-change to mean it")
+    )]
+    NeedsAuthorityFlag { name: String },
+
+    #[error("`{value}` is not an address this can use")]
+    #[diagnostic(
+        code(pecu::bad_address),
+        help("transparent addresses start with R; identities are i-addresses")
+    )]
+    BadAddress { value: String },
+
+    #[error("`{name}` has no i-address to point an authority at")]
+    #[diagnostic(
+        code(pecu::bad_authority),
+        help("an authority is an identity: pass a name like `guardian@` or its i-address")
+    )]
+    BadAuthority { name: String },
+
+    #[error("cancelled")]
+    #[diagnostic(code(pecu::cancelled), help("nothing was broadcast"))]
+    Cancelled,
+
+    #[error("cannot ask for confirmation")]
+    #[diagnostic(
+        code(pecu::no_tty),
+        help("there is no terminal to confirm on — pass --yes to go ahead without asking, or --dry-run to stop before broadcasting")
+    )]
+    CannotConfirm,
+
+    #[error("{what} failed")]
+    #[diagnostic(code(pecu::flow_failed), help("{advice}"))]
+    Flow {
+        what: &'static str,
+        advice: String,
+        #[source]
+        source: Box<FlowError>,
+    },
+}
+
+fn flow(what: &'static str, source: FlowError) -> LifecycleError {
+    use verus_sdk::verus_tx::TxError;
+    let advice = match &source {
+        // The consensus rule, refused before a signature exists. Worth its own
+        // advice because the remedy is a *different operation* — point recovery
+        // somewhere else first — not a retry or a flag.
+        FlowError::Tx(TxError::RevocationWouldStrand) => {
+            "an identity that is its own recovery authority cannot be revoked: nobody could \
+             undo it. Point recovery at another VerusID first with `pecu id update --recovery \
+             <name@> --allow-authority-change`, and then it becomes revocable"
+                .to_string()
+        }
+        FlowError::Tx(TxError::AlreadyRevoked) => {
+            "it is already revoked — `pecu id recover` is the way back, signed by its recovery \
+             authority"
+                .to_string()
+        }
+        FlowError::NoSuchIdentity(_) => {
+            "check the name; `pecu id show <name@>` reads it off the chain".to_string()
+        }
+        // The pre-check the SDK does so consensus does not have to refuse
+        // anonymously. Its message already names the authority and the
+        // threshold, so this only has to say where to look.
+        FlowError::Content(message) if message.contains("authority") => {
+            "`pecu id show <name@>` names the authority, and `pecu key list` shows which keys \
+             you hold. Consensus refuses this without saying why, so it is caught here instead"
+                .to_string()
+        }
+        FlowError::Content(_) => {
+            "the identity was read, but the change could not be built from it".to_string()
+        }
+        _ => "run `pecu doctor`, or point somewhere else with --node".to_string(),
+    };
+    LifecycleError::Flow {
+        what,
+        advice,
+        source: Box::new(source),
+    }
+}
+
+/// Everything the three commands share: the guard, the key and the node.
+struct Session {
+    node: Node,
+    envelope: Envelope,
+    key: PrivateKey,
+}
+
+fn open(settings: &Settings, label: Option<&str>) -> Result<Session, miette::Report> {
+    if !settings.profile.allow_spend {
+        return Err(LifecycleError::SpendingDisabled {
+            profile: settings.profile.name.clone(),
+        }
+        .into());
+    }
+    let store = Keystore::new(&settings.paths);
+    let envelope = choose_key(&store, label)?;
+    let secret = keystore::passphrase(&format!("passphrase for `{}`", envelope.label), false)?;
+    let key = envelope.unlock(&secret)?;
+    let node = node::connect(&settings.profile)?;
+    Ok(Session {
+        node,
+        envelope,
+        key,
+    })
+}
+
+/// Resolve a name or i-address to the 20 bytes an authority field holds.
+fn authority_id(ui: &Ui, node: &Node, given: &str) -> Result<[u8; 20], miette::Report> {
+    // An i-address is already the answer and needs no node. Anything else has
+    // to be looked up, and the lookup is the node's word for it.
+    if let Ok(parsed) = given.parse::<Address>() {
+        return Ok(parsed.hash());
+    }
+    ui.sdk(format!("node.identity({given:?})"));
+    let record = verus_sdk::network::ChainReader::identity(node, given)
+        .map_err(|source| flow("reading the authority identity", FlowError::Rpc(source)))?;
+    ui.sdk_result(format!("identity_address: {}", record.identity_address));
+    record
+        .identity_address
+        .parse::<Address>()
+        .map(|parsed| parsed.hash())
+        .map_err(|_| {
+            LifecycleError::BadAuthority {
+                name: given.to_string(),
+            }
+            .into()
+        })
+}
+
+/// `pecu id update`.
+pub fn update(
+    ui: &Ui,
+    settings: &Settings,
+    globals: &Globals,
+    args: &IdUpdateArgs,
+) -> miette::Result<()> {
+    let touches_authority = !args.primary.is_empty()
+        || args.min_sigs.is_some()
+        || args.revocation.is_some()
+        || args.recovery.is_some();
+    if !touches_authority {
+        return Err(LifecycleError::EmptyUpdate.into());
+    }
+    // Checked before the keystore is opened: a refusal that costs a passphrase
+    // prompt is a refusal that wasted the one interaction this command needs.
+    if !args.allow_authority_change {
+        return Err(LifecycleError::NeedsAuthorityFlag {
+            name: args.name.clone(),
+        }
+        .into());
+    }
+
+    let session = open(settings, args.from.as_deref())?;
+
+    let mut change = IdentityChange::new().allowing_authority_change();
+    if !args.primary.is_empty() {
+        let addresses = args
+            .primary
+            .iter()
+            .map(|given| destination(given))
+            .collect::<Result<Vec<_>, _>>()?;
+        change = change.with_primary_addresses(addresses);
+    }
+    if let Some(min_sigs) = args.min_sigs {
+        change = change.with_min_sigs(min_sigs);
+    }
+    if let Some(given) = &args.revocation {
+        change = change.with_revocation_authority(authority_id(ui, &session.node, given)?);
+    }
+    if let Some(given) = &args.recovery {
+        change = change.with_recovery_authority(authority_id(ui, &session.node, given)?);
+    }
+
+    ui.sdk(format!(
+        "verus_sdk::network::prepare_identity_update(&node, &key, &[&key], {:?}, &change)",
+        args.name
+    ));
+    let unsent = prepare_identity_update(
+        &session.node,
+        &session.key,
+        &[&session.key],
+        &args.name,
+        &change,
+    )
+    .map_err(|source| flow("building the update", source))?;
+    ui.sdk_result(format!(
+        "Unsent<Updated> {{ txid: {}, changes_authority: {} }}",
+        unsent.outcome.txid, unsent.outcome.changes_authority
+    ));
+
+    let panel = Panel::new(if globals.dry_run {
+        "WOULD UPDATE"
+    } else {
+        "UPDATE"
+    })
+    .row("identity", name_row(ui, &args.name))
+    .row(
+        "txid",
+        Text::of(&unsent.outcome.txid, ui.theme.palette.value),
+    )
+    .row(
+        "fee",
+        amount_row(ui, unsent.outcome.fee, &settings.profile.currency),
+    );
+    let panel = describe_update(ui, panel, args);
+
+    finish(ui, settings, globals, panel, unsent, "update", |outcome| {
+        serde_json::json!({
+            "identity": outcome.identity,
+            "txid": outcome.txid,
+            "changes_authority": outcome.changes_authority,
+            "fee": outcome.fee.to_sat(),
+            "change": outcome.change.to_sat(),
+        })
+    })
+}
+
+fn describe_update(ui: &Ui, mut panel: Panel, args: &IdUpdateArgs) -> Panel {
+    let palette = ui.theme.palette;
+    panel = panel.rule();
+    if !args.primary.is_empty() {
+        for (index, address) in args.primary.iter().enumerate() {
+            let label = if index == 0 { "primary" } else { "" };
+            panel = panel.row(label, Text::of(address, palette.value));
+        }
+    }
+    if let Some(min_sigs) = args.min_sigs {
+        panel = panel.row("min sigs", Text::of(min_sigs.to_string(), palette.value));
+    }
+    if let Some(revocation) = &args.revocation {
+        panel = panel.row("revocation", Text::of(revocation, palette.accent));
+    }
+    if let Some(recovery) = &args.recovery {
+        panel = panel.row("recovery", Text::of(recovery, palette.accent));
+    }
+
+    panel = panel.note(Text::of(
+        "everything not named above is carried through untouched — the identity is restated \
+         from the output script consensus reads, not from a rendering of it",
+        palette.muted,
+    ));
+    if !args.primary.is_empty() || args.min_sigs.is_some() {
+        panel = panel.note(Text::of(
+            "addresses nobody holds, or a threshold nobody can meet, cannot be undone by \
+             anyone — not the holder, not the recovery authority",
+            palette.warn,
+        ));
+    }
+    if args.revocation.is_some() || args.recovery.is_some() {
+        panel = panel.note(Text::of(
+            "pointing an authority at another VerusID is one-way: these keys cannot take it \
+             back afterwards",
+            palette.warn,
+        ));
+    }
+    if args.recovery.is_some() {
+        panel = panel.note(Text::of(
+            "moving recovery off the identity is also what makes it revocable at all",
+            palette.muted,
+        ));
+    }
+    panel
+}
+
+/// `pecu id revoke`.
+pub fn revoke(
+    ui: &Ui,
+    settings: &Settings,
+    globals: &Globals,
+    args: &IdAuthorityArgs,
+) -> miette::Result<()> {
+    let session = open(settings, args.from.as_deref())?;
+
+    ui.sdk(format!(
+        "verus_sdk::network::prepare_identity_revocation(&node, &key, &[&key], {:?})",
+        args.name
+    ));
+    let unsent =
+        prepare_identity_revocation(&session.node, &session.key, &[&session.key], &args.name)
+            .map_err(|source| flow("building the revocation", source))?;
+    ui.sdk_result(format!(
+        "Unsent<Revoked> {{ txid: {}, authority: {} }}",
+        unsent.outcome.txid, unsent.outcome.authority
+    ));
+
+    let palette = ui.theme.palette;
+    let panel = Panel::new(if globals.dry_run {
+        "WOULD REVOKE"
+    } else {
+        "REVOKE"
+    })
+    .row("identity", name_row(ui, &args.name))
+    .row(
+        "authority",
+        Text::of(&unsent.outcome.authority, palette.accent),
+    )
+    .row(
+        "signed by",
+        Text::of(&session.envelope.address, palette.value),
+    )
+    .row("txid", Text::of(&unsent.outcome.txid, palette.value))
+    .row(
+        "fee",
+        amount_row(ui, unsent.outcome.fee, &settings.profile.currency),
+    )
+    .note(Text::of(
+        "a revoked identity cannot sign, cannot spend what it holds, and cannot be updated. \
+         Only its recovery authority can bring it back",
+        palette.warn,
+    ))
+    .note(Text::of(
+        "revocation is retroactive for logins: a signature made before this still verifies \
+         against the chain as it was, and `pecu id login verify` rejects it anyway",
+        palette.muted,
+    ));
+
+    finish(ui, settings, globals, panel, unsent, "revoke", |outcome| {
+        serde_json::json!({
+            "identity": outcome.identity,
+            "txid": outcome.txid,
+            "authority": outcome.authority,
+            "fee": outcome.fee.to_sat(),
+            "change": outcome.change.to_sat(),
+        })
+    })
+}
+
+/// `pecu id recover`.
+pub fn recover(
+    ui: &Ui,
+    settings: &Settings,
+    globals: &Globals,
+    args: &IdRecoverArgs,
+) -> miette::Result<()> {
+    let session = open(settings, args.from.as_deref())?;
+
+    // A recovery that names no new keys brings the identity back exactly as it
+    // was. Naming them is how a compromised identity is taken away from
+    // whoever holds the old ones, which is the whole point of the authority.
+    let mut restore = IdentityChange::new();
+    if !args.primary.is_empty() {
+        let addresses = args
+            .primary
+            .iter()
+            .map(|given| destination(given))
+            .collect::<Result<Vec<_>, _>>()?;
+        restore = restore
+            .allowing_authority_change()
+            .with_primary_addresses(addresses);
+        if let Some(min_sigs) = args.min_sigs {
+            restore = restore.with_min_sigs(min_sigs);
+        }
+    }
+
+    ui.sdk(format!(
+        "verus_sdk::network::prepare_identity_recovery(&node, &key, &[&key], {:?}, &restore)",
+        args.name
+    ));
+    let unsent = prepare_identity_recovery(
+        &session.node,
+        &session.key,
+        &[&session.key],
+        &args.name,
+        &restore,
+    )
+    .map_err(|source| flow("building the recovery", source))?;
+    ui.sdk_result(format!(
+        "Unsent<Recovered> {{ txid: {}, replaces_primary_addresses: {} }}",
+        unsent.outcome.txid, unsent.outcome.replaces_primary_addresses
+    ));
+
+    let palette = ui.theme.palette;
+    let mut panel = Panel::new(if globals.dry_run {
+        "WOULD RECOVER"
+    } else {
+        "RECOVER"
+    })
+    .row("identity", name_row(ui, &args.name))
+    .row(
+        "authority",
+        Text::of(&unsent.outcome.authority, palette.accent),
+    )
+    .row(
+        "signed by",
+        Text::of(&session.envelope.address, palette.value),
+    )
+    .row("txid", Text::of(&unsent.outcome.txid, palette.value))
+    .row(
+        "fee",
+        amount_row(ui, unsent.outcome.fee, &settings.profile.currency),
+    );
+
+    if unsent.outcome.replaces_primary_addresses {
+        panel = panel.rule();
+        for (index, address) in args.primary.iter().enumerate() {
+            let label = if index == 0 { "primary" } else { "" };
+            panel = panel.row(label, Text::of(address, palette.value));
+        }
+        panel = panel.note(Text::of(
+            "this hands the identity to those addresses. Whoever held the old ones loses it, \
+             which is what a recovery authority is for — and getting them wrong loses it to \
+             nobody",
+            palette.warn,
+        ));
+    } else {
+        panel = panel.note(Text::of(
+            "no new primary addresses, so it comes back under exactly the keys it had when it \
+             was revoked — including any that were compromised. `--primary` replaces them",
+            palette.warn,
+        ));
+    }
+
+    finish(ui, settings, globals, panel, unsent, "recover", |outcome| {
+        serde_json::json!({
+            "identity": outcome.identity,
+            "txid": outcome.txid,
+            "authority": outcome.authority,
+            "replaces_primary_addresses": outcome.replaces_primary_addresses,
+            "fee": outcome.fee.to_sat(),
+            "change": outcome.change.to_sat(),
+        })
+    })
+}
+
+/// Show it, ask, send it. The same shape for all three, because all three are
+/// one signed transaction with an outcome worth reading first.
+fn finish<T, F>(
+    ui: &Ui,
+    settings: &Settings,
+    globals: &Globals,
+    panel: Panel,
+    unsent: Unsent<T>,
+    what: &'static str,
+    to_json: F,
+) -> miette::Result<()>
+where
+    F: Fn(&T) -> serde_json::Value,
+{
+    if ui.is_json() {
+        let mut document = to_json(&unsent.outcome);
+        if let Some(object) = document.as_object_mut() {
+            object.insert("broadcast".into(), serde_json::json!(false));
+            object.insert("hex".into(), serde_json::json!(unsent.hex));
+        }
+        if globals.dry_run {
+            emit(&document);
+            return Ok(());
+        }
+        // `--json` is output, not consent — the same rule `pecu send` follows,
+        // and these are less reversible than a payment.
+        if !globals.yes {
+            return Err(LifecycleError::CannotConfirm.into());
+        }
+        let node = node::connect(&settings.profile)?;
+        ui.sdk("unsent.broadcast(&node)");
+        let outcome = unsent
+            .broadcast(&node)
+            .map_err(|source| flow("broadcasting", source))?;
+        let mut document = to_json(&outcome);
+        if let Some(object) = document.as_object_mut() {
+            object.insert("broadcast".into(), serde_json::json!(true));
+        }
+        emit(&document);
+        return Ok(());
+    }
+
+    ui.panel(&panel);
+
+    if globals.dry_run {
+        ui.blank();
+        ui.note("nothing was sent. Drop --dry-run to go ahead");
+        ui.explain_panel();
+        return Ok(());
+    }
+    if !globals.yes {
+        confirm(ui, what)?;
+    }
+
+    let node = node::connect(&settings.profile)?;
+    ui.sdk("unsent.broadcast(&node)");
+    let outcome = unsent
+        .broadcast(&node)
+        .map_err(|source| flow("broadcasting", source))?;
+    let json = to_json(&outcome);
+    let txid = json["txid"].as_str().unwrap_or_default().to_string();
+
+    ui.blank();
+    ui.ok(format!("broadcast — txid {txid}"));
+    ui.note(format!(
+        "{}/tx/{txid}",
+        settings.profile.explorer.trim_end_matches('/')
+    ));
+    ui.explain_panel();
+    Ok(())
+}
+
+/// An address as an identity's `primary_addresses` entry.
+///
+/// The variant follows the address kind rather than defaulting to a pubkey
+/// hash: a VerusID listed as a primary address is `Destination::Identity`, and
+/// writing its 20 bytes under the wrong variant would publish an identity
+/// controlled by a key nobody has.
+fn destination(given: &str) -> Result<Destination, LifecycleError> {
+    let parsed = given
+        .parse::<Address>()
+        .map_err(|_| LifecycleError::BadAddress {
+            value: given.to_string(),
+        })?;
+    Ok(match parsed.kind() {
+        AddressKind::PubKeyHash => Destination::PubKeyHash(parsed.hash()),
+        AddressKind::Identity => Destination::Identity(parsed.hash()),
+        AddressKind::ScriptHash => Destination::ScriptHash(parsed.hash()),
+    })
+}
+
+fn name_row(ui: &Ui, name: &str) -> Text {
+    let palette = ui.theme.palette;
+    let glyphs = ui.theme.glyphs;
+    let mut row = Text::of(
+        fmt::untrusted(name, NAME_BUDGET, glyphs.ellipsis),
+        palette.accent,
+    );
+    // Naming by i-address is checked against the decoded object with no node
+    // involved; a `name@` can only be checked against what the node reported.
+    // Worth saying which one is in play before something irreversible.
+    if name.parse::<Address>().is_err() {
+        row = row.push("  (named, not verified offline)", palette.muted);
+    }
+    row
+}
+
+fn amount_row(ui: &Ui, amount: verus_sdk::money::Amount, currency: &str) -> Text {
+    Text::of(fmt::amount(amount), ui.theme.palette.value)
+        .space()
+        .push(currency, ui.theme.palette.muted)
+}
+
+/// Read the current identity, for commands that want to show it first.
+#[allow(dead_code)]
+fn held(ui: &Ui, node: &Node, identity: &str) -> Result<Held, miette::Report> {
+    ui.sdk(format!(
+        "verus_sdk::network::current_identity(&node, {identity:?})"
+    ));
+    let held =
+        current_identity(node, identity).map_err(|source| flow("reading the identity", source))?;
+    ui.sdk_result(format!(
+        "Held {{ output: {}:{} }}",
+        held.output.txid, held.output.vout
+    ));
+    Ok(held)
+}
+
+fn confirm(ui: &Ui, what: &str) -> Result<(), LifecycleError> {
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        return Err(LifecycleError::CannotConfirm);
+    }
+    ui.blank();
+    print!("  type `{what}` to go ahead: ");
+    let _ = std::io::stdout().flush();
+
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .map_err(|_| LifecycleError::CannotConfirm)?;
+    if answer.trim() != what {
+        return Err(LifecycleError::Cancelled);
+    }
+    Ok(())
+}
+
+fn choose_key(store: &Keystore, label: Option<&str>) -> Result<Envelope, miette::Report> {
+    if let Some(label) = label {
+        return Ok(store.load(label)?);
+    }
+    let keys = store.list()?;
+    match keys.len() {
+        0 => Err(LifecycleError::NoKey.into()),
+        1 => Ok(keys.into_iter().next().expect("just checked")),
+        count => Err(LifecycleError::AmbiguousKey { count }.into()),
+    }
+}
+
+fn emit(value: &serde_json::Value) {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(value).expect("the report is plain data")
+    );
+}

@@ -9,6 +9,7 @@ pub mod dev;
 pub mod doctor;
 pub mod id;
 pub mod key;
+pub mod lifecycle;
 pub mod send;
 pub mod tx;
 pub mod wallet;
@@ -120,11 +121,24 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
             command: IdCommand::Register(args),
         } => id::register(&ui, &Settings::resolve(&cli.globals)?, &cli.globals, args),
 
+        Command::Id {
+            command: IdCommand::Update(args),
+        } => lifecycle::update(&ui, &Settings::resolve(&cli.globals)?, &cli.globals, args),
+
+        Command::Id {
+            command: IdCommand::Revoke(args),
+        } => lifecycle::revoke(&ui, &Settings::resolve(&cli.globals)?, &cli.globals, args),
+
+        Command::Id {
+            command: IdCommand::Recover(args),
+        } => lifecycle::recover(&ui, &Settings::resolve(&cli.globals)?, &cli.globals, args),
+
         Command::Id { command } => Err(match command {
-            IdCommand::Show { .. } | IdCommand::Register(_) => unreachable!("handled above"),
-            IdCommand::Update => NotYet::at("id update", "M7"),
-            IdCommand::Revoke => NotYet::at("id revoke", "M7"),
-            IdCommand::Recover => NotYet::at("id recover", "M7"),
+            IdCommand::Show { .. }
+            | IdCommand::Register(_)
+            | IdCommand::Update(_)
+            | IdCommand::Revoke(_)
+            | IdCommand::Recover(_) => unreachable!("handled above"),
             IdCommand::Login => NotYet::at("id login", "M8"),
             IdCommand::Publish => NotYet::at("id publish", "M8"),
             IdCommand::Read => NotYet::at("id read", "M8"),

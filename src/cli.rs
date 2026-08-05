@@ -12,7 +12,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 /// "which SDK is this?" is the first question when something on chain disagrees.
 macro_rules! sdk_rev {
     () => {
-        "4044fb1ed47c35c33918921b94ec792286599357"
+        "435491d5fa36d6dd40ddb574c59ed12868db350a"
     };
 }
 pub(crate) use sdk_rev;
@@ -407,15 +407,87 @@ pub enum IdCommand {
     /// Register a new VerusID. Run it again to carry on where it left off
     Register(IdRegisterArgs),
     /// Republish an identity with changes
-    Update,
-    /// Revoke an identity
-    Revoke,
-    /// Recover a revoked identity
-    Recover,
+    Update(IdUpdateArgs),
+    /// Revoke an identity, using its revocation authority
+    Revoke(IdAuthorityArgs),
+    /// Bring a revoked identity back, using its recovery authority
+    Recover(IdRecoverArgs),
     /// Prove control of an identity by signing a challenge
     Login,
     /// Publish VDXF data under an identity
     Publish,
     /// Read VDXF data from an identity
     Read,
+}
+
+/// Changing an identity. Every field left unnamed is carried through untouched.
+#[derive(Debug, Clone, Args)]
+pub struct IdUpdateArgs {
+    /// The identity to change. Prefer its i-address for anything destructive:
+    /// a name is only checked against what the node itself reported
+    #[arg(value_name = "NAME@|i-ADDRESS")]
+    pub name: String,
+
+    /// Which stored key signs and pays the fee
+    #[arg(long, short = 'f', value_name = "LABEL")]
+    pub from: Option<String>,
+
+    /// Replace the addresses that control the identity. Repeat for several
+    #[arg(long, value_name = "ADDRESS")]
+    pub primary: Vec<String>,
+
+    /// How many of those must sign
+    #[arg(long, value_name = "N")]
+    pub min_sigs: Option<u32>,
+
+    /// Point revocation at another VerusID. One-way: these keys cannot take it
+    /// back afterwards
+    #[arg(long, value_name = "NAME@|i-ADDRESS")]
+    pub revocation: Option<String>,
+
+    /// Point recovery at another VerusID. One-way, and what makes an identity
+    /// revocable in the first place
+    #[arg(long, value_name = "NAME@|i-ADDRESS")]
+    pub recovery: Option<String>,
+
+    /// Permit changing who controls the identity. Required for --primary,
+    /// --min-sigs, --revocation and --recovery, because publishing a threshold
+    /// nobody can meet is the one mistake with no remedy
+    #[arg(long)]
+    pub allow_authority_change: bool,
+}
+
+/// Revoking. Takes no changes: revocation sets a flag and nothing else.
+#[derive(Debug, Clone, Args)]
+pub struct IdAuthorityArgs {
+    /// The identity to revoke. Prefer its i-address
+    #[arg(value_name = "NAME@|i-ADDRESS")]
+    pub name: String,
+
+    /// Which stored key signs and pays the fee. It must be a primary address
+    /// of the identity's revocation authority, which is often another VerusID
+    #[arg(long, short = 'f', value_name = "LABEL")]
+    pub from: Option<String>,
+}
+
+/// Recovering, which may also hand the identity to new keys.
+#[derive(Debug, Clone, Args)]
+pub struct IdRecoverArgs {
+    /// The revoked identity to bring back. Prefer its i-address
+    #[arg(value_name = "NAME@|i-ADDRESS")]
+    pub name: String,
+
+    /// Which stored key signs and pays the fee. It must be a primary address
+    /// of the identity's recovery authority
+    #[arg(long, short = 'f', value_name = "LABEL")]
+    pub from: Option<String>,
+
+    /// Hand the recovered identity to these addresses. Without it the identity
+    /// comes back under whatever keys it had when it was revoked
+    #[arg(long, value_name = "ADDRESS")]
+    pub primary: Vec<String>,
+
+    /// How many of those must sign
+    #[arg(long, value_name = "N", requires = "primary")]
+    pub min_sigs: Option<u32>,
 }

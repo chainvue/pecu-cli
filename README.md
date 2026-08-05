@@ -69,7 +69,7 @@ before blaming the command — `cargo run` is usually what you are measuring.
 | `pecu send` | Transparent sends: native, token, or out of a VerusID's own funds | ✅ done |
 | `pecu plan send` / `pecu sign` / `pecu broadcast` | The air-gap trio, over files or QR codes | ✅ done |
 | `pecu id show\|register` | Read an identity; register one (two-phase, resumable) | ✅ done |
-| `pecu id update\|revoke\|recover` | The rest of the lifecycle | M7b |
+| `pecu id update\|revoke\|recover` | The rest of the lifecycle | ✅ done |
 | `pecu id login\|publish\|read` | Sign-in with VerusID, and VDXF data | M8 |
 | `pecu completions <shell>` | Shell completion script | ✅ done |
 
@@ -89,7 +89,7 @@ answering.
 │ keys        ~/.config/verus-pecu/keys (0 keys)      │
 ├─ BUILD ─────────────────────────────────────────────┤
 │ pecu        0.1.0                                   │
-│ verus-sdk   4044fb1                                 │
+│ verus-sdk   435491d                                 │
 │ features    network                                 │
 ├─ NODE ──────────────────────────────────────────────┤
 │ chain       VRSCTEST                                │
@@ -526,6 +526,78 @@ commitment.
 The success message says *broadcast*, not *registered* — the identity does not
 exist until the transaction is mined, and `id show` will say nothing is called
 that until then.
+
+### `pecu id update` · `revoke` · `recover`
+
+```sh
+pecu id update i7r29bDQ… --recovery guardian@ --allow-authority-change
+pecu id revoke i7r29bDQ… --from guardiankey
+pecu id recover i7r29bDQ… --from guardiankey --primary RNew…  --min-sigs 1
+```
+
+**Who may change what.** The identity output's condition is `1-of-3`, and
+consensus validates the three branches *independently*, each guarding its own
+fields:
+
+| changing | needs |
+|---|---|
+| `primary_addresses`, `min_sigs` | the primary condition |
+| `revocation_authority` | the revocation condition |
+| `recovery_authority` | the recovery condition |
+
+A freshly registered identity is all three at once, so its own keys can point
+either authority elsewhere. Once an authority names **another** identity, those
+keys can no longer move it and cannot take it back. That direction has no undo.
+
+**An identity that is its own recovery authority cannot be revoked.** This is a
+consensus rule, not a policy — `identity.cpp` refuses a revocation nobody could
+undo. The trigger is *recovery*, not revocation: an identity may revoke itself
+perfectly well as long as somebody else can recover it. It is refused here
+before a signature exists:
+
+```
+Error: pecu::flow_failed
+  × building the revocation failed
+  ╰─▶ recovery authority is the identity itself; revoking it would strand it
+      permanently
+  help: an identity that is its own recovery authority cannot be revoked:
+        nobody could undo it. Point recovery at another VerusID first with
+        `pecu id update --recovery <name@> --allow-authority-change`
+```
+
+**Every failure here is caught locally, because consensus will not explain
+itself.** A revocation signed by the wrong authority comes back as
+`-26: 16: mandatory-script-verify-flag-failed` — after the fee is spent, naming
+neither which condition failed nor which authority was needed. So the flows read
+the named authority, compare your keys against its primary addresses and
+threshold, and refuse with both named. When the identity is still its own
+authority that check is offline, decoded from the output script.
+
+That pre-check is **advisory** whenever the authority is a different identity:
+every fact in it comes from the node, so a lying node can fail a valid
+revocation or pass an invalid one. It is a usability guard, not a security
+boundary.
+
+**Prefer the i-address for anything destructive.** Naming an identity by
+i-address is verified against the decoded object with no node involved. A `name@`
+can only be checked against what the node itself reported, which catches a node
+inconsistent with itself but not one that lies consistently. The panel says which
+one is in play.
+
+**An update restates the whole identity**, so everything you do not name is
+carried through — decoded from the output script consensus reads, not from a
+rendering of it. Verified rather than asserted: the no-op update at
+`00fecccd36f46e77a423de3f1027c31077a7452b3768dcf8cc65ae202eb5275c` came back with
+its `contentmultimap` intact.
+
+**`--allow-authority-change` is required for anything that touches control**, and
+is checked before the passphrase prompt. Publishing addresses nobody holds, or a
+threshold nobody can meet, is the one mistake with no remedy — not for the
+holder, not for the recovery authority, not for anyone.
+
+**Recovery without `--primary` brings the identity back under exactly the keys it
+had when it was revoked** — including any that were compromised, which is usually
+not what a recovery is for. The panel says so either way.
 
 ### `--explain`
 
