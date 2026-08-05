@@ -552,20 +552,27 @@ the split between payouts and burn does.
 
 Both depths proven on chain rather than argued:
 
-| depth | transaction | payouts | burned | outlay |
+| depth | transaction | payout outputs | burned | outlay |
 |---|---|---|---|---|
-| 1 | `0ccfe028…` | 20 to `pecucli7@` | 60 | 80.000224 |
-| 2 | `6ab375a6…` | 20 to `pecuref9@`, 20 to `pecucli7@` | 40 | 80.000244 |
+| 0 | `9129ede5…` | none | 100 | 100 |
+| 1 | `0ccfe028…` | 1 × 20 | 60 | 80.000224 |
+| 2 | `6ab375a6…` | 2 × 20 | 40 | 80.000244 |
+| 3 | `60a76a8b…` | 3 × 20 | 20 | 80 |
+| 4+ | — | 3 × 20, capped | 20 | 80 |
 
 The depth-2 transaction carries **two** payout outputs, in that order, and both
 identities' balances moved by exactly 20. The outlay differs only by miner fees.
 
-**The chain is capped, and the cap is silent.** `idreferrallevels` is 3 on
-VRSCTEST, so a chain stops at three referrers and anyone further back receives
-nothing — there is no fourth level to pay. Depth 3 pays 60 and burns 20, and a
-notional depth 4 pays exactly the same three, dropping the oldest. The panel says
-so when a chain reaches the cap, because a referrer who was quietly dropped has
-no other way to find out.
+**Registration works at every depth**, and the last row is not an assumption.
+`idreferrallevels` is 3 on VRSCTEST, and the chain walk truncates to that
+*before* the transaction is built — so a request at depth 4 hands the builder the
+same three-entry chain a depth-3 request does. There is no distinct depth-4
+transaction to fail. Measured: asking for a fourth level under `pecudepth3@`
+produces the same 60/20 split against the same 80.
+
+**The cap is silent, though.** Anyone further back receives nothing and is told
+nothing, so the panel says so when a chain reaches it — a referrer who was
+quietly dropped has no other way to find out.
 
 The walk reads each referrer's **own registration transaction** and takes its
 payout outputs, which is how a chain is discovered at all rather than declared.

@@ -409,6 +409,48 @@ fn a_chain_at_the_cap_says_that_earlier_referrers_get_nothing() {
     assert!(stdout.contains("80.00000000"), "{stdout}");
 }
 
+/// Asking for a fourth level gives the same plan a third does.
+///
+/// The walk truncates to `idreferrallevels` before the transaction is built, so
+/// the builder never sees a chain longer than the cap — which is why a
+/// registration cannot fail for being "too deep". `pecudepth3@` is three deep,
+/// so referring to it asks for four.
+#[test]
+#[ignore = "talks to api.verustest.net"]
+fn asking_for_a_depth_beyond_the_cap_builds_the_same_plan() {
+    let Ok(funded) = std::env::var("PECU_FUNDED_HOME") else {
+        eprintln!("PECU_FUNDED_HOME is not set — skipping");
+        return;
+    };
+
+    let plan = |referrer: &str| {
+        let assertion = Command::cargo_bin("pecu")
+            .expect("built")
+            .env("PECU_HOME", &funded)
+            .args([
+                "id",
+                "register",
+                "pecudryrun6",
+                "--from",
+                "faucet",
+                "--referral",
+                referrer,
+                "--dry-run",
+                "--json",
+            ])
+            .assert()
+            .success();
+        let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+        serde_json::from_str::<serde_json::Value>(&stdout).expect("json")["registration_fee"]
+            .as_u64()
+            .expect("a fee")
+    };
+
+    // Both succeed, and both against the same undiscounted policy fee — the
+    // point being that the deeper one builds at all rather than failing.
+    assert_eq!(plan("pecudepth2@"), plan("pecudepth3@"));
+}
+
 /// Registering burns a hundred coins. `--json` is output, not consent.
 /// Resuming has to honour `--from`, or a paid commitment cannot be claimed.
 ///
