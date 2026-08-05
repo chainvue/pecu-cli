@@ -181,6 +181,93 @@ fn a_recovered_identity_no_longer_answers_to_the_keys_it_was_taken_from() {
     );
 }
 
+#[test]
+fn an_unlock_delay_beyond_what_consensus_allows_is_refused_locally() {
+    let home = home();
+    generate(&home, "demo");
+    // Worth catching here rather than at the daemon: the daemon's own helper
+    // *clamps* an over-long delay to the maximum instead of refusing, so the
+    // same request elsewhere can silently produce a lock decades shorter than
+    // the one asked for.
+    pecu(&home)
+        .args([
+            "id",
+            "update",
+            OURS,
+            "--unlock-delay",
+            "99999999",
+            "--node",
+            DEAD_NODE,
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("over the"))
+        .stderr(contains("clamps"));
+}
+
+#[test]
+fn a_timelock_does_not_require_the_authority_flag() {
+    let home = home();
+    generate(&home, "demo");
+    // Setting a timelock does not move who controls the identity, so it must
+    // not demand the flag that guards that — teaching people to pass
+    // --allow-authority-change habitually is how it stops being a guard.
+    let assertion = pecu(&home)
+        .args([
+            "id",
+            "update",
+            OURS,
+            "--unlock-delay",
+            "10",
+            "--node",
+            DEAD_NODE,
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assertion.get_output().stderr).into_owned();
+    assert!(
+        !stderr.contains("allow-authority-change"),
+        "a timelock is not an authority change:\n{stderr}"
+    );
+}
+
+#[test]
+fn unlocking_needs_a_key() {
+    let home = home();
+    pecu(&home)
+        .args(["id", "unlock", OURS, "--node", DEAD_NODE])
+        .assert()
+        .failure()
+        .stderr(contains("no key to sign with"));
+}
+
+/// Unlocking is its own command because the height is not the caller's to
+/// compute.
+///
+/// Consensus measures the countdown from the transaction's `nExpiryHeight`, not
+/// from the tip, so the floor is `delay + expiry` — and the expiry belongs to
+/// the transaction the flow is building. Measured on VRSCTEST against
+/// `pecurevoke1@` with a 10-block delay: signed at tip 1,177,377, the naive
+/// `tip + delay` of 1,177,387 is 20 short, and the flow published 1,177,407
+/// (`f5854d72`), which is `delay + tip + DEFAULT_EXPIRY_BLOCKS` exactly.
+#[test]
+#[ignore = "talks to api.verustest.net"]
+fn unlocking_something_already_counting_down_has_nothing_to_start() {
+    let Ok(funded) = std::env::var("PECU_FUNDED_HOME") else {
+        eprintln!("PECU_FUNDED_HOME is not set — skipping");
+        return;
+    };
+
+    Command::cargo_bin("pecu")
+        .expect("built")
+        .env("PECU_HOME", &funded)
+        .args(["id", "unlock", RESCUED, "--from", "rescued", "--dry-run"])
+        .assert()
+        .failure()
+        // Short: miette wraps, and "counting down" splits across the break.
+        .stderr(contains("already counting"));
+}
+
 /// The consensus rule, caught before a fee is spent.
 ///
 /// `identity.cpp` refuses a revocation whose subject is its own recovery

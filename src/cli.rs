@@ -12,7 +12,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 /// "which SDK is this?" is the first question when something on chain disagrees.
 macro_rules! sdk_rev {
     () => {
-        "435491d5fa36d6dd40ddb574c59ed12868db350a"
+        "b92cd98ed1e4ddb8aff8790cc01b021e2783d1eb"
     };
 }
 pub(crate) use sdk_rev;
@@ -412,6 +412,8 @@ pub enum IdCommand {
     Revoke(IdAuthorityArgs),
     /// Bring a revoked identity back, using its recovery authority
     Recover(IdRecoverArgs),
+    /// Start the countdown on a delay-locked identity
+    Unlock(IdUnlockArgs),
     /// Prove control of an identity by signing a challenge
     Login,
     /// Publish VDXF data under an identity
@@ -504,4 +506,25 @@ pub struct IdRecoverArgs {
     /// How many of those must sign
     #[arg(long, value_name = "N", requires = "primary")]
     pub min_sigs: Option<u32>,
+}
+
+/// Asking a delay-locked identity to start counting down.
+///
+/// Its own command because the height cannot be worked out by hand: consensus
+/// measures the countdown from the transaction's own expiry rather than from
+/// the tip, and the expiry belongs to the transaction the flow is building.
+#[derive(Debug, Clone, Args)]
+pub struct IdUnlockArgs {
+    /// The identity to start unlocking. Prefer its i-address
+    #[arg(value_name = "NAME@|i-ADDRESS")]
+    pub name: String,
+
+    /// Which stored key signs and pays the fee
+    #[arg(long, short = 'f', value_name = "LABEL")]
+    pub from: Option<String>,
+
+    /// Wait this many blocks beyond the earliest consensus allows. The floor is
+    /// the delay plus the transaction's expiry; this adds to it
+    #[arg(long, value_name = "BLOCKS", default_value_t = 0)]
+    pub extra_blocks: u32,
 }

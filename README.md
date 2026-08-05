@@ -69,7 +69,7 @@ before blaming the command — `cargo run` is usually what you are measuring.
 | `pecu send` | Transparent sends: native, token, or out of a VerusID's own funds | ✅ done |
 | `pecu plan send` / `pecu sign` / `pecu broadcast` | The air-gap trio, over files or QR codes | ✅ done |
 | `pecu id show\|register` | Read an identity; register one (two-phase, resumable) | ✅ done |
-| `pecu id update\|revoke\|recover` | The rest of the lifecycle | ✅ done |
+| `pecu id update\|revoke\|recover\|unlock` | The rest of the lifecycle, including timelocks | ✅ done |
 | `pecu id login\|publish\|read` | Sign-in with VerusID, and VDXF data | M8 |
 | `pecu completions <shell>` | Shell completion script | ✅ done |
 
@@ -89,7 +89,7 @@ answering.
 │ keys        ~/.config/verus-pecu/keys (0 keys)      │
 ├─ BUILD ─────────────────────────────────────────────┤
 │ pecu        0.1.0                                   │
-│ verus-sdk   435491d                                 │
+│ verus-sdk   b92cd98                                 │
 │ features    network                                 │
 ├─ NODE ──────────────────────────────────────────────┤
 │ chain       VRSCTEST                                │
@@ -594,6 +594,51 @@ its `contentmultimap` intact.
 is checked before the passphrase prompt. Publishing addresses nobody holds, or a
 threshold nobody can meet, is the one mistake with no remedy — not for the
 holder, not for the recovery authority, not for anyone.
+
+**Timelocks: two forms, and one of them cannot be unlocked by hand.**
+
+```sh
+pecu id update i7r29bDQ… --lock-until 1200000   # absolute height
+pecu id update i7r29bDQ… --unlock-delay 100     # locked until someone asks
+pecu id unlock i7r29bDQ…                        # ask
+```
+
+`timelock` on an identity is **either an absolute height or a relative delay**,
+and which one it is depends on `FLAG_LOCKED`. `id show` prints whichever it is,
+and only when there is one:
+
+```
+TIMELOCK
+  unlock delay   10 blocks
+  state          ! locked, and no unlock requested
+```
+
+An absolute height counts down from when it is mined and cannot be paused. A
+delay counts down from *nothing at all* until an unlock is requested — so it is
+locked indefinitely rather than until some height, and only the revocation and
+recovery authorities can act meanwhile.
+
+**`id unlock` is its own command because the height is not the caller's to
+compute.** Consensus measures the countdown from the transaction's own
+`nExpiryHeight`, not from the tip, so the floor is `delay + expiry` — and the
+expiry belongs to the transaction being built. Measured on VRSCTEST with a
+10-block delay:
+
+| | |
+|---|---|
+| tip when signed | 1,177,377 |
+| naive `tip + delay` | 1,177,387 — **refused**, 20 blocks short |
+| what the flow published | 1,177,407 = `delay + tip + expiry` |
+
+The refusal for a wrong height is `mandatory-script-verify-flag-failed`, naming
+nothing, after the transaction is built and signed. A stolen key cannot shorten
+a lock either — that was measured too, and it is the property the whole feature
+rests on.
+
+**An over-long delay is refused rather than clamped.** Consensus caps it at
+`MAX_UNLOCK_DELAY` (~22 years). The daemon's own helper silently clamps instead
+of erroring, which can hand back a lock decades shorter than the one asked for;
+this refuses, before a key is unlocked.
 
 **Recovery without `--primary` brings the identity back under exactly the keys it
 had when it was revoked** — including any that were compromised, which is usually

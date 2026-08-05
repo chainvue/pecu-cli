@@ -133,12 +133,17 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
             command: IdCommand::Recover(args),
         } => lifecycle::recover(&ui, &Settings::resolve(&cli.globals)?, &cli.globals, args),
 
+        Command::Id {
+            command: IdCommand::Unlock(args),
+        } => lifecycle::unlock(&ui, &Settings::resolve(&cli.globals)?, &cli.globals, args),
+
         Command::Id { command } => Err(match command {
             IdCommand::Show { .. }
             | IdCommand::Register(_)
             | IdCommand::Update(_)
             | IdCommand::Revoke(_)
-            | IdCommand::Recover(_) => unreachable!("handled above"),
+            | IdCommand::Recover(_)
+            | IdCommand::Unlock(_) => unreachable!("handled above"),
             IdCommand::Login => NotYet::at("id login", "M8"),
             IdCommand::Publish => NotYet::at("id publish", "M8"),
             IdCommand::Read => NotYet::at("id read", "M8"),

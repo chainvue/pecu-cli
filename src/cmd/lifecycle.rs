@@ -45,14 +45,15 @@
 
 use miette::Diagnostic;
 use thiserror::Error;
+use verus_sdk::identity::{Timelock, MAX_UNLOCK_DELAY};
 use verus_sdk::network::{
     current_identity, prepare_identity_recovery, prepare_identity_revocation,
-    prepare_identity_update, FlowError, Held, IdentityChange, Unsent,
+    prepare_identity_unlock, prepare_identity_update, FlowError, Held, IdentityChange, Unsent,
 };
 use verus_sdk::verus_keys::{Address, AddressKind, PrivateKey};
-use verus_sdk::verus_tx::{Destination, Timelock};
+use verus_sdk::verus_tx::Destination;
 
-use crate::cli::{Globals, IdAuthorityArgs, IdRecoverArgs, IdUpdateArgs};
+use crate::cli::{Globals, IdAuthorityArgs, IdRecoverArgs, IdUnlockArgs, IdUpdateArgs};
 use crate::config::Settings;
 use crate::keystore::{self, Envelope, Keystore};
 use crate::node::{self, Node};
@@ -112,12 +113,12 @@ pub enum LifecycleError {
     )]
     BadAuthority { name: String },
 
-    #[error("`{name}` is locked, and a delay lock cannot simply be removed")]
+    #[error("an unlock delay of {blocks} blocks is over the {max} consensus allows")]
     #[diagnostic(
-        code(pecu::locked),
-        help("consensus refuses it — measured on VRSCTEST, and refused as an unexplained script failure after the transaction is built and signed. The way out is to ask for an unlock: set an absolute height far enough ahead with --lock-until, and the identity opens when the chain reaches it")
+        code(pecu::delay_too_long),
+        help("that is roughly {years} years at a block a minute. Worth knowing: the daemon's own helper silently clamps an over-long delay to the maximum instead of refusing, so asking elsewhere for more than this can return a lock decades shorter than the one requested, with no error")
     )]
-    CannotClearDelayLock { name: String },
+    DelayTooLong { blocks: u32, max: u32, years: u32 },
 
     #[error("cancelled")]
     #[diagnostic(code(pecu::cancelled), help("nothing was broadcast"))]
@@ -163,6 +164,16 @@ fn flow(what: &'static str, source: FlowError) -> LifecycleError {
         // Caught before signing, and the commonest way to get these wrong.
         // Falling through to "run `pecu doctor`" would send someone looking at
         // the node when the node is fine and the key simply is not the one.
+        // The four rules in `CIdentity::IsInvalidMutation`, now transcribed by
+        // the SDK instead of arriving as `mandatory-script-verify-flag-failed`
+        // once the fee is gone. The reason names the values, so this only has
+        // to say what to do about the one nobody can work out by hand.
+        FlowError::Tx(TxError::TimelockRefused { .. }) => {
+            "an unlock height is measured from the transaction's own expiry, not from the tip, \
+             so it cannot be computed by hand — `pecu id unlock` reads the delay and works it \
+             out. A lock can also only ever be moved later, never shortened"
+                .to_string()
+        }
         FlowError::Tx(TxError::NotAPrimaryAddress { .. }) => {
             "`pecu id show <name@>` lists the addresses that control it, and `pecu key list` \
              shows what you hold. A recovery may have handed the identity to different keys"
@@ -186,6 +197,18 @@ fn flow(what: &'static str, source: FlowError) -> LifecycleError {
         FlowError::Content(message) if message.contains("authority") => {
             "`pecu id show <name@>` names the authority, and `pecu key list` shows which keys \
              you hold. Consensus refuses this without saying why, so it is caught here instead"
+                .to_string()
+        }
+        // Not failures to build: answers. Saying "the change could not be
+        // built" for either would send someone looking for a fault.
+        FlowError::Content(message) if message.contains("already counting down") => {
+            "nothing to do — the countdown is running. `pecu id show <name@>` reports the \
+             height it opens at, and nothing can bring that forward"
+                .to_string()
+        }
+        FlowError::Content(message) if message.contains("is not locked") => {
+            "nothing to do — there is no timelock on it. `pecu id update --unlock-delay` or \
+             `--lock-until` is how one is set"
                 .to_string()
         }
         FlowError::Content(_) => {
@@ -271,6 +294,19 @@ pub fn update(
     if !touches_authority && timelock.is_none() {
         return Err(LifecycleError::EmptyUpdate.into());
     }
+    // Checked here as well as by the SDK so it costs nothing: no key unlocked,
+    // no node asked. The number is unguessable enough to be worth naming.
+    if let Some(blocks) = args.unlock_delay {
+        if blocks > MAX_UNLOCK_DELAY {
+            return Err(LifecycleError::DelayTooLong {
+                blocks,
+                max: MAX_UNLOCK_DELAY,
+                // A block a minute, which is what Verus targets.
+                years: MAX_UNLOCK_DELAY / (60 * 24 * 365),
+            }
+            .into());
+        }
+    }
     // Checked before the keystore is opened: a refusal that costs a passphrase
     // prompt is a refusal that wasted the one interaction this command needs.
     if touches_authority && !args.allow_authority_change {
@@ -305,20 +341,6 @@ pub fn update(
     }
     if let Some(given) = &args.recovery {
         change = change.with_recovery_authority(authority_id(ui, &session.node, given)?);
-    }
-
-    // Only read when a timelock is in play, so the ordinary update keeps its
-    // request count. Consensus refuses this and says only
-    // `mandatory-script-verify-flag-failed` — after the whole thing is built
-    // and signed — so it is worth one read to say what actually happened.
-    if matches!(timelock, Some(Timelock::None)) {
-        let held = held(ui, &session.node, &args.name)?;
-        if let Timelock::DelayAfterUnlock(_) = held.identity.timelock() {
-            return Err(LifecycleError::CannotClearDelayLock {
-                name: args.name.clone(),
-            }
-            .into());
-        }
     }
 
     ui.sdk(format!(
@@ -600,6 +622,135 @@ pub fn recover(
             "txid": outcome.txid,
             "authority": outcome.authority,
             "replaces_primary_addresses": outcome.replaces_primary_addresses,
+            "fee": outcome.fee.to_sat(),
+            "change": outcome.change.to_sat(),
+        })
+    })
+}
+
+/// `pecu id unlock` — start the countdown on a delay-locked identity.
+///
+/// Its own command rather than a flag on `id update`, because the height cannot
+/// be computed by the caller. Consensus measures the countdown from the
+/// transaction's `nExpiryHeight`, not from the tip, and the expiry belongs to
+/// the transaction the flow is building — so the floor is a number the caller
+/// never sees. The obvious guess, tip plus delay, is below it, and consensus
+/// answers that with an unexplained script failure.
+///
+/// This starts the clock. It does not stop the lock: the identity opens when
+/// the chain reaches the published height, and nothing can bring that forward.
+pub fn unlock(
+    ui: &Ui,
+    settings: &Settings,
+    globals: &Globals,
+    args: &IdUnlockArgs,
+) -> miette::Result<()> {
+    if !settings.profile.allow_spend {
+        return Err(LifecycleError::SpendingDisabled {
+            profile: settings.profile.name.clone(),
+        }
+        .into());
+    }
+    // Cheapest refusals first, then the network, then the one interaction.
+    // Naming the key costs nothing and needs no secret, so "there is no key"
+    // should not arrive behind a node timeout.
+    let store = Keystore::new(&settings.paths);
+    let envelope = choose_key(&store, args.from.as_deref())?;
+
+    // The state read comes before the passphrase prompt. The flow checks it
+    // too, but only once the key is unlocked — and asking for a secret to start
+    // an unlock that was never going to happen wastes the one interaction this
+    // command needs. It also buys the panel the delay it reports, which would
+    // otherwise be a number appearing from nowhere.
+    let node = node::connect(&settings.profile)?;
+    let before = held(ui, &node, &args.name)?;
+    let delay = match before.identity.timelock() {
+        Timelock::DelayAfterUnlock(delay) => Some(delay),
+        Timelock::UntilBlock(height) => {
+            return Err(flow(
+                "starting the unlock",
+                FlowError::Content(format!(
+                    "{} is already counting down to block {height}; there is nothing to start",
+                    args.name
+                )),
+            )
+            .into())
+        }
+        Timelock::None => {
+            return Err(flow(
+                "starting the unlock",
+                FlowError::Content(format!("{} is not locked", args.name)),
+            )
+            .into())
+        }
+    };
+
+    let secret = keystore::passphrase(&format!("passphrase for `{}`", envelope.label), false)?;
+    let key = envelope.unlock(&secret)?;
+    let session = Session {
+        node,
+        envelope,
+        key,
+    };
+
+    ui.sdk(format!(
+        "verus_sdk::network::prepare_identity_unlock(&node, &key, &[&key], {:?}, {})",
+        args.name, args.extra_blocks
+    ));
+    let unsent = prepare_identity_unlock(
+        &session.node,
+        &session.key,
+        &[&session.key],
+        &args.name,
+        args.extra_blocks,
+    )
+    .map_err(|source| flow("starting the unlock", source))?;
+    ui.sdk_result(format!(
+        "Unsent<Updated> {{ txid: {} }}",
+        unsent.outcome.txid
+    ));
+
+    let palette = ui.theme.palette;
+    let mut panel = Panel::new(if globals.dry_run {
+        "WOULD UNLOCK"
+    } else {
+        "UNLOCK"
+    })
+    .row("identity", name_row(ui, &args.name));
+    if let Some(delay) = delay {
+        panel = panel.row(
+            "delay",
+            Text::of(
+                fmt::plural(delay as usize, "block", "blocks"),
+                palette.value,
+            ),
+        );
+    }
+    panel = panel
+        .row(
+            "signed by",
+            Text::of(&session.envelope.address, palette.value),
+        )
+        .row("txid", Text::of(&unsent.outcome.txid, palette.value))
+        .row(
+            "fee",
+            amount_row(ui, unsent.outcome.fee, &settings.profile.currency),
+        )
+        .note(Text::of(
+            "this starts the countdown; it does not stop the lock. The identity opens when the \
+             chain reaches the published height, and nothing can bring that forward",
+            palette.muted,
+        ))
+        .note(Text::of(
+            "the height is the delay plus this transaction's own expiry, which is why it \
+             cannot be worked out by hand — `pecu id show` will report it once this confirms",
+            palette.muted,
+        ));
+
+    finish(ui, settings, globals, panel, unsent, "unlock", |outcome| {
+        serde_json::json!({
+            "identity": outcome.identity,
+            "txid": outcome.txid,
             "fee": outcome.fee.to_sat(),
             "change": outcome.change.to_sat(),
         })
