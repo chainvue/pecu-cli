@@ -890,6 +890,22 @@ fn cost_panel(
                     .space()
                     .push(currency, palette.muted),
             );
+
+        // At the cap the chain may have been truncated, and the walk cannot say
+        // whether it was: it stops at `referral_levels` and returns. Anyone
+        // further back receives nothing, silently, so the possibility is worth
+        // stating rather than leaving a referrer to work out why no payment
+        // arrived. VRSCTEST allows three, so a fourth level is never paid.
+        if split.payouts as u32 >= pending.referral_levels {
+            panel = panel.note(Text::of(
+                format!(
+                    "this chain is at the {} this currency allows, so any referrer further \
+                     back receives nothing",
+                    fmt::plural(pending.referral_levels as usize, "level", "levels")
+                ),
+                palette.muted,
+            ));
+        }
     }
     panel
         .note(Text::of(

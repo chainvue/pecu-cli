@@ -367,6 +367,46 @@ fn a_referral_chain_pays_every_level_without_changing_the_outlay() {
     );
     // Unchanged by depth.
     assert!(stdout.contains("80.00000000"), "{stdout}");
+    // Below the cap, so nothing should claim anyone was dropped.
+    assert!(!stdout.contains("receives nothing"), "{stdout}");
+}
+
+/// At the cap, a referrer further back is dropped and nothing else says so.
+///
+/// VRSCTEST allows three levels, so `pecudepth2@` — itself two deep — makes a
+/// chain that reaches it. There is no fourth level to pay: a notional depth 4
+/// pays the same three and drops the oldest.
+#[test]
+#[ignore = "talks to api.verustest.net"]
+fn a_chain_at_the_cap_says_that_earlier_referrers_get_nothing() {
+    let Ok(funded) = std::env::var("PECU_FUNDED_HOME") else {
+        eprintln!("PECU_FUNDED_HOME is not set — skipping");
+        return;
+    };
+
+    let assertion = Command::cargo_bin("pecu")
+        .expect("built")
+        .env("PECU_HOME", &funded)
+        .args([
+            "id",
+            "register",
+            "pecudryrun5",
+            "--from",
+            "faucet",
+            "--referral",
+            "pecudepth2@",
+            "--dry-run",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+
+    assert!(stdout.contains("across 3 levels"), "{stdout}");
+    assert!(stdout.contains("60.00000000"), "{stdout}");
+    assert!(stdout.contains("20.00000000"), "{stdout}");
+    assert!(stdout.contains("receives nothing"), "{stdout}");
+    // Still 80: depth changes the split, never the outlay.
+    assert!(stdout.contains("80.00000000"), "{stdout}");
 }
 
 /// Registering burns a hundred coins. `--json` is output, not consent.

@@ -560,6 +560,16 @@ Both depths proven on chain rather than argued:
 The depth-2 transaction carries **two** payout outputs, in that order, and both
 identities' balances moved by exactly 20. The outlay differs only by miner fees.
 
+**The chain is capped, and the cap is silent.** `idreferrallevels` is 3 on
+VRSCTEST, so a chain stops at three referrers and anyone further back receives
+nothing — there is no fourth level to pay. Depth 3 pays 60 and burns 20, and a
+notional depth 4 pays exactly the same three, dropping the oldest. The panel says
+so when a chain reaches the cap, because a referrer who was quietly dropped has
+no other way to find out.
+
+The walk reads each referrer's **own registration transaction** and takes its
+payout outputs, which is how a chain is discovered at all rather than declared.
+
 Both numbers come from the **currency being registered under**, not the chain,
 so they differ per currency. The SDK's `registration_fee` is policy *before* the
 discount — showing that beside a referral overstated the cost by a fifth and
