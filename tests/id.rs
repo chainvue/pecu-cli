@@ -317,11 +317,56 @@ fn a_referral_reduces_the_outlay_and_the_split_is_shown() {
     assert!(stdout.contains("80.00000000"), "{stdout}");
     assert!(stdout.contains("20.00000000"), "{stdout}");
     assert!(stdout.contains("60.00000000"), "{stdout}");
+    assert!(stdout.contains("across 1 level"), "{stdout}");
     // And it must not still call the whole undiscounted fee burned.
     assert!(
         !stdout.contains("100.00000000 VRSCTEST  burned"),
         "the undiscounted fee is still described as burned:\n{stdout}"
     );
+}
+
+/// A referrer who was itself referred is paid too, and the outlay does not move.
+///
+/// Only the split does: at depth 2 the same 80 buys two 20-coin payouts and 40
+/// burned, rather than one payout and 60 burned. Proven on chain by
+/// `6ab375a6…`, whose registration carries two payout outputs nearest-first.
+/// `pecuref9@` is referred by `pecucli7@`, which is what makes the chain two
+/// deep.
+#[test]
+#[ignore = "talks to api.verustest.net"]
+fn a_referral_chain_pays_every_level_without_changing_the_outlay() {
+    let Ok(funded) = std::env::var("PECU_FUNDED_HOME") else {
+        eprintln!("PECU_FUNDED_HOME is not set — skipping");
+        return;
+    };
+
+    let assertion = Command::cargo_bin("pecu")
+        .expect("built")
+        .env("PECU_HOME", &funded)
+        .args([
+            "id",
+            "register",
+            "pecudryrun4",
+            "--from",
+            "faucet",
+            "--referral",
+            "pecuref9@",
+            "--dry-run",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+
+    assert!(stdout.contains("across 2 levels"), "{stdout}");
+    // The assertion that would catch counting the levels allowed rather than
+    // the referrers actually in the chain: that would show 20 and 60 here.
+    assert!(stdout.contains("40.00000000"), "{stdout}");
+    assert!(
+        !stdout.contains("60.00000000"),
+        "depth was not counted:\n{stdout}"
+    );
+    // Unchanged by depth.
+    assert!(stdout.contains("80.00000000"), "{stdout}");
 }
 
 /// Registering burns a hundred coins. `--json` is output, not consent.

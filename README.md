@@ -546,9 +546,19 @@ levels — that is 80 out of pocket rather than 100:
 │   burned         60.00000000 VRSCTEST                                            │
 ```
 
-Proven on chain: `pecuref9@` registered referred by `pecucli7@` — the referrer
-received exactly 20.00000000, visible as output #1 of `0ccfe028…`, and the payer
-parted with 80.000224 including two miner fees.
+**A referrer who was itself referred is paid too**, one output per level,
+nearest first — and the registrant's outlay does *not* change with depth. Only
+the split between payouts and burn does.
+
+Both depths proven on chain rather than argued:
+
+| depth | transaction | payouts | burned | outlay |
+|---|---|---|---|---|
+| 1 | `0ccfe028…` | 20 to `pecucli7@` | 60 | 80.000224 |
+| 2 | `6ab375a6…` | 20 to `pecuref9@`, 20 to `pecucli7@` | 40 | 80.000244 |
+
+The depth-2 transaction carries **two** payout outputs, in that order, and both
+identities' balances moved by exactly 20. The outlay differs only by miner fees.
 
 Both numbers come from the **currency being registered under**, not the chain,
 so they differ per currency. The SDK's `registration_fee` is policy *before* the
