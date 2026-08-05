@@ -181,6 +181,34 @@ fn an_identity_that_is_its_own_revocation_authority_is_flagged() {
     assert!(stdout.contains("cannot take it back"), "{stdout}");
 }
 
+/// Every identity says whether it is locked, including the ones that are not.
+///
+/// This was omitted for unlocked identities on the reasoning that the section's
+/// presence was the signal. Silence is not a signal: it reads the same as not
+/// having looked, and whether funds can move is not a question to answer only
+/// sometimes.
+#[test]
+#[ignore = "talks to api.verustest.net"]
+fn an_identity_that_was_never_locked_still_says_so() {
+    let home = home();
+    let assertion = pecu(&home)
+        .args(["id", "show", CHAIN_IDENTITY])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+
+    assert!(
+        stdout.contains("TIMELOCK"),
+        "no timelock section, so the reader cannot tell unlocked from unexamined:\n{stdout}"
+    );
+    // "never locked" and "unlocked" are different facts — the second leaves a
+    // height behind — so whichever it is, it must be stated.
+    assert!(
+        stdout.contains("never locked") || stdout.contains("unlocked") || stdout.contains("locked"),
+        "{stdout}"
+    );
+}
+
 #[test]
 #[ignore = "talks to api.verustest.net"]
 fn the_identity_this_project_registered_is_there() {

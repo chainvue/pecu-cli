@@ -798,15 +798,27 @@ fn registered_row(ui: &Ui, height: u32, mined: Option<i64>) -> Text {
     row
 }
 
-/// The TIMELOCK section, when there is one to show.
+/// The TIMELOCK section, always.
 ///
-/// Omitted entirely for an unlocked identity: a row saying "not locked" on
-/// every identity is noise, and this section appearing at all is the signal.
+/// This used to be omitted for an unlocked identity, on the reasoning that a
+/// row saying "not locked" everywhere is noise and the section's presence is
+/// the signal. That was wrong. An identity is always in one of these states, so
+/// silence does not read as "not locked" — it reads as "this wallet did not
+/// say", which is indistinguishable from "did not look". Whether funds can move
+/// is not a question to answer only sometimes.
 fn timelock_panel(ui: &Ui, panel: Panel, timelock: Timelock, tip: Option<u32>) -> Panel {
     let palette = ui.theme.palette;
     let glyphs = ui.theme.glyphs;
     match timelock {
-        Timelock::None => panel,
+        // "never locked" rather than "unlocked": this is the absence of a
+        // timelock, not the end of one. An identity whose countdown finished
+        // says something different below, and keeps its leftover height.
+        Timelock::None => panel.section("TIMELOCK").row(
+            "state",
+            Text::of(glyphs.ok, palette.ok)
+                .space()
+                .push("never locked", palette.ok),
+        ),
         Timelock::UntilBlock(height) => {
             // Past or future decides the tense, and both are ordinary states: a
             // countdown that has elapsed leaves its height on the identity
