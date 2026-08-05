@@ -156,9 +156,15 @@ fn an_identity_that_is_its_own_revocation_authority_is_flagged() {
         .success();
     let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
 
-    // Unrevokable, and not obvious from the address alone — the same string
-    // appears three times and the reader has to notice.
+    // Not obvious from the address alone — the same string appears three times
+    // and the reader has to notice. The marker must not claim the arrangement
+    // is permanent: an identity update can repoint either authority.
     assert!(stdout.contains("(itself)"), "{stdout}");
+    assert!(stdout.contains("can repoint it"), "{stdout}");
+    assert!(
+        !stdout.contains("cannot be changed"),
+        "the output claims authorities are unchangeable, which is false:\n{stdout}"
+    );
     assert!(stdout.contains("revocation"), "{stdout}");
     assert!(stdout.contains("1-of-1"), "{stdout}");
 }

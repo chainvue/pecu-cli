@@ -363,11 +363,14 @@ pecu id register alice --from cold  # run it again to carry on where it left off
 ```
 
 `(itself)` is the row worth reading. A freshly registered VerusID is **its own
-revocation and recovery authority**, which makes it unrevokable and
-unrecoverable — and the SDK is explicit that pointing those elsewhere is a
-decision at registration time, not a later refinement. `RegistrationOptions` has
-no field for it, so this build cannot offer the choice; it does refuse to let it
-pass unmentioned, warning before you pay.
+revocation and recovery authority**, so both roles answer to the same primary
+keys listed above — there is no independent guardian to fall back on if those
+keys are lost.
+
+That is a default, not a life sentence: an identity update can repoint either
+authority at another VerusID. `RegistrationOptions` has no field to set them at
+registration, so this build cannot offer the choice up front, but it says what
+the default means before you pay.
 
 #### Registration is two transactions
 

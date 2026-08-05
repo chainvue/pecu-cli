@@ -225,16 +225,16 @@ pub fn show(ui: &Ui, settings: &Settings, name: &str) -> miette::Result<()> {
                 .push(address, palette.value),
         );
     }
+    let mut self_held = false;
     for (label, field) in [
         ("revocation", "revocationauthority"),
         ("recovery", "recoveryauthority"),
     ] {
         if let Some(authority) = identity.get(field).and_then(|v| v.as_str()) {
             let mut row = Text::of(authority, palette.value);
-            // An identity that is its own revocation authority cannot be
-            // revoked by anyone else — including you, if you lose the keys.
             if authority == record.identity_address {
                 row = row.push("  (itself)", palette.warn);
+                self_held = true;
             }
             panel = panel.row(label, row);
         }
@@ -258,6 +258,17 @@ pub fn show(ui: &Ui, settings: &Settings, name: &str) -> miette::Result<()> {
                 palette.value,
             ),
         );
+    }
+
+    if self_held {
+        // The authority is the identity, so it answers to the primary keys
+        // above: there is no independent guardian. It is not permanent — an
+        // update can repoint either authority — but it is worth noticing.
+        panel = panel.note(Text::of(
+            "an authority pointing at the identity itself answers to the same primary keys \
+             above; an identity update can repoint it",
+            palette.muted,
+        ));
     }
 
     ui.panel(&panel);
@@ -658,16 +669,23 @@ fn cost_panel(
              first confirms",
             palette.muted,
         ))
-        // Not a detail to discover later. A fresh identity is its own
-        // revocation and recovery authority, which makes it unrevokable and
-        // unrecoverable, and the SDK is explicit that pointing them elsewhere
-        // is a decision at registration time rather than a later refinement.
-        // `RegistrationOptions` has no field for it, so this build cannot offer
-        // the choice -- but it can refuse to let it pass unmentioned.
+        // What the default actually costs you: there is no *independent*
+        // guardian. The revocation and recovery authority is the identity
+        // itself, so it answers to the same keys listed above -- lose those and
+        // nothing else can recover it.
+        //
+        // Deliberately not "this cannot be changed later", which is false. An
+        // identity update can repoint either authority; `verus_tx`'s own
+        // `UpdateParams::allow_authority_change` exists for exactly that.
+        // `RegistrationOptions` simply has no field to set them up front.
         .note(Text::of(
-            "this identity will be its own revocation and recovery authority: it cannot be \
-             revoked or recovered afterwards, and that cannot be changed later",
+            "both revocation and recovery will point at the identity itself, so the keys above \
+             are the only thing protecting it — there is no separate authority to fall back on",
             palette.warn,
+        ))
+        .note(Text::of(
+            "an identity update can point either authority at another VerusID later",
+            palette.muted,
         ))
 }
 
