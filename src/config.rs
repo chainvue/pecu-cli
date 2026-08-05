@@ -106,6 +106,13 @@ impl Paths {
         self.root.join("keys")
     }
 
+    /// Half-finished operations. An identity registration between its commit
+    /// and its reveal lives here: the salt in a `Pending` cannot be recovered
+    /// from anywhere else, so losing it loses both the name and the fee.
+    pub fn pending_dir(&self) -> PathBuf {
+        self.root.join("pending")
+    }
+
     /// How many keys the keystore holds. A missing directory is zero, not an
     /// error: not having made a key yet is the normal first state.
     pub fn key_count(&self) -> usize {

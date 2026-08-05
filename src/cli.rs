@@ -342,12 +342,43 @@ pub struct QrOut {
     pub qr_out: Option<std::path::PathBuf>,
 }
 
+/// A VerusID registration.
+///
+/// Two transactions with a confirmation between them. Running this again after
+/// the first resumes rather than starting over.
+#[derive(Debug, Clone, Args)]
+pub struct IdRegisterArgs {
+    /// The name to claim, without a parent: `alice` or `alice@`
+    #[arg(value_name = "NAME")]
+    pub name: String,
+
+    /// Which stored key pays. Defaults to the only one, if there is only one
+    #[arg(long, short = 'f', value_name = "LABEL")]
+    pub from: Option<String>,
+
+    /// Addresses that will control the identity. Defaults to the paying key's
+    #[arg(long, value_name = "ADDRESS")]
+    pub primary: Vec<String>,
+
+    /// How many of those must sign. Defaults to 1
+    #[arg(long, value_name = "N")]
+    pub min_sigs: Option<u32>,
+
+    /// A referrer, which reduces the fee
+    #[arg(long, value_name = "NAME@")]
+    pub referral: Option<String>,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum IdCommand {
     /// Read an identity off the chain
-    Show,
-    /// Register a new VerusID
-    Register,
+    Show {
+        /// The identity: a name like `bob@`, or an i-address
+        #[arg(value_name = "NAME@|i-ADDRESS")]
+        name: String,
+    },
+    /// Register a new VerusID. Run it again to carry on where it left off
+    Register(IdRegisterArgs),
     /// Republish an identity with changes
     Update,
     /// Revoke an identity

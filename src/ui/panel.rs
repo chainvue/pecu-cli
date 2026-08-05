@@ -182,15 +182,26 @@ impl Panel {
                     }
                 }
                 Item::Row { label, value } => {
-                    let assembled = Text::of(pad(label, label_width), palette.label)
-                        .push(" ".repeat(LABEL_GUTTER), palette.label)
-                        .push(value.render(), Default::default());
-                    // `value` is already escaped, so its width has to be carried
-                    // rather than re-measured off the string.
-                    drawn.push(Drawn::Content(Text::preformatted(
-                        assembled.render(),
-                        label_width + LABEL_GUTTER + value.width(),
-                    )));
+                    // A 64-character hash beside a long label does not fit at
+                    // 80 columns. Wrapping it is lossless — cutting it would not
+                    // be — so the value flows onto continuation lines aligned
+                    // under itself rather than pushing the frame open.
+                    let column = label_width + LABEL_GUTTER;
+                    let budget = theme.width.saturating_sub(column);
+                    for (line, part) in value.wrap(budget).into_iter().enumerate() {
+                        let prefix = if line == 0 {
+                            Text::of(pad(label, label_width), palette.label)
+                                .push(" ".repeat(LABEL_GUTTER), palette.label)
+                        } else {
+                            Text::raw(" ".repeat(column))
+                        };
+                        // `part` is already escaped, so its width has to be
+                        // carried rather than re-measured off the string.
+                        drawn.push(Drawn::Content(Text::preformatted(
+                            prefix.push(part.render(), Default::default()).render(),
+                            column + part.width(),
+                        )));
+                    }
                 }
                 Item::Path { label, path } => {
                     // Fitted against the theme's ceiling rather than the final
@@ -450,6 +461,26 @@ mod tests {
     fn a_panel_shrinks_to_its_content_but_not_below_the_minimum() {
         let rendered = Panel::new("T").row("a", Text::raw("b")).render(&phosphor());
         assert_eq!(frame_widths(&rendered)[0], MIN_PANEL_WIDTH + 4);
+    }
+
+    #[test]
+    fn a_row_wraps_its_value_rather_than_pushing_the_frame_open() {
+        // A 64-character hash beside a long label. The frame must stay square
+        // and every character of the hash must survive.
+        let hash = "b".repeat(64);
+        let panel = Panel::new("T")
+            .row("confirmations", Text::raw("0"))
+            .row("commitment", Text::raw(&hash));
+        let theme = phosphor();
+        assert_rectangular(&panel, &theme);
+
+        let rendered = panel.render(&theme);
+        let joined: String = rendered
+            .lines()
+            .map(crate::ui::text::strip_ansi)
+            .map(|line| line.trim_matches(['│', ' ']).to_string())
+            .collect();
+        assert!(joined.contains(&hash), "the hash was cut:\n{rendered}");
     }
 
     #[test]

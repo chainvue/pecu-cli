@@ -7,6 +7,7 @@
 pub mod airgap;
 pub mod dev;
 pub mod doctor;
+pub mod id;
 pub mod key;
 pub mod send;
 pub mod tx;
@@ -110,9 +111,16 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
             airgap::broadcast(&ui, &Settings::resolve(&cli.globals)?, &cli.globals, args)
         }
 
+        Command::Id {
+            command: IdCommand::Show { name },
+        } => id::show(&ui, &Settings::resolve(&cli.globals)?, name),
+
+        Command::Id {
+            command: IdCommand::Register(args),
+        } => id::register(&ui, &Settings::resolve(&cli.globals)?, &cli.globals, args),
+
         Command::Id { command } => Err(match command {
-            IdCommand::Show => NotYet::at("id show", "M7"),
-            IdCommand::Register => NotYet::at("id register", "M7"),
+            IdCommand::Show { .. } | IdCommand::Register(_) => unreachable!("handled above"),
             IdCommand::Update => NotYet::at("id update", "M7"),
             IdCommand::Revoke => NotYet::at("id revoke", "M7"),
             IdCommand::Recover => NotYet::at("id recover", "M7"),

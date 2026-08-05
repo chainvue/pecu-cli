@@ -54,7 +54,8 @@ make run ARGS="doctor"
 | `pecu tx explain` | Says what every output in a transaction actually *is* | ✅ done |
 | `pecu send` | Transparent sends, native and token | ✅ done |
 | `pecu plan send` / `pecu sign` / `pecu broadcast` | The air-gap trio, over files or QR codes | ✅ done |
-| `pecu id show\|register\|update\|revoke\|recover` | VerusID lifecycle | M7 |
+| `pecu id show\|register` | Read an identity; register one (two-phase, resumable) | ✅ done |
+| `pecu id update\|revoke\|recover` | The rest of the lifecycle | M7b |
 | `pecu id login\|publish\|read` | Sign-in with VerusID, and VDXF data | M8 |
 | `pecu completions <shell>` | Shell completion script | ✅ done |
 
@@ -325,6 +326,62 @@ reason. Hex is upper-cased so QR uses alphanumeric mode at 5.5 bits per characte
 rather than byte mode at 8.
 
 `--qr` draws in the terminal; `--qr-out <stem>` writes `<stem>-1.png`, `-2.png`, …
+
+### `pecu id`
+
+```sh
+pecu id show VRSCTEST@              # read any identity off the chain
+pecu id register alice --from cold  # run it again to carry on where it left off
+```
+
+```
+┌─ IDENTITY ───────────────────────────────────────────────┐
+│ name         pecucli7.VRSCTEST@                          │
+│ i-address    i7r29bDQfrwjkTxjv4bcYD6B1ZV7WZ4kGo          │
+│ status       ✓ active                                    │
+│ registered   block 1,176,650                             │
+├─ CONTROL ────────────────────────────────────────────────┤
+│ signatures   1-of-1                                      │
+│ ▸ RComfCn4wHHsGR8vWBAU7T1r3tHHyxN9Hm                     │
+│ revocation   i7r29bDQfrwjkTxjv4bcYD6B1ZV7WZ4kGo (itself) │
+│ recovery     i7r29bDQfrwjkTxjv4bcYD6B1ZV7WZ4kGo (itself) │
+└──────────────────────────────────────────────────────────┘
+```
+
+`(itself)` is the row worth reading. A freshly registered VerusID is **its own
+revocation and recovery authority**, which makes it unrevokable and
+unrecoverable — and the SDK is explicit that pointing those elsewhere is a
+decision at registration time, not a later refinement. `RegistrationOptions` has
+no field for it, so this build cannot offer the choice; it does refuse to let it
+pass unmentioned, warning before you pay.
+
+#### Registration is two transactions
+
+Step one commits to the name under a salt. Step two reveals it and pays. Between
+them sits a confirmation — and a salt that exists nowhere else. Lose it and the
+name is unclaimable and the commitment fee is gone.
+
+So the `Pending` is written to `<config>/pending/<name>.json` **before anything
+is broadcast**, and re-running the same command picks it up:
+
+```
+┌─ WAITING ────────────────────────────────────────────────────────────────────┐
+│ name            pecucli7@                                                    │
+│ commitment      bc1e12add8d97582a0814ed79afa094c5cbb5d5ad165239baf265fe923c5 │
+│                 a07d                                                         │
+│ confirmations   0 (still in the mempool)                                     │
+└──────────────────────────────────────────────────────────────────────────────┘
+  ▸ run the same command again in a minute
+```
+
+The SDK makes the ordering hard to get wrong: `complete` exists only on
+`Pending<ReadyToRegister>`, and the only way to hold one is a `poll` that saw the
+commitment confirm. Running step two early is a **compile error**, not a spent
+commitment.
+
+The success message says *broadcast*, not *registered* — the identity does not
+exist until the transaction is mined, and `id show` will say nothing is called
+that until then.
 
 ### `--explain`
 

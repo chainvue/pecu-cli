@@ -115,6 +115,13 @@ impl Text {
         if width == 0 || self.known_width.is_some() {
             return vec![self.clone()];
         }
+        // Text that already fits is returned untouched rather than taken apart
+        // and put back together. Splitting on spaces and rejoining with single
+        // ones would quietly destroy a deliberate run of them — a value aligned
+        // by padding loses its alignment for no reason at all.
+        if self.width() <= width {
+            return vec![self.clone()];
+        }
 
         let mut lines: Vec<Text> = Vec::new();
         let mut line = Text::new();
@@ -282,6 +289,16 @@ mod tests {
     #[test]
     fn text_that_already_fits_comes_back_as_one_line() {
         assert_eq!(Text::raw("short").wrap(40).len(), 1);
+    }
+
+    #[test]
+    fn deliberate_spacing_survives_when_no_wrapping_is_needed() {
+        // A column aligned by padding. Tokenising and rejoining would collapse
+        // the run to a single space and silently break the alignment.
+        let aligned = Text::raw("3,481,207        node");
+        let lines = aligned.wrap(60);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].render(), "3,481,207        node");
     }
 
     #[test]
