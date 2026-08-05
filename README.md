@@ -158,21 +158,37 @@ pecu wallet utxos --key demo
 ```
 
 ```
-┌─ WALLET ──────────────────────────────────────┐
-│ address   iJhCezBExJHvtyH3fGhNnt2NhU4Ztkf2yq  │
-│ tip       ▸ 1,176,557                         │
-├───────────────────────────────────────────────┤
-│ SPENDABLE  0.00000000  VRSCTEST  (0 outputs)  │
-│ WITHHELD   0.00000000  VRSCTEST  (15 outputs) │
-├─ TOKENS ──────────────────────────────────────┤
-│ 9272.49511041  (unnamed)  iHBwQo7LU…dK9f      │
-└───────────────────────────────────────────────┘
+┌─ WALLET ───────────────────────────────────────────────┐
+│ address   iJhCezBExJHvtyH3fGhNnt2NhU4Ztkf2yq           │
+│ tip       ▸ 1,176,594                                  │
+├────────────────────────────────────────────────────────┤
+│ SPENDABLE          0.00000000  VRSCTEST  (0 outputs)   │
+│ WITHHELD           0.00000000  VRSCTEST  (15 outputs)  │
+│ HELD BY ID     20155.03513344  VRSCTEST  (11 outputs)  │
+│ IN CONDITIONS   1159.18038198  VRSCTEST  (210 outputs) │
+│ TOTAL          21314.21551542  VRSCTEST                │
+├─ TOKENS ───────────────────────────────────────────────┤
+│ 9272.49511041  (unnamed)  iHBwQo7LU…dK9f               │
+└────────────────────────────────────────────────────────┘
 ```
 
-That is a real VRSCTEST address, and it is the whole point: **zero satoshis, and
-9272 in tokens.** A Verus balance is three numbers, not one — what is spendable
-now, what the node withheld, and what is held in CryptoCondition outputs whose
-value is in the payload rather than the satoshi field.
+That is a real VRSCTEST address, and it is the whole point: **nothing a key can
+spend, 21,314 in native value, and 9272 in a token.** A Verus balance is not one
+number, and a wallet that prints one is wrong.
+
+| Row | What it is |
+|---|---|
+| `SPENDABLE` | Plain P2PKH outputs. What a transparent key can move right now |
+| `WITHHELD` | Outputs the node reported as not spendable yet |
+| `HELD BY ID` | Native value in pay-to-identity outputs — a VerusID's own funds, spendable by its authority rather than by a key |
+| `IN CONDITIONS` | Native value in every other CryptoCondition output |
+| `TOTAL` | The sum, which is what a block explorer shows |
+
+`HELD BY ID` is where an i-address keeps everything it owns. The SDK deliberately
+keeps those outputs out of the spendable bucket — the native builders would
+destroy what they carry — but they are still the balance, and there is a test
+that reconciles `TOTAL` against the node's own `getaddressbalance`, satoshi for
+satoshi.
 
 - **`WITHHELD`, not "immature".** Coinbase maturity is the usual cause, but the
   SDK routes *any* output the node reports as unspendable into that bucket. An

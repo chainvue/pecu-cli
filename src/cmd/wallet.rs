@@ -13,8 +13,11 @@
 
 use miette::Diagnostic;
 use thiserror::Error;
+use verus_sdk::decode::{decode_output_script, OutputKind};
+use verus_sdk::money::Amount;
 use verus_sdk::network::{
-    currency_names, native_currency, spendable, FlowError, Funding, RpcError, TokenBalances,
+    currency_names, native_currency, spendable, AddressUtxo, FlowError, Funding, RpcError,
+    TokenBalances,
 };
 use verus_sdk::send::CurrencyId;
 use verus_sdk::verus_keys::{Address, AddressKind};
@@ -143,6 +146,58 @@ struct Wallet {
     native: Option<CurrencyId>,
 }
 
+/// Native value sitting in CryptoCondition outputs.
+///
+/// `Funding::other` is not a curiosity to be counted and dropped. The native
+/// builders refuse those outputs — a reserve output's value is in its payload,
+/// so spending one as ordinary funding would destroy what it carries — but for
+/// a **VerusID** the bucket *is* the balance: an identity's funds are held in
+/// pay-to-identity outputs, spendable by its authority rather than by a key.
+///
+/// Reporting only a count of them is how this wallet showed 0 for an address
+/// holding 7.7 million.
+#[derive(Default)]
+struct Conditions {
+    /// Native satoshis held for a VerusID.
+    identity: Amount,
+    identity_outputs: usize,
+    /// Native satoshis in every other CryptoCondition output. Usually zero —
+    /// a reserve output carries its value in the payload, not the satoshi field.
+    other: Amount,
+    other_outputs: usize,
+}
+
+impl Conditions {
+    fn total(&self) -> Amount {
+        self.identity
+            .checked_add(self.other)
+            .unwrap_or(Amount::ZERO)
+    }
+}
+
+/// Split the CryptoCondition outputs by what their scripts actually say.
+///
+/// The scripts are already in hand, so this costs no network and no node
+/// opinion — it is the same `decode_output_script` that `tx explain` uses.
+fn classify(others: &[AddressUtxo]) -> Conditions {
+    let mut found = Conditions::default();
+    for held in others {
+        let satoshis = held.utxo.satoshis;
+        let is_identity = matches!(
+            decode_output_script(&held.utxo.script_pubkey),
+            Ok(OutputKind::IdentityPayment { .. })
+        );
+        let (total, count) = if is_identity {
+            (&mut found.identity, &mut found.identity_outputs)
+        } else {
+            (&mut found.other, &mut found.other_outputs)
+        };
+        *total = total.checked_add(satoshis).unwrap_or(*total);
+        *count += 1;
+    }
+    found
+}
+
 fn gather(settings: &Settings, address: String) -> Result<(Node, Wallet), miette::Report> {
     let node = node::connect(&settings.profile)?;
     let funding = spendable(&node, &address)
@@ -171,6 +226,17 @@ pub fn balance(
 
     let spendable_tokens = wallet.funding.token_balances(wallet.native);
     let immature_tokens = wallet.funding.immature_token_balances(wallet.native);
+    let conditions = classify(&wallet.funding.other);
+    // What an explorer shows, and therefore the figure worth being able to
+    // cross-check at a glance.
+    let total = [
+        wallet.funding.total,
+        wallet.funding.immature_total(),
+        conditions.total(),
+    ]
+    .into_iter()
+    .try_fold(Amount::ZERO, Amount::checked_add)
+    .unwrap_or(Amount::ZERO);
 
     // One request per currency, so only asked when there is something to name.
     let names = match &spendable_tokens {
@@ -193,7 +259,15 @@ pub fn balance(
                 "satoshis": wallet.funding.immature_total().to_sat(),
                 "outputs": wallet.funding.immature.len(),
             },
-            "cryptocondition_outputs": wallet.funding.other.len(),
+            "held_for_identity": {
+                "satoshis": conditions.identity.to_sat(),
+                "outputs": conditions.identity_outputs,
+            },
+            "in_conditions": {
+                "satoshis": conditions.other.to_sat(),
+                "outputs": conditions.other_outputs,
+            },
+            "total_satoshis": total.to_sat(),
             "tokens": tokens_json(&spendable_tokens, &names),
             "withheld_tokens": tokens_json(&immature_tokens, &names),
         }));
@@ -229,6 +303,43 @@ pub fn balance(
                 ),
                 palette.muted,
             ),
+        ]);
+    }
+
+    let mut row = |label: &str, amount: Amount, style: anstyle::Style, outputs: usize| {
+        totals.push(vec![
+            Text::of(label, palette.label),
+            Text::of(fmt::amount(amount), style),
+            Text::of(currency, palette.muted),
+            Text::of(
+                format!("({})", fmt::plural(outputs, "output", "outputs")),
+                palette.muted,
+            ),
+        ]);
+    };
+    if conditions.identity_outputs > 0 {
+        row(
+            "HELD BY ID",
+            conditions.identity,
+            palette.value,
+            conditions.identity_outputs,
+        );
+    }
+    if conditions.other_outputs > 0 {
+        row(
+            "IN CONDITIONS",
+            conditions.other,
+            palette.value,
+            conditions.other_outputs,
+        );
+    }
+    // Only worth a line when it is not simply the spendable figure again.
+    if total != wallet.funding.total {
+        totals.push(vec![
+            Text::of("TOTAL", palette.label),
+            Text::of(fmt::amount(total), palette.accent),
+            Text::of(currency, palette.muted),
+            Text::new(),
         ]);
     }
 
@@ -273,27 +384,23 @@ pub fn balance(
         ));
     }
 
-    // The count matters even when nothing could be read out of them: it is the
-    // difference between "this address holds nothing else" and "this address
-    // holds things I did not decode".
-    if !wallet.funding.other.is_empty() {
-        let carried = spendable_tokens
-            .as_ref()
-            .map(|held| held.len())
-            .unwrap_or(0);
-        if carried == 0 {
-            panel = panel.note(Text::of(
-                format!(
-                    "{} carrying no currency — identities, most likely",
-                    fmt::plural(
-                        wallet.funding.other.len(),
-                        "CryptoCondition output",
-                        "CryptoCondition outputs"
-                    )
-                ),
-                palette.muted,
-            ));
-        }
+    // The value in these outputs is real, and it is not spendable by a key —
+    // saying only the first half would overstate what a signer can move, and
+    // saying only the second is how this once reported 0 for an address holding
+    // 7.7 million.
+    if conditions.identity_outputs > 0 {
+        panel = panel.note(Text::of(
+            "held by id: this VerusID's own funds. Spendable by its authority, not by a \
+             transparent key, so the native builders leave them alone",
+            palette.muted,
+        ));
+    }
+    if conditions.other_outputs > 0 {
+        panel = panel.note(Text::of(
+            "in conditions: CryptoCondition outputs that are not plain identity payments. \
+             Any token they carry is counted above, in its own currency",
+            palette.muted,
+        ));
     }
 
     ui.panel(&panel);
@@ -487,4 +594,61 @@ fn emit_json(value: &serde_json::Value) {
         "{}",
         serde_json::to_string_pretty(value).expect("the report is plain data")
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use verus_sdk::money::{Txid, Utxo};
+
+    use super::*;
+
+    fn utxo(script: Vec<u8>, satoshis: u64) -> AddressUtxo {
+        AddressUtxo {
+            utxo: Utxo {
+                txid: Txid::from_internal([0u8; 32]),
+                vout: 0,
+                satoshis: Amount::from_sat(satoshis),
+                script_pubkey: script,
+            },
+            address: "iJhCezBExJHvtyH3fGhNnt2NhU4Ztkf2yq".into(),
+            height: 1,
+            is_spendable: false,
+        }
+    }
+
+    /// A real pay-to-identity script, produced by the daemon and taken from the
+    /// SDK's own fixtures.
+    fn identity_payment() -> Vec<u8> {
+        let hex = include_str!("../../fixtures/script-identity-payment.hex");
+        hex::decode(hex.trim()).expect("a valid fixture")
+    }
+
+    #[test]
+    fn native_value_held_for_an_identity_is_counted_not_just_tallied() {
+        // The regression this exists for: `wallet balance` used to print a
+        // *count* of these outputs and none of their value, so a VerusID holding
+        // 7.7 million reported zero.
+        let found = classify(&[
+            utxo(identity_payment(), 100_000_000),
+            utxo(identity_payment(), 25_000_000),
+        ]);
+        assert_eq!(found.identity_outputs, 2);
+        assert_eq!(found.identity.to_sat(), 125_000_000);
+        assert_eq!(found.other_outputs, 0);
+        assert_eq!(found.total().to_sat(), 125_000_000);
+    }
+
+    #[test]
+    fn anything_that_is_not_an_identity_payment_lands_in_the_other_bucket() {
+        // An OP_RETURN: decodable as a script, not as an identity payment.
+        let found = classify(&[utxo(vec![0x6a, 0x01, 0x00], 7)]);
+        assert_eq!(found.identity_outputs, 0);
+        assert_eq!(found.other_outputs, 1);
+        assert_eq!(found.other.to_sat(), 7);
+    }
+
+    #[test]
+    fn an_empty_bucket_totals_zero_rather_than_panicking() {
+        assert_eq!(classify(&[]).total(), Amount::ZERO);
+    }
 }

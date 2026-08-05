@@ -152,6 +152,39 @@ fn a_real_balance_separates_spendable_withheld_and_tokens() {
 
 #[test]
 #[ignore = "talks to api.verustest.net"]
+fn the_total_reconciles_with_the_node_satoshi_for_satoshi() {
+    use verus_sdk::network::{ChainReader, HttpTransport, RpcClient};
+
+    // The bug this guards: an identity's funds live in pay-to-identity outputs,
+    // which the SDK keeps out of the spendable bucket because no transparent key
+    // can move them. Counting them and not summing them made this wallet report
+    // zero for an address holding millions.
+    let home = home();
+    let assertion = pecu(&home)
+        .args(["wallet", "balance", "--address", CHAIN_IDENTITY, "--json"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+    let ours: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+
+    let node = RpcClient::new(HttpTransport::new("https://api.verustest.net").expect("endpoint"));
+    let theirs = node
+        .address_balance(&[CHAIN_IDENTITY])
+        .expect("the node should answer");
+
+    assert_eq!(
+        ours["total_satoshis"].as_u64().expect("a total"),
+        theirs.balance.to_sat(),
+        "our total disagrees with getaddressbalance:\n{ours:#}"
+    );
+    assert!(
+        ours["held_for_identity"]["satoshis"].as_u64().unwrap_or(0) > 0,
+        "an i-address holds its funds in identity payments; none were counted:\n{ours:#}"
+    );
+}
+
+#[test]
+#[ignore = "talks to api.verustest.net"]
 fn utxos_list_the_outputs_behind_the_balance() {
     let home = home();
     let assertion = pecu(&home)
