@@ -12,7 +12,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 /// "which SDK is this?" is the first question when something on chain disagrees.
 macro_rules! sdk_rev {
     () => {
-        "81ccd17c15e4f3fd2badf453c5a9c9c39d7deb6a"
+        "673a84fc396172c67f220c8e60162f3e520368b0"
     };
 }
 pub(crate) use sdk_rev;

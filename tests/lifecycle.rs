@@ -153,18 +153,17 @@ fn a_recovered_identity_no_longer_answers_to_the_keys_it_was_taken_from() {
     let assertion = Command::cargo_bin("pecu")
         .expect("built")
         .env("PECU_HOME", &funded)
-        // `pecucli7@` rather than the recovered identity, and deliberately: the
-        // recovered one carries a leftover unlock height, and the SDK's
-        // timelock check refuses *any* update that restates it, before it ever
-        // reaches the question this test is about. `rescued` is not one of
-        // `pecucli7@`'s primary addresses, which is the same wrong-key case
-        // without that in the way.
+        // Back on the recovered identity, which is the one this is about. It
+        // was routed via `pecucli7@` for a while because the SDK's timelock
+        // check refused every update to an identity carrying a leftover unlock
+        // height — the bug reported as chainvue/verus-rust-sdk#104, fixed in
+        // 673a84f.
         .args([
             "id",
             "update",
-            OURS_ADDRESS,
+            RESCUED,
             "--from",
-            "rescued",
+            "faucet",
             "--min-sigs",
             "1",
             "--allow-authority-change",
@@ -303,6 +302,42 @@ fn a_countdown_that_finished_is_not_reported_as_still_running() {
         );
         assert!(stdout.contains("leftover"), "{stdout}");
     }
+}
+
+/// An elapsed countdown must not block ordinary updates.
+///
+/// `unlock_after` keeps its height forever once the chain passes it, and every
+/// update republishes it, as every unnamed field must be. `check_timelock` read
+/// that carried-through value as a countdown being started and refused — so an
+/// identity that had ever been unlocked could not be updated at all.
+/// chainvue/verus-rust-sdk#104, fixed in 673a84f. Consensus never agreed: the
+/// stale value is inert once passed, so nothing was stranded on chain.
+#[test]
+#[ignore = "talks to api.verustest.net"]
+fn an_identity_past_its_unlock_height_can_still_be_updated() {
+    let Ok(funded) = std::env::var("PECU_FUNDED_HOME") else {
+        eprintln!("PECU_FUNDED_HOME is not set — skipping");
+        return;
+    };
+
+    let assertion = Command::cargo_bin("pecu")
+        .expect("built")
+        .env("PECU_HOME", &funded)
+        .args([
+            "id",
+            "update",
+            RESCUED,
+            "--from",
+            "rescued",
+            "--min-sigs",
+            "1",
+            "--allow-authority-change",
+            "--dry-run",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+    assert!(stdout.contains("WOULD UPDATE"), "{stdout}");
 }
 
 /// The consensus rule, caught before a fee is spent.

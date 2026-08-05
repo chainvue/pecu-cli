@@ -89,7 +89,7 @@ answering.
 │ keys        ~/.config/verus-pecu/keys (0 keys)      │
 ├─ BUILD ─────────────────────────────────────────────┤
 │ pecu        0.1.0                                   │
-│ verus-sdk   81ccd17                                 │
+│ verus-sdk   673a84f                                 │
 │ features    network                                 │
 ├─ NODE ──────────────────────────────────────────────┤
 │ chain       VRSCTEST                                │
