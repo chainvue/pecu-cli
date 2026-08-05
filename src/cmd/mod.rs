@@ -7,6 +7,7 @@
 pub mod dev;
 pub mod doctor;
 pub mod key;
+pub mod send;
 pub mod tx;
 pub mod wallet;
 
@@ -41,7 +42,7 @@ impl NotYet {
 }
 
 pub fn dispatch(cli: Cli) -> miette::Result<()> {
-    let ui = Ui::new(cli.globals.theme, cli.globals.json);
+    let ui = Ui::new(cli.globals.theme, cli.globals.json, cli.globals.explain);
 
     match &cli.command {
         Command::Dev { command } => match command {
@@ -91,7 +92,9 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
             }
         },
 
-        Command::Send => Err(NotYet::at("send", "M5")),
+        Command::Send(args) => {
+            send::run(&ui, &Settings::resolve(&cli.globals)?, &cli.globals, args)
+        }
 
         Command::Plan { command } => Err(NotYet::at(
             match command {

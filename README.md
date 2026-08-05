@@ -52,7 +52,7 @@ make run ARGS="doctor"
 | `pecu key gen\|import\|list\|show\|export\|phrase` | Encrypted keystore (Argon2id + ChaCha20-Poly1305) | ✅ done |
 | `pecu wallet balance\|utxos` | Spendable, withheld and token balances | ✅ done |
 | `pecu tx explain` | Says what every output in a transaction actually *is* | ✅ done |
-| `pecu send` | Transparent sends, native and token | M5 |
+| `pecu send` | Transparent sends, native and token | ✅ done |
 | `pecu plan send` / `pecu sign` / `pecu broadcast` | The air-gap trio, over files or terminal QR codes | M6 |
 | `pecu id show\|register\|update\|revoke\|recover` | VerusID lifecycle | M7 |
 | `pecu id login\|publish\|read` | Sign-in with VerusID, and VDXF data | M8 |
@@ -211,6 +211,77 @@ satoshi.
 A long-lived mining address can have a UTXO set far past the SDK's 8 MiB reply
 ceiling. That is a memory bound against a hostile node, not a bug; raise it for a
 profile with `max_response_mb` and the error says so.
+
+### `pecu send`
+
+```sh
+pecu send --to bob@ --amount 0.1                     # a VerusID name resolves
+pecu send --to RXyz…7Qa4 --amount 0.1 --from cold    # or an address
+pecu send --to bob@ --amount 5 --currency pecu@      # a token
+pecu send --to bob@ --amount 0.1 --dry-run           # build and sign, send nothing
+```
+
+The order is deliberate: unlock the key, **build and sign locally**, show you the
+finished transaction decoded output by output, and only then offer to broadcast.
+Nothing leaves the machine until you have seen what it says, and the last step
+wants the word `yes` typed out rather than a keystroke.
+
+```
+┌─ REVIEW ──────────────────────────────────────────────────────┐
+│ from     RComfCn4wHHsGR8vWBAU7T1r3tHHyxN9Hm (faucet)          │
+│ to       bob@ (bob.VRSCTEST@)                                 │
+│ amount   0.10000000 VRSCTEST                                  │
+│ fee      0.00010000 VRSCTEST                                  │
+│ change   9.89990000 VRSCTEST                                  │
+│ txid     a3f1…                                                │
+│ expiry   height 1,176,620                                     │
+├─ OUTPUTS AS BUILT ────────────────────────────────────────────┤
+│ #0 0.10000000 VRSCTEST                                        │
+│      → iBob… held for a VerusID, not a key                    │
+│ #1 9.89990000 VRSCTEST                                        │
+│      → RComfCn4wHHsGR8vWBAU7T1r3tHHyxN9Hm                     │
+└───────────────────────────────────────────────────────────────┘
+
+  type `yes` to broadcast:
+```
+
+Those outputs are decoded from the **bytes that would go out**, not printed back
+from the arguments — re-showing what you typed would confirm nothing. It is the
+same decoder `pecu tx explain` uses, so `--dry-run` hands you hex you can read
+straight back:
+
+```sh
+pecu send --to bob@ --amount 0.1 --dry-run --json | jq -r .hex | pecu tx explain -
+```
+
+**The dry run is enforced by the SDK's types, not by remembering.**
+`flows::prepare_send` takes a `ChainReader` and no `Broadcaster`, so what it
+returns is *incapable* of being sent; broadcasting is a separate, explicit step.
+
+**Mainnet cannot spend until you say so.** `allow_spend` is `false` there by
+default — see [Configuration](#configuration).
+
+### `--explain`
+
+Any command takes it. It prints the `verus-sdk` calls that command actually
+made, with the arguments it passed and a summary of what came back:
+
+```
+┌─ SDK CALLS ────────────────────────────────────────────────────────┐
+│ verus_sdk::network::prepare_send(&node, &key, "iJhCe…", "0.1")     │
+│   → Unsent<Sent> { txid: a3f1…, fee: 0.0001, change: 9.8999 }      │
+│                                                                    │
+│ unsent.broadcast(&node)                                            │
+│   → Sent { txid: a3f1… }                                           │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+It prints on the failure path too, which is when it is most useful.
+
+Note this is *not* a `tracing` layer. `verus-sdk` emits no spans, so the events
+would have to be written at the call site regardless — and then a subscriber is
+pure ceremony between a `debug!` and a `println!`. The cost of recording
+explicitly is that it is only as accurate as the call sites keep it.
 
 ### `pecu key`
 

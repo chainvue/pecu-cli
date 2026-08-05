@@ -1,0 +1,589 @@
+//! `pecu send` — the first command that moves money.
+//!
+//! The order matters and is deliberate: unlock the key, build and sign
+//! **locally**, show you the finished transaction decoded output by output, and
+//! only then offer to broadcast. Nothing leaves the machine until you have seen
+//! what it says.
+//!
+//! The dry run is enforced by the SDK's types rather than by remembering not to
+//! call something. [`prepare_send`] takes a `ChainReader` and no `Broadcaster`,
+//! so the value it returns is *incapable* of being sent; broadcasting is a
+//! second, explicit step on [`Unsent`].
+
+use std::io::{IsTerminal, Write};
+
+use miette::Diagnostic;
+use thiserror::Error;
+use verus_sdk::decode::{decode_output_script, OutputKind};
+use verus_sdk::money::{Amount, Utxo};
+use verus_sdk::network::{
+    prepare_send, prepare_send_token, spendable, ChainReader, FlowError, Unsent,
+};
+use verus_sdk::send::CurrencyId;
+use verus_sdk::verus_keys::{Address, AddressKind, PrivateKey};
+use verus_sdk::verus_wire::TxV4;
+
+use crate::cli::{Globals, SendArgs};
+use crate::config::Settings;
+use crate::keystore::{self, Envelope, Keystore};
+use crate::node::{self, Node};
+use crate::ui::{fmt, Panel, Text, Ui};
+
+#[derive(Debug, Error, Diagnostic)]
+pub enum SendError {
+    #[error("the `{profile}` profile is not allowed to spend")]
+    #[diagnostic(
+        code(pecu::spending_disabled),
+        help("set `allow_spend = true` under [profiles.{profile}] in config.toml. It ships off for mainnet on purpose: moving real coins out of an example app should be a deliberate act")
+    )]
+    SpendingDisabled { profile: String },
+
+    #[error("`{amount}` is not an amount")]
+    #[diagnostic(
+        code(pecu::bad_amount),
+        help("a decimal number of coins, at most eight places: 1, 0.5, 0.00000001")
+    )]
+    BadAmount { amount: String },
+
+    #[error("no key to spend from")]
+    #[diagnostic(
+        code(pecu::no_key),
+        help("pass --from <label>, or make a key with `pecu key gen`")
+    )]
+    NoKey,
+
+    #[error("the keystore holds {count} keys, so there is no obvious one to spend from")]
+    #[diagnostic(
+        code(pecu::ambiguous_key),
+        help("name one with --from <label>; `pecu key list` shows them")
+    )]
+    AmbiguousKey { count: usize },
+
+    #[error("nothing on this chain is called `{name}`")]
+    #[diagnostic(
+        code(pecu::unknown_recipient),
+        help("VerusID names end with @, as in `bob@`. An address works too")
+    )]
+    UnknownRecipient { name: String },
+
+    #[error("`{name}` is revoked")]
+    #[diagnostic(
+        code(pecu::revoked_recipient),
+        help("a revoked identity can still receive, but its keys no longer control it — paying it may be paying nobody")
+    )]
+    RevokedRecipient { name: String },
+
+    #[error("not enough spendable funds at {address}")]
+    #[diagnostic(code(pecu::insufficient_funds), help("{advice}"))]
+    Insufficient { address: String, advice: String },
+
+    #[error("{address} holds no {currency} to send")]
+    #[diagnostic(
+        code(pecu::no_token_outputs),
+        help("`pecu wallet balance` lists the tokens this address holds")
+    )]
+    NoTokenOutputs { address: String, currency: String },
+
+    #[error("cancelled")]
+    #[diagnostic(code(pecu::cancelled), help("nothing was broadcast"))]
+    Cancelled,
+
+    #[error("cannot ask for confirmation")]
+    #[diagnostic(
+        code(pecu::no_tty),
+        help("there is no terminal to confirm on — pass --yes to send without asking, or --dry-run to stop before broadcasting")
+    )]
+    CannotConfirm,
+
+    #[error("{what} failed")]
+    #[diagnostic(code(pecu::flow_failed), help("{advice}"))]
+    Flow {
+        what: &'static str,
+        advice: String,
+        #[source]
+        source: Box<FlowError>,
+    },
+}
+
+pub fn run(ui: &Ui, settings: &Settings, globals: &Globals, args: &SendArgs) -> miette::Result<()> {
+    let outcome = attempt(ui, settings, globals, args);
+    // Printed on the way out whatever happened. `--explain` earns its keep most
+    // when something went wrong, and swallowing the record on the error path
+    // would hide the call that failed.
+    if !ui.is_json() {
+        ui.explain_panel();
+    }
+    outcome
+}
+
+fn attempt(ui: &Ui, settings: &Settings, globals: &Globals, args: &SendArgs) -> miette::Result<()> {
+    let profile = &settings.profile;
+    if !profile.allow_spend {
+        return Err(SendError::SpendingDisabled {
+            profile: profile.name.clone(),
+        }
+        .into());
+    }
+
+    let amount = Amount::from_coins_str(&args.amount).map_err(|_| SendError::BadAmount {
+        amount: args.amount.clone(),
+    })?;
+    let store = Keystore::new(&settings.paths);
+    let envelope = choose_key(&store, args.from.as_deref())?;
+    let node = node::connect(profile)?;
+
+    let recipient = resolve_recipient(ui, &node, &args.to)?;
+    let currency = match &args.currency {
+        Some(name) => Some(resolve_currency(ui, &node, name)?),
+        None => None,
+    };
+
+    // Unlocked before building because signing needs it, and after every check
+    // that can fail without it — a passphrase prompt for a send that was never
+    // going to work is a waste of the one interaction this command demands.
+    let secret = keystore::passphrase(&format!("passphrase for `{}`", envelope.label), false)?;
+    let key = envelope.unlock(&secret)?;
+
+    let unsent = match currency {
+        None => build_native(ui, &node, &key, &recipient, amount)?,
+        Some(currency) => build_token(ui, &node, &key, &recipient, amount, currency)?,
+    };
+
+    let decoded =
+        TxV4::deserialize(&hex::decode(&unsent.hex).expect("the SDK just produced this hex")).ok();
+
+    if ui.is_json() {
+        emit_json(&unsent, &decoded, globals.dry_run, &envelope.address);
+        if globals.dry_run {
+            return Ok(());
+        }
+    } else {
+        review(
+            ui, settings, &envelope, &recipient, amount, &unsent, &decoded,
+        );
+    }
+
+    if globals.dry_run {
+        if !ui.is_json() {
+            ui.blank();
+            ui.note("--dry-run: nothing was broadcast");
+            ui.note("the signed transaction is above; `pecu tx explain <hex>` reads it back");
+        }
+        return Ok(());
+    }
+
+    if !globals.yes && !ui.is_json() {
+        confirm(ui)?;
+    }
+
+    ui.sdk("unsent.broadcast(&node)");
+    let sent = unsent
+        .broadcast(&node)
+        .map_err(|source| flow("broadcasting", source))?;
+    ui.sdk_result(format!("Sent {{ txid: {} }}", sent.txid));
+
+    if ui.is_json() {
+        emit_json_sent(&sent);
+    } else {
+        ui.blank();
+        ui.ok(format!("broadcast — txid {}", sent.txid));
+        ui.note(format!(
+            "{}/tx/{}",
+            settings.profile.explorer.trim_end_matches('/'),
+            sent.txid
+        ));
+    }
+    Ok(())
+}
+
+/// Which key pays. Same rule as the read-only commands: name one, or have
+/// exactly one. Guessing between several would spend from the wrong address.
+fn choose_key(store: &Keystore, label: Option<&str>) -> Result<Envelope, miette::Report> {
+    if let Some(label) = label {
+        return Ok(store.load(label)?);
+    }
+    let keys = store.list()?;
+    match keys.len() {
+        0 => Err(SendError::NoKey.into()),
+        1 => Ok(keys.into_iter().next().expect("just checked")),
+        count => Err(SendError::AmbiguousKey { count }.into()),
+    }
+}
+
+/// Where the money goes: an address as given, or a VerusID name looked up.
+struct Recipient {
+    /// What the SDK is handed — always an address.
+    address: String,
+    /// What to show. The name if there was one, so the confirmation says what
+    /// you typed rather than what it resolved to.
+    shown: String,
+}
+
+fn resolve_recipient(ui: &Ui, node: &Node, to: &str) -> Result<Recipient, miette::Report> {
+    if to.parse::<Address>().is_ok() {
+        return Ok(Recipient {
+            address: to.to_string(),
+            shown: to.to_string(),
+        });
+    }
+
+    ui.sdk(format!("node.identity({to:?})"));
+    let record = node.identity(to).map_err(|_| SendError::UnknownRecipient {
+        name: to.to_string(),
+    })?;
+    ui.sdk_result(format!(
+        "IdentityRecord {{ identity_address: {}, status: {} }}",
+        record.identity_address, record.status
+    ));
+
+    // A revoked identity can still be paid, and the money is very likely gone:
+    // whoever held the keys no longer controls it.
+    if record.is_revoked() {
+        return Err(SendError::RevokedRecipient {
+            name: to.to_string(),
+        }
+        .into());
+    }
+    Ok(Recipient {
+        address: record.identity_address,
+        shown: format!("{to} ({})", record.fully_qualified_name),
+    })
+}
+
+fn resolve_currency(ui: &Ui, node: &Node, name: &str) -> Result<CurrencyId, miette::Report> {
+    if let Ok(address) = name.parse::<Address>() {
+        if address.kind() == AddressKind::Identity {
+            return Ok(CurrencyId::from_bytes(address.hash()));
+        }
+    }
+    ui.sdk(format!("node.identity({name:?})"));
+    let record = node
+        .identity(name)
+        .map_err(|_| SendError::UnknownRecipient {
+            name: name.to_string(),
+        })?;
+    ui.sdk_result(format!("identity_address: {}", record.identity_address));
+    let address: Address =
+        record
+            .identity_address
+            .parse()
+            .map_err(|_| SendError::UnknownRecipient {
+                name: name.to_string(),
+            })?;
+    Ok(CurrencyId::from_bytes(address.hash()))
+}
+
+fn build_native(
+    ui: &Ui,
+    node: &Node,
+    key: &PrivateKey,
+    to: &Recipient,
+    amount: Amount,
+) -> Result<Unsent<verus_sdk::network::Sent>, miette::Report> {
+    ui.sdk(format!(
+        "verus_sdk::network::prepare_send(&node, &key, {:?}, Amount::from_coins_str({:?}))",
+        to.address,
+        amount.to_coins_string()
+    ));
+    let unsent = prepare_send(node, key, &to.address, amount)
+        .map_err(|source| insufficient_or_flow("building the payment", source))?;
+    ui.sdk_result(format!(
+        "Unsent<Sent> {{ txid: {}, fee: {}, change: {} }}",
+        unsent.outcome.txid, unsent.outcome.fee, unsent.outcome.change
+    ));
+    Ok(unsent)
+}
+
+fn build_token(
+    ui: &Ui,
+    node: &Node,
+    key: &PrivateKey,
+    to: &Recipient,
+    amount: Amount,
+    currency: CurrencyId,
+) -> Result<Unsent<verus_sdk::network::Sent>, miette::Report> {
+    let from = key.address().to_string();
+
+    // The token builder takes the outputs to spend rather than finding them:
+    // which of an address's reserve outputs to consume is a wallet's decision,
+    // not the SDK's. They are picked here, by decoding what is already in hand.
+    ui.sdk(format!("verus_sdk::network::spendable(&node, {from:?})"));
+    let funding =
+        spendable(node, &from).map_err(|source| flow("reading the address's outputs", source))?;
+    ui.sdk_result(format!(
+        "Funding {{ utxos: {}, other: {} }}",
+        funding.utxos.len(),
+        funding.other.len()
+    ));
+
+    let token_utxos = carrying(&funding.other, currency);
+    if token_utxos.is_empty() {
+        return Err(SendError::NoTokenOutputs {
+            address: from,
+            currency: currency_address(currency),
+        }
+        .into());
+    }
+
+    ui.sdk(format!(
+        "verus_sdk::network::prepare_send_token(&node, &key, {}, {:?}, {}, &[{} token utxos])",
+        currency_address(currency),
+        to.address,
+        amount.to_coins_string(),
+        token_utxos.len()
+    ));
+    let unsent = prepare_send_token(node, key, currency, &to.address, amount, &token_utxos)
+        .map_err(|source| insufficient_or_flow("building the token payment", source))?;
+    ui.sdk_result(format!(
+        "Unsent<Sent> {{ txid: {}, fee: {} }}",
+        unsent.outcome.txid, unsent.outcome.fee
+    ));
+    Ok(unsent)
+}
+
+/// The reserve outputs holding `currency`.
+fn carrying(others: &[verus_sdk::network::AddressUtxo], currency: CurrencyId) -> Vec<Utxo> {
+    others
+        .iter()
+        .filter(|held| {
+            matches!(
+                decode_output_script(&held.utxo.script_pubkey),
+                Ok(OutputKind::ReserveOutput { ref tokens, .. })
+                    if tokens.iter().any(|(id, _)| *id == currency)
+            )
+        })
+        .map(|held| held.utxo.clone())
+        .collect()
+}
+
+/// What you are about to authorise, decoded from the bytes that would go out.
+///
+/// Deliberately built from the *finished transaction*, not from the arguments:
+/// the point of a confirmation is to show what was actually constructed, and
+/// re-printing the input would confirm nothing.
+fn review(
+    ui: &Ui,
+    settings: &Settings,
+    from: &Envelope,
+    to: &Recipient,
+    amount: Amount,
+    unsent: &Unsent<verus_sdk::network::Sent>,
+    decoded: &Option<TxV4>,
+) {
+    let palette = ui.theme.palette;
+    let glyphs = ui.theme.glyphs;
+    let currency = &settings.profile.currency;
+
+    let mut panel = Panel::new("REVIEW")
+        .row(
+            "from",
+            Text::of(&from.address, palette.value)
+                .space()
+                .push(format!("({})", from.label), palette.muted),
+        )
+        .row("to", Text::of(&to.shown, palette.accent))
+        .row(
+            "amount",
+            Text::of(fmt::amount(amount), palette.accent)
+                .space()
+                .push(currency, palette.muted),
+        )
+        .row(
+            "fee",
+            Text::of(fmt::amount(unsent.outcome.fee), palette.value)
+                .space()
+                .push(currency, palette.muted),
+        )
+        .row(
+            "change",
+            Text::of(fmt::amount(unsent.outcome.change), palette.value)
+                .space()
+                .push(currency, palette.muted)
+                .push(
+                    if unsent.outcome.change.is_zero() {
+                        "  (none — it would have been dust)"
+                    } else {
+                        ""
+                    },
+                    palette.muted,
+                ),
+        )
+        .row("txid", Text::of(&unsent.outcome.txid, palette.value));
+
+    match decoded {
+        Some(transaction) => {
+            panel = panel.section("OUTPUTS AS BUILT");
+            for (index, output) in transaction.outputs.iter().enumerate() {
+                panel = panel
+                    .line(
+                        Text::of(format!("#{index}"), palette.muted)
+                            .space()
+                            .push(fmt::sats(output.value), palette.accent)
+                            .space()
+                            .push(currency, palette.muted),
+                    )
+                    .wrapped(5, describe(ui, &output.script_pubkey));
+            }
+            panel = panel.row("expiry", expiry(ui, transaction));
+        }
+        // Should not happen — these are bytes the SDK just built — but silently
+        // skipping the decoded view would turn the confirmation into a summary
+        // of what was asked for rather than of what was made.
+        None => {
+            panel = panel.section("OUTPUTS AS BUILT").line(
+                Text::of(glyphs.warn, palette.warn).space().push(
+                    "the signed bytes did not decode — do not send this",
+                    palette.danger,
+                ),
+            );
+        }
+    }
+
+    ui.panel(&panel);
+}
+
+fn expiry(ui: &Ui, transaction: &TxV4) -> Text {
+    let palette = ui.theme.palette;
+    match transaction.expiry_height {
+        0 => Text::of(ui.theme.glyphs.warn, palette.warn)
+            .space()
+            .push("never — this stays minable forever", palette.warn),
+        height => Text::of(
+            format!("height {}", fmt::height(height.into())),
+            palette.value,
+        ),
+    }
+}
+
+fn describe(ui: &Ui, script: &[u8]) -> Text {
+    let palette = ui.theme.palette;
+    match decode_output_script(script) {
+        Ok(OutputKind::PubKeyHash { hash }) => {
+            Text::of(ui.theme.glyphs.arrow, palette.muted).space().push(
+                Address::new(AddressKind::PubKeyHash, hash).to_string(),
+                palette.value,
+            )
+        }
+        Ok(OutputKind::IdentityPayment { identity }) => {
+            Text::of(ui.theme.glyphs.arrow, palette.muted)
+                .space()
+                .push(
+                    Address::new(AddressKind::Identity, identity).to_string(),
+                    palette.value,
+                )
+                .push("  held for a VerusID, not a key", palette.muted)
+        }
+        Ok(OutputKind::ReserveOutput {
+            destination,
+            tokens,
+        }) => Text::of(ui.theme.glyphs.arrow, palette.muted)
+            .space()
+            .push(format!("{destination:?}"), palette.value)
+            .push(
+                format!(
+                    " holds {}",
+                    tokens
+                        .iter()
+                        .map(|(id, amount)| format!(
+                            "{} {}",
+                            fmt::sats(*amount),
+                            fmt::address(&currency_address(*id), ui.theme.glyphs.ellipsis)
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                palette.accent,
+            ),
+        Ok(other) => Text::of(format!("{other:?}"), palette.muted),
+        Err(error) => Text::of(format!("undecodable: {error}"), palette.danger),
+    }
+}
+
+/// Require the word, not a keystroke. This is the last thing between a signed
+/// transaction and the network.
+fn confirm(ui: &Ui) -> Result<(), miette::Report> {
+    if !std::io::stdin().is_terminal() {
+        return Err(SendError::CannotConfirm.into());
+    }
+    ui.blank();
+    print!("  type `yes` to broadcast: ");
+    let _ = std::io::stdout().flush();
+
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .map_err(|_| SendError::CannotConfirm)?;
+    if answer.trim() != "yes" {
+        return Err(SendError::Cancelled.into());
+    }
+    Ok(())
+}
+
+fn currency_address(id: CurrencyId) -> String {
+    Address::new(AddressKind::Identity, id.to_bytes()).to_string()
+}
+
+fn flow(what: &'static str, source: FlowError) -> SendError {
+    SendError::Flow {
+        what,
+        advice: "run `pecu doctor`, or point somewhere else with --node".to_string(),
+        source: Box::new(source),
+    }
+}
+
+/// Insufficient funds deserves its own message: the numbers are in the error,
+/// and the likeliest confusion — value the address holds but this key cannot
+/// move — is worth naming before someone goes looking for a bug.
+fn insufficient_or_flow(what: &'static str, source: FlowError) -> SendError {
+    if let FlowError::InsufficientFunds {
+        needed,
+        available,
+        address,
+        utxos,
+    } = &source
+    {
+        return SendError::Insufficient {
+            address: address.clone(),
+            advice: format!(
+                "{available} spendable across {utxos} output(s), {needed} needed including fee. \
+                 `pecu wallet balance` shows the rest: value that is withheld, or held by a \
+                 VerusID, cannot be moved by this key.",
+            ),
+        };
+    }
+    flow(what, source)
+}
+
+fn emit_json(
+    unsent: &Unsent<verus_sdk::network::Sent>,
+    decoded: &Option<TxV4>,
+    dry_run: bool,
+    from: &str,
+) {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "from": from,
+            "txid": unsent.txid,
+            "fee": unsent.outcome.fee.to_sat(),
+            "change": unsent.outcome.change.to_sat(),
+            "hex": unsent.hex,
+            "outputs": decoded.as_ref().map(|tx| tx.outputs.len()),
+            "broadcast": !dry_run,
+        }))
+        .expect("plain data")
+    );
+}
+
+fn emit_json_sent(sent: &verus_sdk::network::Sent) {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "txid": sent.txid,
+            "fee": sent.fee.to_sat(),
+            "change": sent.change.to_sat(),
+            "broadcast": true,
+        }))
+        .expect("plain data")
+    );
+}

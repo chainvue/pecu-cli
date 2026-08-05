@@ -116,7 +116,7 @@ pub enum Command {
     },
 
     /// Send funds
-    Send,
+    Send(SendArgs),
 
     /// Build an unsigned transaction without touching a key
     Plan {
@@ -155,6 +155,27 @@ pub enum Command {
 pub enum DevCommand {
     /// Render every widget in the UI kit
     Ui,
+}
+
+/// A transparent payment.
+#[derive(Debug, Clone, Args)]
+pub struct SendArgs {
+    /// Who gets paid: an address, or a VerusID name like `bob@`
+    #[arg(long, short = 't', value_name = "ADDRESS|NAME@")]
+    pub to: String,
+
+    /// How much, in coins. At most eight decimal places, and parsed exactly —
+    /// no float is constructed at any point
+    #[arg(long, short = 'm', value_name = "COINS")]
+    pub amount: String,
+
+    /// Which stored key pays. Defaults to the only one, if there is only one
+    #[arg(long, short = 'f', value_name = "LABEL")]
+    pub from: Option<String>,
+
+    /// Send a token instead of the chain's own currency
+    #[arg(long, short = 'c', value_name = "NAME@|i-ADDRESS")]
+    pub currency: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]

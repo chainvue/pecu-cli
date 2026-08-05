@@ -20,19 +20,40 @@ pub use text::Text;
 pub use theme::Theme;
 
 use crate::cli::Theme as ThemeFlag;
+use crate::explain::Explain;
 
-/// The output surface. Holds the resolved theme and knows whether the caller
-/// asked for JSON.
+/// The output surface. Holds the resolved theme, knows whether the caller asked
+/// for JSON, and records SDK calls for `--explain`.
 pub struct Ui {
     pub theme: Theme,
     json: bool,
+    explain: Explain,
 }
 
 impl Ui {
-    pub fn new(flag: ThemeFlag, json: bool) -> Self {
+    pub fn new(flag: ThemeFlag, json: bool, explain: bool) -> Self {
         Self {
             theme: Theme::resolve(flag, std::io::stdout().is_terminal()),
             json,
+            explain: Explain::new(explain),
+        }
+    }
+
+    /// Record an SDK call. A no-op unless `--explain` was given.
+    pub fn sdk(&self, call: impl Into<String>) {
+        self.explain.call(call);
+    }
+
+    /// Summarise what the last recorded call returned.
+    pub fn sdk_result(&self, result: impl Into<String>) {
+        self.explain.result(result);
+    }
+
+    /// Print the recorded calls, if there are any and the flag is on.
+    pub fn explain_panel(&self) {
+        if let Some(panel) = self.explain.panel(&self.theme) {
+            self.blank();
+            self.panel(&panel);
         }
     }
 
