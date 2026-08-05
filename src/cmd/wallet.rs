@@ -50,10 +50,10 @@ pub enum WalletError {
     )]
     AmbiguousKey { count: usize },
 
-    #[error("`{address}` is not a Verus address")]
+    #[error("`{address}` is not an address, and nothing on this chain is called that")]
     #[diagnostic(
         code(pecu::bad_address),
-        help("transparent addresses start with R; identities are i-addresses")
+        help("transparent addresses start with R and identities with i — or give a VerusID name like `bob@`, which is looked up")
     )]
     BadAddress { address: String },
 
@@ -91,6 +91,16 @@ impl WalletError {
             FlowError::Key(_) => {
                 "that address did not parse — `pecu key list` shows the stored ones".to_string()
             }
+            // The node giving up, not answering oddly. Measured against
+            // api.verustest.net: an address with a very large UTXO set returns
+            // this intermittently, while the same query succeeds on a retry.
+            // "try --node" would be poor advice for something that works when
+            // asked again.
+            FlowError::Rpc(RpcError::Node { code: -32603, .. }) => {
+                "the node failed to build the reply. It does that on addresses with very large \
+                 UTXO sets, and the same query often succeeds on a retry"
+                    .to_string()
+            }
             _ => "the node answered, but not with what this SDK build expected — try --node, \
                   or `pecu doctor`"
                 .to_string(),
@@ -110,37 +120,109 @@ impl WalletError {
 /// exactly one. Guessing between several keys would silently report the wrong
 /// balance, so that is refused rather than resolved.
 pub fn resolve_address(
+    ui: &Ui,
+    node: &Node,
     settings: &Settings,
     address: Option<&str>,
     key: Option<&str>,
-) -> Result<String, miette::Report> {
-    if let Some(address) = address {
-        return validate(address).map_err(Into::into);
+) -> Result<Target, miette::Report> {
+    if let Some(given) = address {
+        return resolve_name(ui, node, &settings.profile.node, given);
     }
 
     let store = Keystore::new(&settings.paths);
     if let Some(label) = key {
-        return Ok(store.load(label)?.address);
+        return Ok(Target::plain(store.load(label)?.address));
     }
 
     let keys = store.list()?;
     match keys.len() {
         0 => Err(WalletError::NoAddress.into()),
-        1 => Ok(keys[0].address.clone()),
+        1 => Ok(Target::plain(keys[0].address.clone())),
         count => Err(WalletError::AmbiguousKey { count }.into()),
     }
 }
 
-/// Parse-don't-trust. A typo'd address would otherwise be sent to the node and
-/// come back as an empty balance, which reads as "no funds" — the one wrong
-/// answer a wallet must never give. Base58check catches it here instead.
-fn validate(address: &str) -> Result<String, WalletError> {
-    address
-        .parse::<Address>()
-        .map(|_| address.to_string())
-        .map_err(|_| WalletError::BadAddress {
-            address: address.to_string(),
-        })
+/// What a read-only command was pointed at.
+pub struct Target {
+    pub address: String,
+    /// The identity's fully qualified name, when the address came from one.
+    ///
+    /// Kept so the panel can show what a name resolved to. An i-address on its
+    /// own does not tell you whether `bob@` meant the `bob` you had in mind.
+    pub name: Option<String>,
+}
+
+impl Target {
+    fn plain(address: String) -> Self {
+        Self {
+            address,
+            name: None,
+        }
+    }
+}
+
+/// An address, or the i-address a VerusID name resolves to.
+///
+/// Names are accepted because `send --to` and `id show` accept them, and a
+/// wallet where the same identity is nameable in one command and not the next
+/// is a wallet that makes its user remember which is which.
+///
+/// Parse-don't-trust still applies to what comes back. A typo'd *address* would
+/// otherwise be sent to the node and return an empty balance, which reads as
+/// "no funds" — the one wrong answer a wallet must never give. Base58check
+/// catches that offline; a name that resolves to nothing is caught by the node
+/// saying so, not by printing zero.
+fn resolve_name(ui: &Ui, node: &Node, url: &str, given: &str) -> Result<Target, miette::Report> {
+    if given.parse::<Address>().is_ok() {
+        return Ok(Target::plain(given.to_string()));
+    }
+
+    ui.sdk(format!("node.identity({given:?})"));
+    let record = match node.identity(given) {
+        Ok(record) => record,
+        // Two client-side answers, both meaning "this does not name an
+        // identity": `-5` is no such identity, `-8` is not a usable reference
+        // at all — which is what a typo'd address gets. Every other failure
+        // means the node did not answer, and reporting that as "nothing is
+        // called that" would deny the existence of an identity nobody asked
+        // about.
+        Err(RpcError::Node { code: -5 | -8, .. }) => {
+            return Err(WalletError::BadAddress {
+                address: given.to_string(),
+            }
+            .into())
+        }
+        Err(other) => {
+            return Err(node::NodeError::request("looking up the identity", url, other).into())
+        }
+    };
+    ui.sdk_result(format!(
+        "IdentityRecord {{ identity_address: {} }}",
+        record.identity_address
+    ));
+    Ok(Target {
+        address: record.identity_address,
+        name: Some(record.fully_qualified_name),
+    })
+}
+
+/// The address row, naming the identity when the address came from one.
+///
+/// `send` shows `bob@ (bob.VRSCTEST@)` for the same reason: an i-address alone
+/// does not tell you whether the name you typed meant the identity you had in
+/// mind, and the whole point of typing a name is not having to check.
+fn address_row(ui: &Ui, target: &Target) -> Text {
+    let palette = ui.theme.palette;
+    let glyphs = ui.theme.glyphs;
+    let row = Text::of(&target.address, palette.value);
+    match &target.name {
+        None => row,
+        Some(name) => row.push(
+            format!("  ({})", fmt::untrusted(name, NAME_BUDGET, glyphs.ellipsis)),
+            palette.accent,
+        ),
+    }
 }
 
 /// Everything both subcommands need, gathered once.
@@ -333,9 +415,7 @@ fn summarise(rows: &[MempoolDelta], native: Option<CurrencyId>) -> Pending {
     found
 }
 
-fn gather(ui: &Ui, settings: &Settings, address: String) -> Result<(Node, Wallet), miette::Report> {
-    let node = node::connect(&settings.profile)?;
-
+fn gather(ui: &Ui, node: Node, address: String) -> Result<(Node, Wallet), miette::Report> {
     ui.sdk(format!("verus_sdk::network::spendable(&node, {address:?})"));
     let funding = spendable(&node, &address)
         .map_err(|source| WalletError::flow("reading the outputs", &address, source))?;
@@ -389,8 +469,11 @@ pub fn balance(
     address: Option<&str>,
     key: Option<&str>,
 ) -> miette::Result<()> {
-    let address = resolve_address(settings, address, key)?;
-    let (node, wallet) = gather(ui, settings, address)?;
+    // Connecting opens no socket — the first request does — so this costs
+    // nothing before the cheap local refusals inside `resolve_address`.
+    let node = node::connect(&settings.profile)?;
+    let target = resolve_address(ui, &node, settings, address, key)?;
+    let (node, wallet) = gather(ui, node, target.address.clone())?;
 
     let spendable_tokens = wallet.funding.token_balances(wallet.native);
     let immature_tokens = wallet.funding.immature_token_balances(wallet.native);
@@ -526,7 +609,7 @@ pub fn balance(
     }
 
     let mut panel = Panel::new("WALLET")
-        .row("address", Text::of(&wallet.address, palette.value))
+        .row("address", address_row(ui, &target))
         .row(
             "tip",
             Text::of(glyphs.bullet, palette.accent)
@@ -665,8 +748,9 @@ pub fn utxos(
     address: Option<&str>,
     key: Option<&str>,
 ) -> miette::Result<()> {
-    let address = resolve_address(settings, address, key)?;
-    let (_node, wallet) = gather(ui, settings, address)?;
+    let node = node::connect(&settings.profile)?;
+    let target = resolve_address(ui, &node, settings, address, key)?;
+    let (_node, wallet) = gather(ui, node, target.address.clone())?;
     let tip = wallet.funding.tip;
     let glyphs = ui.theme.glyphs;
     let palette = ui.theme.palette;
@@ -805,7 +889,7 @@ pub fn utxos(
     }
 
     let mut panel = Panel::new("UTXOS")
-        .row("address", Text::of(&wallet.address, palette.value))
+        .row("address", address_row(ui, &target))
         .row("tip", Text::of(fmt::height(tip.into()), palette.accent))
         .rule()
         .table(table)
@@ -859,12 +943,15 @@ pub fn history_command(
     settings: &Settings,
     args: &crate::cli::HistoryArgs,
 ) -> miette::Result<()> {
-    let address = resolve_address(
+    let node = node::connect(&settings.profile)?;
+    let target = resolve_address(
+        ui,
+        &node,
         settings,
         args.target.address.as_deref(),
         args.target.key.as_deref(),
     )?;
-    let node = node::connect(&settings.profile)?;
+    let address = target.address.clone();
 
     // `None` asks the node for the whole chain. That is the honest default for
     // a fresh address and a very large reply for an old one, which is what
@@ -967,7 +1054,7 @@ pub fn history_command(
     }
 
     let mut panel = Panel::new("HISTORY")
-        .row("address", Text::of(&address, palette.value))
+        .row("address", address_row(ui, &target))
         .row(
             "found",
             Text::of(

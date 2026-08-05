@@ -148,18 +148,23 @@ fn plan_send_inner(
         amount: args.amount.clone(),
     })?;
 
+    let node = node::connect(&settings.profile)?;
+
     // The same resolution the read-only commands use: this step is watch-only,
-    // so a stored key contributes its address and nothing else.
+    // so a stored key contributes its address and nothing else. A VerusID name
+    // resolves here too, which is what makes planning a spend *from* an
+    // identity possible without looking its i-address up by hand.
     let from = wallet::resolve_address(
+        ui,
+        &node,
         settings,
         args.target.address.as_deref(),
         args.target.key.as_deref(),
     )?;
+    let from = from.address;
     let from: Address = from.parse().map_err(|_| AirgapError::BadAddress {
         address: from.clone(),
     })?;
-
-    let node = node::connect(&settings.profile)?;
     ui.sdk(format!(
         "verus_sdk::network::prepare_unsigned_send(&node, &{from}, {:?}, Amount::from_coins_str({:?}))",
         args.to,

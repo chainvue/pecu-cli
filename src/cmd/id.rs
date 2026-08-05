@@ -140,9 +140,27 @@ fn flow(what: &'static str, source: FlowError) -> IdError {
 pub fn show(ui: &Ui, settings: &Settings, name: &str) -> miette::Result<()> {
     let node = node::connect(&settings.profile)?;
     ui.sdk(format!("node.identity({name:?})"));
-    let record = node.identity(name).map_err(|_| IdError::NotFound {
-        name: name.to_string(),
-    })?;
+    let record = match node.identity(name) {
+        Ok(record) => record,
+        // `-5` is no such identity and `-8` is not a usable reference at all;
+        // both are the daemon answering. Anything else is it failing to, and
+        // saying "nothing is called that" would be this program inventing an
+        // answer it does not have.
+        Err(verus_sdk::network::RpcError::Node { code: -5 | -8, .. }) => {
+            return Err(IdError::NotFound {
+                name: name.to_string(),
+            }
+            .into())
+        }
+        Err(other) => {
+            return Err(node::NodeError::request(
+                "reading the identity",
+                &settings.profile.node,
+                other,
+            )
+            .into())
+        }
+    };
     ui.sdk_result(format!(
         "IdentityRecord {{ {}, {} }}",
         record.identity_address, record.status

@@ -272,8 +272,8 @@ pub struct HistoryArgs {
 #[derive(Debug, Clone, Args)]
 #[group(multiple = false)]
 pub struct WalletTarget {
-    /// Look at this address
-    #[arg(long, short = 'a', value_name = "R…")]
+    /// Look at this address, or a VerusID name like `bob@`, which is resolved
+    #[arg(long, short = 'a', value_name = "R…|NAME@")]
     pub address: Option<String>,
 
     /// Look at the address of a stored key

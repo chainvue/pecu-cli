@@ -6,6 +6,7 @@
 //! `#[ignore]`d and run under `make testnet`.
 
 use assert_cmd::Command;
+use predicates::prelude::*;
 use predicates::str::contains;
 use tempfile::TempDir;
 
@@ -92,16 +93,98 @@ fn a_named_key_resolves_to_its_address() {
         .stderr(contains(wanted));
 }
 
+/// A VerusID name works wherever an address does.
+///
+/// `send --to` and `id show` both take one, and a wallet where the same
+/// identity is nameable in one command and not the next makes its user
+/// remember which is which.
 #[test]
-fn a_typod_address_is_caught_before_the_node_sees_it() {
+#[ignore = "talks to api.verustest.net"]
+fn a_verusid_name_is_resolved_and_the_panel_says_what_it_resolved_to() {
+    let home = home();
+    let by_name = pecu(&home)
+        .args(["wallet", "balance", "--address", "VRSCTEST@", "--json"])
+        .assert()
+        .success();
+    let name_out: serde_json::Value =
+        serde_json::from_slice(&by_name.get_output().stdout).expect("json");
+
+    // The same identity by its i-address must give the same answer.
+    let by_address = pecu(&home)
+        .args(["wallet", "balance", "--address", CHAIN_IDENTITY, "--json"])
+        .assert()
+        .success();
+    let address_out: serde_json::Value =
+        serde_json::from_slice(&by_address.get_output().stdout).expect("json");
+
+    assert_eq!(name_out["address"], CHAIN_IDENTITY);
+    assert_eq!(name_out["address"], address_out["address"]);
+
+    // And the rendered panel shows what the name resolved to: an i-address on
+    // its own does not tell you whether the name meant what you thought.
+    let rendered = pecu(&home)
+        .args(["wallet", "balance", "--address", "VRSCTEST@"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&rendered.get_output().stdout).into_owned();
+    assert!(stdout.contains(CHAIN_IDENTITY), "{stdout}");
+    assert!(stdout.contains("VRSCTEST@"), "{stdout}");
+}
+
+#[test]
+#[ignore = "talks to api.verustest.net"]
+fn a_name_nobody_registered_is_refused_rather_than_reported_as_empty() {
+    let home = home();
+    // The failure that matters: resolving to nothing and printing a zero
+    // balance would read as "this identity holds nothing".
+    pecu(&home)
+        .args([
+            "wallet",
+            "balance",
+            "--address",
+            "nothing-is-called-this-surely@",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("nothing on this"));
+}
+
+#[test]
+#[ignore = "talks to api.verustest.net"]
+fn a_typod_address_is_refused_rather_than_reported_as_empty() {
     let home = home();
     // The dangerous failure this prevents: an address that is not an address
     // comes back from a node as an empty balance, which reads as "no funds".
+    //
+    // No longer refused offline, and that is the trade for accepting VerusID
+    // names: anything that does not parse as an address is now looked up as a
+    // name first. A typo costs one request, and the refusal is the same.
     pecu(&home)
         .args(["wallet", "balance", "--address", "RNotARealAddressAtAll"])
         .assert()
         .failure()
-        .stderr(contains("is not a Verus address"));
+        .stderr(contains("is not an address"));
+}
+
+#[test]
+fn an_unreachable_node_is_not_reported_as_no_such_identity() {
+    let home = home();
+    // Both are "the lookup did not produce an identity", and conflating them
+    // denies the existence of an identity nobody has actually asked about. Only
+    // the daemon's own `-5` means absent.
+    pecu(&home)
+        .args([
+            "wallet",
+            "balance",
+            "--address",
+            "VRSCTEST@",
+            "--node",
+            DEAD_NODE,
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("nothing on this").not())
+        .stderr(contains("looking up the identity"));
 }
 
 #[test]
@@ -461,8 +544,17 @@ fn an_address_with_too_many_outputs_says_which_setting_to_raise() {
     // Skipped out loud rather than failed: a slow node is not a regression in
     // this program, and a test that reports one as such gets ignored, which is
     // worse than a test that says why it did not run.
-    if stderr.contains("could not be reached") || stderr.contains("connection") {
-        eprintln!("the node did not answer in time — skipping:\n{stderr}");
+    // Two ways the node declines to produce an 85 MB reply rather than
+    // exceeding the ceiling with one: it times out, or it gives up with
+    // `-32603 Internal error`. Both are the node's, not this program's, and
+    // both happen intermittently — measured at roughly one run in three.
+    // Skipped out loud rather than failed: a test that reports someone else's
+    // flakiness as a regression is a test people learn to ignore.
+    if stderr.contains("could not be reached")
+        || stderr.contains("connection")
+        || stderr.contains("failed to build the reply")
+    {
+        eprintln!("the node declined to produce the reply — skipping:\n{stderr}");
         return;
     }
 
