@@ -130,6 +130,45 @@ pub fn duration(seconds: u64) -> String {
     }
 }
 
+/// A unix timestamp as `2026-08-05 14:32 UTC`.
+///
+/// UTC, always, and said so in the string. A block time rendered in local time
+/// is a number two readers in different places disagree about, and the chain
+/// has one answer.
+///
+/// The date arithmetic is Howard Hinnant's `civil_from_days`, which is a dozen
+/// lines and avoids taking on a date library for one display string. Times
+/// before 1970 cannot occur here — they would be a block mined before the unix
+/// epoch — so a negative timestamp renders as the epoch rather than failing.
+pub fn timestamp(unix: i64) -> String {
+    let seconds = unix.max(0);
+    let days = seconds / 86_400;
+    let time_of_day = seconds % 86_400;
+
+    // Shift the era so leap-day handling falls at the end of the cycle.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+
+    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02} UTC",
+        time_of_day / 3_600,
+        (time_of_day % 3_600) / 60
+    )
+}
+
 /// `1 output` / `4 outputs`, because "1 outputs" looks like a bug.
 pub fn plural(count: usize, singular: &str, plural: &str) -> String {
     if count == 1 {
@@ -171,6 +210,23 @@ mod tests {
         // magnitude is what keeps a hostile or broken reply from taking the
         // process down.
         assert_eq!(signed(i64::MIN), "-92233720368.54775808");
+    }
+
+    #[test]
+    fn timestamps_render_as_utc_dates() {
+        assert_eq!(timestamp(0), "1970-01-01 00:00 UTC");
+        // A leap day, which is what the era arithmetic exists to get right.
+        assert_eq!(timestamp(1_709_208_000), "2024-02-29 12:00 UTC");
+        assert_eq!(timestamp(1_770_000_000), "2026-02-02 02:40 UTC");
+        // Century years are leap only when divisible by 400.
+        assert_eq!(timestamp(951_825_600), "2000-02-29 12:00 UTC");
+    }
+
+    #[test]
+    fn a_timestamp_before_the_epoch_does_not_panic() {
+        // Cannot happen from a block, but the field is signed and comes from a
+        // node, so it must not be able to take the process down.
+        assert_eq!(timestamp(-1), "1970-01-01 00:00 UTC");
     }
 
     #[test]

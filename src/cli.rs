@@ -450,6 +450,20 @@ pub struct IdUpdateArgs {
     #[arg(long, value_name = "NAME@|i-ADDRESS")]
     pub recovery: Option<String>,
 
+    /// Lock the identity until an absolute block height. The countdown runs
+    /// from when this is mined and cannot be paused
+    #[arg(long, value_name = "HEIGHT", conflicts_with_all = ["unlock_delay", "clear_timelock"])]
+    pub lock_until: Option<u32>,
+
+    /// Lock the identity indefinitely, unlocking this many blocks after an
+    /// unlock is asked for. Nothing starts counting until then
+    #[arg(long, value_name = "BLOCKS", conflicts_with = "clear_timelock")]
+    pub unlock_delay: Option<u32>,
+
+    /// Remove the timelock entirely
+    #[arg(long)]
+    pub clear_timelock: bool,
+
     /// Permit changing who controls the identity. Required for --primary,
     /// --min-sigs, --revocation and --recovery, because publishing a threshold
     /// nobody can meet is the one mistake with no remedy

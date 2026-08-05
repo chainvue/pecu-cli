@@ -23,6 +23,7 @@ use verus_sdk::network::{
     RegistrationOptions,
 };
 use verus_sdk::verus_keys::{Address, AddressKind};
+use verus_sdk::verus_tx::{Timelock, FLAG_LOCKED};
 
 use crate::cli::{Globals, IdRegisterArgs};
 use crate::config::Settings;
@@ -147,6 +148,20 @@ pub fn show(ui: &Ui, settings: &Settings, name: &str) -> miette::Result<()> {
         record.identity_address, record.status
     ));
 
+    // One extra request, and only for what is shown. A block height alone does
+    // not say when — "block 1,177,254" means nothing without a clock — but the
+    // command is already the slowest read here, so a failure to fetch it drops
+    // the date rather than the answer.
+    let mined = block_time(ui, &node, record.block_height);
+
+    let timelock = timelock_of(&record.identity);
+    // Only asked for when there is a lock to measure against it. Most
+    // identities have none, and the common path stays at two requests.
+    let tip = match timelock {
+        Timelock::UntilBlock(_) => node.block_count().ok(),
+        _ => None,
+    };
+
     if ui.is_json() {
         emit(&serde_json::json!({
             "name": record.fully_qualified_name,
@@ -154,6 +169,16 @@ pub fn show(ui: &Ui, settings: &Settings, name: &str) -> miette::Result<()> {
             "status": record.status,
             "revoked": record.is_revoked(),
             "block_height": record.block_height,
+            "block_time": mined,
+            // The output currently holding the identity. This and
+            // `block_height` describe the last change, not the registration.
+            "outpoint": {
+                "txid": record.outpoint.0.to_string(),
+                "vout": record.outpoint.1,
+            },
+            // Named separately from the raw object because the raw object
+            // spells it as two fields whose meaning depends on each other.
+            "timelock": timelock_json(timelock),
             "identity": record.identity,
         }));
         ui.explain_panel();
@@ -187,12 +212,22 @@ pub fn show(ui: &Ui, settings: &Settings, name: &str) -> miette::Result<()> {
             Text::of(&record.identity_address, palette.value),
         )
         .row("status", status)
+        // Not "registered". `getidentity` reports the block and txid of the
+        // output *currently* holding the identity, so for anything that has
+        // ever been updated this is the last change, not the first. Adding the
+        // date is what made that visible: an identity registered this morning
+        // was claiming to have been registered an hour ago.
         .row(
-            "registered",
+            "last change",
+            registered_row(ui, record.block_height, mined),
+        )
+        .row(
+            "output",
             Text::of(
-                format!("block {}", fmt::height(record.block_height.into())),
-                palette.value,
-            ),
+                fmt::hash(&record.outpoint.0.to_string(), ui.theme.glyphs.ellipsis),
+                palette.muted,
+            )
+            .push(format!(":{}", record.outpoint.1), palette.muted),
         );
 
     // The raw identity object is whatever the daemon sent. Read the fields that
@@ -264,6 +299,8 @@ pub fn show(ui: &Ui, settings: &Settings, name: &str) -> miette::Result<()> {
             ),
         );
     }
+
+    panel = timelock_panel(ui, panel, timelock, tip);
 
     if self_recovery {
         // The consensus rule, and the one fact about an identity that a reader
@@ -718,6 +755,161 @@ fn cost_panel(
              only while it is still its own authority. That hand-off is one-way",
             palette.muted,
         ))
+}
+
+/// When the block at `height` was mined, if the node will say.
+///
+/// `None` on any failure. A date is a nicety; refusing to show an identity
+/// because its block header could not be fetched would not be.
+fn block_time(ui: &Ui, node: &Node, height: u32) -> Option<i64> {
+    ui.sdk(format!("node.block(\"{height}\")"));
+    let block = node.block(&height.to_string()).ok()?;
+    let time = block.get("time").and_then(|v| v.as_i64());
+    ui.sdk_result(match time {
+        Some(time) => fmt::timestamp(time),
+        None => "no time in the header".to_string(),
+    });
+    time
+}
+
+/// The block a change landed in, with its date and how long ago that was.
+fn registered_row(ui: &Ui, height: u32, mined: Option<i64>) -> Text {
+    let palette = ui.theme.palette;
+    let mut row = Text::of(
+        format!("block {}", fmt::height(height.into())),
+        palette.value,
+    );
+    if let Some(time) = mined {
+        row = row
+            .push("   ", palette.muted)
+            .push(fmt::timestamp(time), palette.value);
+        // Relative as well as absolute: "2026-02-02" answers a different
+        // question from "six months ago", and a reader usually wants both.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or(0);
+        let then = u64::try_from(time).unwrap_or(0);
+        row = row.push(
+            format!("  ({} ago)", fmt::duration(now.saturating_sub(then))),
+            palette.muted,
+        );
+    }
+    row
+}
+
+/// The TIMELOCK section, when there is one to show.
+///
+/// Omitted entirely for an unlocked identity: a row saying "not locked" on
+/// every identity is noise, and this section appearing at all is the signal.
+fn timelock_panel(ui: &Ui, panel: Panel, timelock: Timelock, tip: Option<u32>) -> Panel {
+    let palette = ui.theme.palette;
+    let glyphs = ui.theme.glyphs;
+    match timelock {
+        Timelock::None => panel,
+        Timelock::UntilBlock(height) => {
+            let panel = panel.section("TIMELOCK").row(
+                "unlocks at",
+                Text::of(
+                    format!("block {}", fmt::height(height.into())),
+                    palette.value,
+                ),
+            );
+            match tip {
+                Some(tip) if tip >= height => panel.row(
+                    "state",
+                    Text::of(glyphs.ok, palette.ok)
+                        .space()
+                        .push("unlocked", palette.ok),
+                ),
+                Some(tip) => panel
+                    .row(
+                        "state",
+                        Text::of(glyphs.warn, palette.warn).space().push(
+                            format!(
+                                "locked for {} more",
+                                fmt::plural((height - tip) as usize, "block", "blocks")
+                            ),
+                            palette.warn,
+                        ),
+                    )
+                    .note(Text::of(
+                        "the countdown started when this was set and cannot be paused",
+                        palette.muted,
+                    )),
+                // The height is known and whether it has passed is not. Saying
+                // "locked" would be a guess about spendability.
+                None => panel.row("state", Text::of("tip unknown", palette.muted)),
+            }
+        }
+        Timelock::DelayAfterUnlock(blocks) => panel
+            .section("TIMELOCK")
+            .row(
+                "unlock delay",
+                Text::of(
+                    fmt::plural(blocks as usize, "block", "blocks"),
+                    palette.value,
+                ),
+            )
+            .row(
+                "state",
+                Text::of(glyphs.warn, palette.warn)
+                    .space()
+                    .push("locked, and no unlock requested", palette.warn),
+            )
+            .note(Text::of(
+                "the delay does not start until an unlock is asked for, so this is locked \
+                 indefinitely rather than until some height",
+                palette.muted,
+            ))
+            .note(Text::of(
+                "only the revocation and recovery authorities can act on it while it is locked",
+                palette.muted,
+            )),
+    }
+}
+
+/// Read an identity's timelock out of the daemon's JSON.
+///
+/// `timelock` is **either an absolute height or a relative delay**, and which
+/// one it is depends on `FLAG_LOCKED`. The SDK makes this a type precisely so
+/// the pairing cannot be got wrong; this is the one place that reconstructs it
+/// from a rendering, and it follows `Timelock::of` exactly.
+fn timelock_of(identity: &serde_json::Value) -> Timelock {
+    let flags = identity.get("flags").and_then(|v| v.as_u64()).unwrap_or(0);
+    let after = identity
+        .get("timelock")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u32::try_from(v).ok())
+        .unwrap_or(0);
+
+    if flags & u64::from(FLAG_LOCKED) != 0 {
+        Timelock::DelayAfterUnlock(after)
+    } else if after != 0 {
+        Timelock::UntilBlock(after)
+    } else {
+        Timelock::None
+    }
+}
+
+fn timelock_json(timelock: Timelock) -> serde_json::Value {
+    match timelock {
+        Timelock::None => serde_json::json!({ "kind": "none", "spendable": true }),
+        Timelock::UntilBlock(height) => serde_json::json!({
+            "kind": "until_block",
+            "unlock_height": height,
+            // Whether it is spendable *now* needs the tip, which the caller may
+            // not have fetched. Absent rather than guessed.
+            "spendable": null,
+        }),
+        Timelock::DelayAfterUnlock(blocks) => serde_json::json!({
+            "kind": "delay_after_unlock",
+            "delay_blocks": blocks,
+            // Never spendable by this measure: no unlock has been requested, so
+            // there is no height at which it opens.
+            "spendable": false,
+        }),
+    }
 }
 
 fn choose_key(store: &Keystore, label: Option<&str>) -> Result<Envelope, miette::Report> {

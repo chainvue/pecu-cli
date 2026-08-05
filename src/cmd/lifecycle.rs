@@ -50,7 +50,7 @@ use verus_sdk::network::{
     prepare_identity_update, FlowError, Held, IdentityChange, Unsent,
 };
 use verus_sdk::verus_keys::{Address, AddressKind, PrivateKey};
-use verus_sdk::verus_tx::Destination;
+use verus_sdk::verus_tx::{Destination, Timelock};
 
 use crate::cli::{Globals, IdAuthorityArgs, IdRecoverArgs, IdUpdateArgs};
 use crate::config::Settings;
@@ -111,6 +111,13 @@ pub enum LifecycleError {
         help("an authority is an identity: pass a name like `guardian@` or its i-address")
     )]
     BadAuthority { name: String },
+
+    #[error("`{name}` is locked, and a delay lock cannot simply be removed")]
+    #[diagnostic(
+        code(pecu::locked),
+        help("consensus refuses it — measured on VRSCTEST, and refused as an unexplained script failure after the transaction is built and signed. The way out is to ask for an unlock: set an absolute height far enough ahead with --lock-until, and the identity opens when the chain reaches it")
+    )]
+    CannotClearDelayLock { name: String },
 
     #[error("cancelled")]
     #[diagnostic(code(pecu::cancelled), help("nothing was broadcast"))]
@@ -253,12 +260,20 @@ pub fn update(
         || args.min_sigs.is_some()
         || args.revocation.is_some()
         || args.recovery.is_some();
-    if !touches_authority {
+    // A timelock is deliberately not an authority change: it does not move who
+    // controls the identity, so it does not demand the flag that guards that.
+    let timelock = match (args.lock_until, args.unlock_delay, args.clear_timelock) {
+        (Some(height), _, _) => Some(Timelock::UntilBlock(height)),
+        (_, Some(blocks), _) => Some(Timelock::DelayAfterUnlock(blocks)),
+        (_, _, true) => Some(Timelock::None),
+        _ => None,
+    };
+    if !touches_authority && timelock.is_none() {
         return Err(LifecycleError::EmptyUpdate.into());
     }
     // Checked before the keystore is opened: a refusal that costs a passphrase
     // prompt is a refusal that wasted the one interaction this command needs.
-    if !args.allow_authority_change {
+    if touches_authority && !args.allow_authority_change {
         return Err(LifecycleError::NeedsAuthorityFlag {
             name: args.name.clone(),
         }
@@ -267,7 +282,13 @@ pub fn update(
 
     let session = open(settings, args.from.as_deref())?;
 
-    let mut change = IdentityChange::new().allowing_authority_change();
+    let mut change = IdentityChange::new();
+    if touches_authority {
+        change = change.allowing_authority_change();
+    }
+    if let Some(timelock) = timelock {
+        change = change.with_timelock(timelock);
+    }
     if !args.primary.is_empty() {
         let addresses = args
             .primary
@@ -284,6 +305,20 @@ pub fn update(
     }
     if let Some(given) = &args.recovery {
         change = change.with_recovery_authority(authority_id(ui, &session.node, given)?);
+    }
+
+    // Only read when a timelock is in play, so the ordinary update keeps its
+    // request count. Consensus refuses this and says only
+    // `mandatory-script-verify-flag-failed` — after the whole thing is built
+    // and signed — so it is worth one read to say what actually happened.
+    if matches!(timelock, Some(Timelock::None)) {
+        let held = held(ui, &session.node, &args.name)?;
+        if let Timelock::DelayAfterUnlock(_) = held.identity.timelock() {
+            return Err(LifecycleError::CannotClearDelayLock {
+                name: args.name.clone(),
+            }
+            .into());
+        }
     }
 
     ui.sdk(format!(
@@ -348,6 +383,27 @@ fn describe_update(ui: &Ui, mut panel: Panel, args: &IdUpdateArgs) -> Panel {
     if let Some(recovery) = &args.recovery {
         panel = panel.row("recovery", Text::of(recovery, palette.accent));
     }
+    if let Some(height) = args.lock_until {
+        panel = panel.row(
+            "locked until",
+            Text::of(
+                format!("block {}", fmt::height(height.into())),
+                palette.warn,
+            ),
+        );
+    }
+    if let Some(blocks) = args.unlock_delay {
+        panel = panel.row(
+            "unlock delay",
+            Text::of(
+                fmt::plural(blocks as usize, "block", "blocks"),
+                palette.warn,
+            ),
+        );
+    }
+    if args.clear_timelock {
+        panel = panel.row("timelock", Text::of("removed", palette.warn));
+    }
 
     panel = panel.note(Text::of(
         "everything not named above is carried through untouched — the identity is restated \
@@ -371,6 +427,19 @@ fn describe_update(ui: &Ui, mut panel: Panel, args: &IdUpdateArgs) -> Panel {
     if args.recovery.is_some() {
         panel = panel.note(Text::of(
             "moving recovery off the identity is also what makes it revocable at all",
+            palette.muted,
+        ));
+    }
+    if args.unlock_delay.is_some() {
+        panel = panel.note(Text::of(
+            "a delay locks the identity indefinitely: nothing counts down until an unlock is \
+             asked for, and only the revocation and recovery authorities can act meanwhile",
+            palette.warn,
+        ));
+    }
+    if args.lock_until.is_some() {
+        panel = panel.note(Text::of(
+            "an absolute height starts counting as soon as this is mined and cannot be paused",
             palette.muted,
         ));
     }
@@ -650,8 +719,7 @@ fn amount_row(ui: &Ui, amount: verus_sdk::money::Amount, currency: &str) -> Text
         .push(currency, ui.theme.palette.muted)
 }
 
-/// Read the current identity, for commands that want to show it first.
-#[allow(dead_code)]
+/// Read the current identity the way consensus reads it.
 fn held(ui: &Ui, node: &Node, identity: &str) -> Result<Held, miette::Report> {
     ui.sdk(format!(
         "verus_sdk::network::current_identity(&node, {identity:?})"
