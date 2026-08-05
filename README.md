@@ -546,6 +546,10 @@ levels — that is 80 out of pocket rather than 100:
 │   burned         60.00000000 VRSCTEST                                            │
 ```
 
+Proven on chain: `pecuref9@` registered referred by `pecucli7@` — the referrer
+received exactly 20.00000000, visible as output #1 of `0ccfe028…`, and the payer
+parted with 80.000224 including two miner fees.
+
 Both numbers come from the **currency being registered under**, not the chain,
 so they differ per currency. The SDK's `registration_fee` is policy *before* the
 discount — showing that beside a referral overstated the cost by a fifth and

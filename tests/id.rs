@@ -325,6 +325,39 @@ fn a_referral_reduces_the_outlay_and_the_split_is_shown() {
 }
 
 /// Registering burns a hundred coins. `--json` is output, not consent.
+/// Resuming has to honour `--from`, or a paid commitment cannot be claimed.
+///
+/// It did not: `resume` called `choose_key(.., None)` and never saw the flag, so
+/// a keystore with more than one key hit "no obvious one to pay with" — after
+/// the commitment fee was spent and the name committed. The saved file warns
+/// that losing it loses the name and the fee; the tool was what could not claim
+/// it. Found by registering `pecuref9@` for real.
+#[test]
+fn resuming_a_registration_uses_the_key_it_was_told_to() {
+    let home = home();
+    generate(&home, "one");
+    generate(&home, "two");
+
+    let pending = home.path().join("pending");
+    std::fs::create_dir_all(&pending).expect("writable");
+    std::fs::write(pending.join("alice.json"), SAVED_REGISTRATION).expect("writable");
+
+    // Two keys, and `--from` names one. Reaching the poll rather than the
+    // ambiguity is the whole assertion.
+    let assertion = pecu(&home)
+        .args([
+            "id", "register", "alice", "--from", "two", "--node", DEAD_NODE,
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assertion.get_output().stderr).into_owned();
+    assert!(
+        !stderr.contains("no obvious one"),
+        "resuming ignored --from, so a paid commitment could not be claimed:\n{stderr}"
+    );
+    assert!(stderr.contains("checking the commitment"), "{stderr}");
+}
+
 #[test]
 #[ignore = "talks to api.verustest.net"]
 fn json_output_is_not_consent_to_register() {

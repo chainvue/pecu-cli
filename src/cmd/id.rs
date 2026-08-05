@@ -391,7 +391,7 @@ fn register_inner(
     let node = node::connect(&settings.profile)?;
 
     match load_pending(&path)? {
-        Some(pending) => resume(ui, settings, globals, &node, pending, &path),
+        Some(pending) => resume(ui, settings, globals, &node, args, pending, &path),
         None => begin(ui, settings, globals, &node, args, &name, &path),
     }
 }
@@ -586,6 +586,7 @@ fn resume(
     settings: &Settings,
     globals: &Globals,
     node: &Node,
+    args: &IdRegisterArgs,
     pending: Pending<AwaitingCommitment>,
     path: &PathBuf,
 ) -> miette::Result<()> {
@@ -648,8 +649,13 @@ fn resume(
         }
     };
 
+    // `--from`, the same as step one. Ignoring it here meant a keystore with
+    // more than one key could not finish a registration at all: the commitment
+    // is paid, the name is committed, and the only command that can claim it
+    // refuses as ambiguous. The saved file warns that losing it loses the name
+    // and the fee — this was the tool being what could not claim it.
     let store = Keystore::new(&settings.paths);
-    let envelope = choose_key(&store, None)?;
+    let envelope = choose_key(&store, args.from.as_deref())?;
     let secret = keystore::passphrase(&format!("passphrase for `{}`", envelope.label), false)?;
     let key = envelope.unlock(&secret)?;
 
@@ -669,6 +675,16 @@ fn resume(
     }
 
     ui.sdk("ready.complete(&node, &node, &key)");
+    // Taken before `complete` consumes `ready`. `Registered::fee_paid` is the
+    // undiscounted policy fee — the same number the estimate had to correct —
+    // so the receipt would otherwise claim 100 was paid when 80 left.
+    let split = Referral::new(
+        ready.registration_fee,
+        ready.referral_levels,
+        ready.referral_chain.len(),
+    );
+    let referred = !ready.referral_chain.is_empty();
+
     let registered = ready
         .complete(node, node, &key)
         .map_err(|source| flow("completing the registration", source))?;
@@ -685,7 +701,13 @@ fn resume(
             "name": registered.name,
             "identity_address": address,
             "txid": registered.txid,
-            "fee_paid": registered.fee_paid.to_sat(),
+            // What actually left the funding address. `fee_paid` is policy
+            // before any referral discount, so it is reported under its own
+            // name rather than as the cost.
+            "paid": if referred { split.outlay.to_sat() } else { registered.fee_paid.to_sat() },
+            "registration_fee": registered.fee_paid.to_sat(),
+            "referral_paid_out": split.paid_out.to_sat(),
+            "burned": if referred { split.burned.to_sat() } else { registered.fee_paid.to_sat() },
         }));
         return Ok(());
     }
@@ -705,9 +727,23 @@ fn resume(
             .row("i-address", Text::of(&address, palette.value))
             .row(
                 "paid",
-                Text::of(fmt::amount(registered.fee_paid), palette.value)
-                    .space()
-                    .push(&settings.profile.currency, palette.muted),
+                if referred {
+                    Text::of(fmt::amount(split.outlay), palette.value)
+                        .space()
+                        .push(&settings.profile.currency, palette.muted)
+                        .push(
+                            format!(
+                                "  {} to referrers, {} burned",
+                                fmt::amount(split.paid_out),
+                                fmt::amount(split.burned)
+                            ),
+                            palette.muted,
+                        )
+                } else {
+                    Text::of(fmt::amount(registered.fee_paid), palette.value)
+                        .space()
+                        .push(&settings.profile.currency, palette.muted)
+                },
             )
             .note(Text::of(
                 "not on chain until this is mined — `pecu id show` will not find it until then",
@@ -747,14 +783,14 @@ struct Referral {
 }
 
 impl Referral {
-    fn of(pending: &Pending<AwaitingCommitment>) -> Self {
-        let fee = pending.registration_fee.to_sat();
-        let divisor = u64::from(pending.referral_levels) + 2;
+    /// From the three numbers, so both the estimate and the receipt can use it:
+    /// `Pending<AwaitingCommitment>` and `Pending<ReadyToRegister>` carry them
+    /// alike, and `Registered` carries only the undiscounted fee.
+    fn new(fee: Amount, levels: u32, payouts: usize) -> Self {
+        let fee = fee.to_sat();
+        let divisor = u64::from(levels) + 2;
         let each = fee / divisor;
-        let outlay = fee / divisor * (u64::from(pending.referral_levels) + 1);
-        // One payout per referrer actually in the chain, which is the depth the
-        // referrer was itself referred at — not the number of levels allowed.
-        let payouts = pending.referral_chain.len();
+        let outlay = fee / divisor * (u64::from(levels) + 1);
         let paid_out = each.saturating_mul(payouts as u64);
         Self {
             outlay: Amount::from_sat(outlay),
@@ -762,6 +798,16 @@ impl Referral {
             burned: Amount::from_sat(outlay.saturating_sub(paid_out)),
             payouts,
         }
+    }
+
+    fn of(pending: &Pending<AwaitingCommitment>) -> Self {
+        // One payout per referrer actually in the chain, which is the depth the
+        // referrer was itself referred at — not the number of levels allowed.
+        Self::new(
+            pending.registration_fee,
+            pending.referral_levels,
+            pending.referral_chain.len(),
+        )
     }
 }
 
