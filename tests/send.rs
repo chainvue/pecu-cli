@@ -258,6 +258,7 @@ fn a_dry_run_builds_real_signed_bytes_without_sending_them() {
     let document: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
 
     assert_eq!(document["broadcast"], false, "a dry run must not send");
+    assert_eq!(document["outcome"], "not_broadcast");
     let hex = document["hex"].as_str().expect("signed hex");
     assert!(!hex.is_empty());
     assert!(document["fee"].as_u64().unwrap_or(0) > 0, "no fee was paid");
@@ -270,4 +271,75 @@ fn a_dry_run_builds_real_signed_bytes_without_sending_them() {
         .assert()
         .success()
         .stdout(contains("\"kind\": \"transaction\""));
+}
+
+/// `--json` is a request for machine-readable output. It used to also be a
+/// silent `--yes`, because the confirmation prompt writes to stdout and was
+/// skipped rather than moved — so `pecu send --json` spent money without asking.
+#[test]
+#[ignore = "needs a funded key; set PECU_FUNDED_HOME"]
+fn json_output_is_not_consent_to_spend() {
+    let Ok(funded) = std::env::var("PECU_FUNDED_HOME") else {
+        eprintln!("PECU_FUNDED_HOME is not set — skipping");
+        return;
+    };
+
+    let assertion = Command::cargo_bin("pecu")
+        .expect("built")
+        .env("PECU_HOME", &funded)
+        .args([
+            "send",
+            "--to",
+            CHAIN_IDENTITY,
+            "--amount",
+            "0.001",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("--yes"));
+
+    // Nothing was built and nothing was printed to be parsed: this has to fail
+    // before the money moves, not after.
+    let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+    assert!(stdout.trim().is_empty(), "unexpected output:\n{stdout}");
+}
+
+/// Exactly one JSON document on the dry-run path, which is the one reachable
+/// without a node. The success path is covered end-to-end in `tests/wallet.rs`,
+/// and every outcome including the failures is covered exhaustively by the unit
+/// tests on `delivery_json`.
+#[test]
+#[ignore = "needs a funded key; set PECU_FUNDED_HOME"]
+fn json_output_is_a_single_document() {
+    let Ok(funded) = std::env::var("PECU_FUNDED_HOME") else {
+        eprintln!("PECU_FUNDED_HOME is not set — skipping");
+        return;
+    };
+
+    let assertion = Command::cargo_bin("pecu")
+        .expect("built")
+        .env("PECU_HOME", &funded)
+        .args([
+            "send",
+            "--to",
+            CHAIN_IDENTITY,
+            "--amount",
+            "0.001",
+            "--dry-run",
+            "--json",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+
+    let documents: Vec<_> = serde_json::Deserializer::from_str(&stdout)
+        .into_iter::<serde_json::Value>()
+        .collect();
+    assert_eq!(
+        documents.len(),
+        1,
+        "`send --json` must print one document, not {}:\n{stdout}",
+        documents.len()
+    );
 }

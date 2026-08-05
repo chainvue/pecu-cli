@@ -260,9 +260,9 @@ fn a_payment_in_flight_is_visible_before_it_confirms() {
         return;
     };
 
-    // The *last* document, not the only one: `send --json` prints the signed
-    // plan before it broadcasts and the result after, deliberately, so the hex
-    // survives a broadcast that hangs. Every other command here prints one.
+    // One document per invocation, and the assertion says so: `send --json`
+    // used to print two — the plan before broadcasting, the result after — so
+    // parsing it as one document failed on the very command that spends money.
     let run = |args: &[&str]| {
         let assertion = Command::cargo_bin("pecu")
             .expect("built")
@@ -271,11 +271,18 @@ fn a_payment_in_flight_is_visible_before_it_confirms() {
             .assert()
             .success();
         let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
-        serde_json::Deserializer::from_str(&stdout)
-            .into_iter::<serde_json::Value>()
-            .last()
-            .expect("at least one json document")
-            .expect("valid json")
+        let documents: Vec<serde_json::Value> = serde_json::Deserializer::from_str(&stdout)
+            .into_iter()
+            .map(|document| document.expect("valid json"))
+            .collect();
+        assert_eq!(
+            documents.len(),
+            1,
+            "`pecu {}` printed {} json documents:\n{stdout}",
+            args.join(" "),
+            documents.len()
+        );
+        documents.into_iter().next().expect("one document")
     };
 
     let before = run(&["wallet", "balance", "--json"]);

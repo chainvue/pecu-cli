@@ -17,7 +17,7 @@ use thiserror::Error;
 use verus_sdk::decode::{decode_output_script, OutputKind};
 use verus_sdk::money::{Amount, Utxo};
 use verus_sdk::network::{
-    prepare_send, prepare_send_token, spendable, ChainReader, FlowError, Unsent,
+    prepare_send, prepare_send_token, spendable, ChainReader, FlowError, RpcError, Unsent,
 };
 use verus_sdk::send::CurrencyId;
 use verus_sdk::verus_keys::{Address, AddressKind, PrivateKey};
@@ -95,6 +95,13 @@ pub enum SendError {
     )]
     CannotConfirm,
 
+    #[error("--json will not broadcast without --yes")]
+    #[diagnostic(
+        code(pecu::needs_yes),
+        help("--json is machine-readable output, not consent to spend: the confirmation prompt would go to the same stream you are parsing, and there is nobody to answer it. Add --yes to send, or --dry-run to stop at the signed bytes")
+    )]
+    NeedsYes,
+
     #[error("{what} failed")]
     #[diagnostic(code(pecu::flow_failed), help("{advice}"))]
     Flow {
@@ -152,48 +159,65 @@ fn attempt(ui: &Ui, settings: &Settings, globals: &Globals, args: &SendArgs) -> 
     let decoded =
         TxV4::deserialize(&hex::decode(&unsent.hex).expect("the SDK just produced this hex")).ok();
 
-    if ui.is_json() {
-        emit_json(&unsent, &decoded, globals.dry_run, &envelope.address);
-        if globals.dry_run {
-            return Ok(());
-        }
-    } else {
+    // Built before the broadcast consumes `unsent`, and printed at exactly one
+    // point on each path below. The signed hex is the one thing here that cannot
+    // be recovered afterwards, so every exit carries it — including the failing
+    // one, where it is what lets you find out what actually happened.
+    let plan = plan_json(&unsent, &decoded, &envelope.address);
+
+    if !ui.is_json() {
         ui.panel(&review(
             ui, settings, &envelope, &recipient, amount, &unsent, &decoded,
         ));
     }
 
     if globals.dry_run {
-        if !ui.is_json() {
-            // The bytes themselves, not just the reading of them. Without these
-            // a dry run in a terminal has nothing to hand to anything else —
-            // and they are what an air-gapped signer would carry across.
-            ui.blank();
-            ui.panel(
-                &Panel::new("SIGNED TRANSACTION")
-                    .wrapped(0, Text::of(&unsent.hex, ui.theme.palette.value))
-                    .note(Text::of(
-                        "nothing was broadcast. `pecu tx explain <hex>` reads this back, \
-                         and `--json` gives it unwrapped",
-                        ui.theme.palette.muted,
-                    )),
-            );
+        if ui.is_json() {
+            emit_json(plan, Delivery::Held);
+            return Ok(());
         }
+        // The bytes themselves, not just the reading of them. Without these
+        // a dry run in a terminal has nothing to hand to anything else —
+        // and they are what an air-gapped signer would carry across.
+        ui.blank();
+        ui.panel(
+            &Panel::new("SIGNED TRANSACTION")
+                .wrapped(0, Text::of(&unsent.hex, ui.theme.palette.value))
+                .note(Text::of(
+                    "nothing was broadcast. `pecu tx explain <hex>` reads this back, \
+                     and `--json` gives it unwrapped",
+                    ui.theme.palette.muted,
+                )),
+        );
         return Ok(());
     }
 
-    if !globals.yes && !ui.is_json() {
+    if !globals.yes {
+        // `--json` used to skip this silently, which made it a spending flag:
+        // `pecu send --json` broadcast without asking anyone. The prompt cannot
+        // run here — it writes to stdout, and there is nobody to read it — so
+        // the consent has to arrive as `--yes` instead of being assumed.
+        if ui.is_json() {
+            return Err(SendError::NeedsYes.into());
+        }
         confirm(ui)?;
     }
 
     ui.sdk("unsent.broadcast(&node)");
-    let sent = unsent
-        .broadcast(&node)
-        .map_err(|source| flow("broadcasting", source))?;
+    let sent = match unsent.broadcast(&node) {
+        Ok(sent) => sent,
+        Err(source) => {
+            ui.sdk_result(format!("Err({source})"));
+            if ui.is_json() {
+                emit_json(plan, Delivery::Failed(&source));
+            }
+            return Err(flow("broadcasting", source).into());
+        }
+    };
     ui.sdk_result(format!("Sent {{ txid: {} }}", sent.txid));
 
     if ui.is_json() {
-        emit_json_sent(&sent);
+        emit_json(plan, Delivery::Accepted(&sent));
     } else {
         ui.blank();
         ui.ok(format!("broadcast — txid {}", sent.txid));
@@ -571,38 +595,86 @@ fn insufficient_or_flow(what: &'static str, source: FlowError) -> SendError {
     flow(what, source)
 }
 
-fn emit_json(
+/// What happened to the signed transaction after it was built.
+enum Delivery<'a> {
+    /// Built and signed, deliberately not sent. A dry run.
+    Held,
+    /// The node took it.
+    Accepted(&'a verus_sdk::network::Sent),
+    /// The broadcast did not come back cleanly. Whether the node has it anyway
+    /// is a separate question, answered in [`emit_json`].
+    Failed(&'a FlowError),
+}
+
+/// The signed transaction, before anything is known about delivering it.
+fn plan_json(
     unsent: &Unsent<verus_sdk::network::Sent>,
     decoded: &Option<TxV4>,
-    dry_run: bool,
     from: &str,
-) {
+) -> serde_json::Value {
+    serde_json::json!({
+        "from": from,
+        "txid": unsent.txid,
+        "fee": unsent.outcome.fee.to_sat(),
+        "change": unsent.outcome.change.to_sat(),
+        "hex": unsent.hex,
+        "outputs": decoded.as_ref().map(|tx| tx.outputs.len()),
+    })
+}
+
+/// Print the one and only JSON document this command produces.
+///
+/// It used to print two — the plan before broadcasting and the result after —
+/// so `pecu send --json | jq` failed on the very invocation that spent money,
+/// and the first document announced `"broadcast": true` before anything had been
+/// sent. One document, written once the answer is known, on every path
+/// including the failing one.
+///
+/// `broadcast` is deliberately a tri-state:
+///
+/// * `true` — the node accepted it.
+/// * `false` — it definitely was not accepted: a dry run, or a daemon that
+///   answered with a rejection.
+/// * `null` — unknown. The request did not complete, and a transaction whose
+///   broadcast timed out may still be sitting in the mempool. Saying `false`
+///   there would be a guess about money; `outcome` and `hex` are what let you
+///   go and find out.
+fn emit_json(plan: serde_json::Value, delivery: Delivery<'_>) {
     println!(
         "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "from": from,
-            "txid": unsent.txid,
-            "fee": unsent.outcome.fee.to_sat(),
-            "change": unsent.outcome.change.to_sat(),
-            "hex": unsent.hex,
-            "outputs": decoded.as_ref().map(|tx| tx.outputs.len()),
-            "broadcast": !dry_run,
-        }))
-        .expect("plain data")
+        serde_json::to_string_pretty(&delivery_json(plan, delivery)).expect("plain data")
     );
 }
 
-fn emit_json_sent(sent: &verus_sdk::network::Sent) {
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "txid": sent.txid,
-            "fee": sent.fee.to_sat(),
-            "change": sent.change.to_sat(),
-            "broadcast": true,
-        }))
-        .expect("plain data")
-    );
+/// The document [`emit_json`] prints, so every state can be asserted on without
+/// a node, a key or a transaction.
+fn delivery_json(mut plan: serde_json::Value, delivery: Delivery<'_>) -> serde_json::Value {
+    let document = plan.as_object_mut().expect("plan_json builds an object");
+
+    let (broadcast, outcome) = match delivery {
+        Delivery::Held => (Some(false), "not_broadcast"),
+        Delivery::Accepted(sent) => {
+            // The node's figures win over the builder's estimate.
+            document.insert("txid".into(), serde_json::json!(sent.txid));
+            document.insert("fee".into(), serde_json::json!(sent.fee.to_sat()));
+            document.insert("change".into(), serde_json::json!(sent.change.to_sat()));
+            (Some(true), "accepted")
+        }
+        Delivery::Failed(error) => {
+            document.insert("error".into(), serde_json::json!(error.to_string()));
+            // A daemon that answered with an error has read the transaction and
+            // refused it. Anything else — a timeout, a dropped connection, a
+            // reply this build could not parse — leaves the mempool's contents
+            // genuinely unknown.
+            match error {
+                FlowError::Rpc(RpcError::Node { .. }) => (Some(false), "rejected"),
+                _ => (None, "unknown"),
+            }
+        }
+    };
+    document.insert("broadcast".into(), serde_json::json!(broadcast));
+    document.insert("outcome".into(), serde_json::json!(outcome));
+    plan
 }
 
 #[cfg(test)]
@@ -721,5 +793,77 @@ mod tests {
             widths.windows(2).all(|pair| pair[0] == pair[1]),
             "ragged frame {widths:?}:\n{out}"
         );
+    }
+
+    fn plan() -> serde_json::Value {
+        serde_json::json!({
+            "from": "RComfCn4wHHsGR8vWBAU7T1r3tHHyxN9Hm",
+            "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+            "fee": 10_000,
+            "change": 500,
+            "hex": "0400008085202f89",
+            "outputs": 2,
+        })
+    }
+
+    #[test]
+    fn a_dry_run_says_it_was_not_sent_rather_than_that_it_failed() {
+        let document = delivery_json(plan(), Delivery::Held);
+        assert_eq!(document["broadcast"], false);
+        assert_eq!(document["outcome"], "not_broadcast");
+        assert!(document["error"].is_null(), "nothing went wrong");
+        assert_eq!(document["hex"], "0400008085202f89");
+    }
+
+    #[test]
+    fn an_accepted_broadcast_carries_the_nodes_figures_not_the_builders() {
+        let sent = Sent {
+            txid: "2222222222222222222222222222222222222222222222222222222222222222".into(),
+            fee: Amount::from_sat(12_345),
+            change: Amount::from_sat(678),
+            hex: "0400008085202f89".into(),
+        };
+        let document = delivery_json(plan(), Delivery::Accepted(&sent));
+        assert_eq!(document["broadcast"], true);
+        assert_eq!(document["outcome"], "accepted");
+        assert_eq!(document["txid"], sent.txid);
+        assert_eq!(document["fee"], 12_345);
+        assert_eq!(document["change"], 678);
+    }
+
+    #[test]
+    fn a_daemon_that_refused_it_is_a_knowable_no() {
+        // The daemon read the transaction and said no, so it is not in any
+        // mempool and the document can say so outright.
+        let error = FlowError::Rpc(RpcError::Node {
+            code: -26,
+            message: "16: bad-txns-inputs-spent".into(),
+        });
+        let document = delivery_json(plan(), Delivery::Failed(&error));
+        assert_eq!(document["broadcast"], false);
+        assert_eq!(document["outcome"], "rejected");
+        assert!(
+            document["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("bad-txns-inputs-spent"),
+            "{document:#}"
+        );
+        // The one field that cannot be reconstructed afterwards.
+        assert_eq!(document["hex"], "0400008085202f89");
+    }
+
+    #[test]
+    fn a_broadcast_that_did_not_come_back_is_unknown_not_false() {
+        // A timed-out request may still have reached the mempool. `false` here
+        // would tell someone their money is safe when it may already be moving.
+        let error = FlowError::Rpc(RpcError::Transport("timed out".into()));
+        let document = delivery_json(plan(), Delivery::Failed(&error));
+        assert!(
+            document["broadcast"].is_null(),
+            "a timeout is not a no:\n{document:#}"
+        );
+        assert_eq!(document["outcome"], "unknown");
+        assert_eq!(document["hex"], "0400008085202f89");
     }
 }

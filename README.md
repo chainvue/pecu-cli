@@ -311,6 +311,29 @@ returns is *incapable* of being sent; broadcasting is a separate, explicit step.
 **Mainnet cannot spend until you say so.** `allow_spend` is `false` there by
 default — see [Configuration](#configuration).
 
+**`--json` is output, not consent.** It will not broadcast without `--yes`. The
+confirmation prompt writes to the stream you are parsing and there is nobody to
+answer it, so consent has to be passed in rather than assumed from the fact that
+you asked for machine-readable output.
+
+`send --json` prints **exactly one document**, on every path including the one
+where the broadcast fails — that path is where the signed `hex` matters most,
+since it is the only field that cannot be recovered afterwards. `broadcast` is a
+tri-state, because a broadcast that did not come back is not the same as one that
+was refused:
+
+| `outcome` | `broadcast` | What it means |
+|---|---|---|
+| `not_broadcast` | `false` | A dry run. Built, signed, deliberately not sent |
+| `accepted` | `true` | The node took it. `txid`, `fee` and `change` are the node's figures |
+| `rejected` | `false` | The daemon read it and refused. It is in no mempool |
+| `unknown` | `null` | The request did not complete. It **may** still have reached the mempool — check the `txid` before rebuilding |
+
+`null` rather than `false` on that last row is the whole point: a timed-out
+broadcast that is reported as "not sent" invites a second payment, and telling
+someone their money is safe when it may already be moving is the wrong answer to
+be confident about.
+
 ### The air gap
 
 Three commands, because there are three machines' worth of trust.
