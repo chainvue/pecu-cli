@@ -206,6 +206,141 @@ fn utxos_list_the_outputs_behind_the_balance() {
 
 #[test]
 #[ignore = "talks to api.verustest.net"]
+fn the_mempool_is_actually_readable_through_the_public_node() {
+    // The guard that matters most here, and the one an assertion on a *pending*
+    // payment could never give: the read has to have happened. `getaddressmempool`
+    // sits behind the same method allowlist as everything else on this endpoint,
+    // and it is arity-sensitive — a second positional argument comes back -32601.
+    // If either changes, `known` goes false and every balance quietly starts
+    // reporting nothing in flight.
+    let home = home();
+    let assertion = pecu(&home)
+        .args(["wallet", "balance", "--address", CHAIN_IDENTITY, "--json"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+    let document: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+
+    assert_eq!(
+        document["pending"]["known"], true,
+        "the mempool read failed, so this balance cannot say anything is pending:\n{document:#}"
+    );
+    // Whatever is in flight, the confirmed total must not have absorbed it.
+    assert!(document["pending"]["transactions"].is_number());
+    assert!(document["pending"]["net_satoshis"].is_number());
+}
+
+#[test]
+#[ignore = "talks to api.verustest.net"]
+fn utxos_say_whether_the_mempool_was_readable_at_all() {
+    // `spent_in_mempool` reads `false` on every output when the read failed,
+    // which is indistinguishable from "nothing is being spent". This flag is the
+    // only thing that tells the two apart.
+    let home = home();
+    let assertion = pecu(&home)
+        .args(["wallet", "utxos", "--address", CHAIN_IDENTITY, "--json"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+    let document: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+
+    assert_eq!(document["mempool_known"], true, "{document:#}");
+}
+
+/// The whole point of the feature, against a real transaction: broadcast a small
+/// payment and read it back before any block contains it.
+///
+/// Costs a fee per run, so it needs `PECU_FUNDED_HOME` — a config root with a
+/// funded key — and is skipped rather than failed without one.
+#[test]
+#[ignore = "spends real VRSCTEST; set PECU_FUNDED_HOME"]
+fn a_payment_in_flight_is_visible_before_it_confirms() {
+    let Ok(funded) = std::env::var("PECU_FUNDED_HOME") else {
+        eprintln!("PECU_FUNDED_HOME is not set — skipping");
+        return;
+    };
+
+    // The *last* document, not the only one: `send --json` prints the signed
+    // plan before it broadcasts and the result after, deliberately, so the hex
+    // survives a broadcast that hangs. Every other command here prints one.
+    let run = |args: &[&str]| {
+        let assertion = Command::cargo_bin("pecu")
+            .expect("built")
+            .env("PECU_HOME", &funded)
+            .args(args)
+            .assert()
+            .success();
+        let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+        serde_json::Deserializer::from_str(&stdout)
+            .into_iter::<serde_json::Value>()
+            .last()
+            .expect("at least one json document")
+            .expect("valid json")
+    };
+
+    let before = run(&["wallet", "balance", "--json"]);
+    let address = before["address"].as_str().expect("an address").to_string();
+    let confirmed = before["total_satoshis"].as_u64().expect("a total");
+
+    // Refuse to start from a mempool that already has this address in it. Coin
+    // selection reads the chain, the chain still shows the pending payment's
+    // input as unspent, and the send below would be funded from it — a double
+    // spend the node refuses with `bad-txns-inputs-spent`. Which is the failure
+    // this feature exists to make visible, so hitting it here is not a reason to
+    // work around it; it is a reason to wait for a block.
+    if before["pending"]["transactions"].as_u64().unwrap_or(0) > 0 {
+        eprintln!("{address} already has a payment in flight — skipping until it confirms");
+        return;
+    }
+
+    // To itself, so one address sees the input being spent, the payment and the
+    // change — and so the test costs a fee rather than a payment.
+    let sent = run(&[
+        "send", "--to", &address, "--amount", "0.001", "--yes", "--json",
+    ]);
+    let txid = sent["txid"].as_str().expect("a txid").to_string();
+
+    let during = run(&["wallet", "balance", "--json"]);
+    let pending = &during["pending"];
+    assert_eq!(pending["known"], true, "{during:#}");
+    assert!(
+        pending["transactions"].as_u64().unwrap_or(0) >= 1,
+        "the payment just broadcast is not in the mempool view:\n{during:#}"
+    );
+    // A self-send costs exactly its fee, and the fee leaves the address.
+    assert!(
+        pending["net_satoshis"].as_i64().unwrap_or(0) < 0,
+        "a self-send should net out negative by the fee:\n{during:#}"
+    );
+    assert!(
+        !pending["spending"].as_array().expect("spending").is_empty(),
+        "the output being consumed was not reported:\n{during:#}"
+    );
+    // The confirmed figure is the chain's, and no block has this yet.
+    assert_eq!(
+        during["total_satoshis"].as_u64().expect("a total"),
+        confirmed,
+        "pending value leaked into the confirmed total:\n{during:#}"
+    );
+
+    let outputs = run(&["wallet", "utxos", "--json"]);
+    let listed = outputs["outputs"].as_array().expect("outputs");
+    assert!(
+        listed
+            .iter()
+            .any(|output| output["status"] == "pending" && output["txid"] == txid.as_str()),
+        "the unconfirmed outputs are missing from `wallet utxos`:\n{outputs:#}"
+    );
+    assert!(
+        listed
+            .iter()
+            .any(|output| output["spent_in_mempool"] == true),
+        "no confirmed output is marked as being spent:\n{outputs:#}"
+    );
+}
+
+#[test]
+#[ignore = "talks to api.verustest.net"]
 fn an_address_with_too_many_outputs_says_which_setting_to_raise() {
     let home = home();
     // A long-lived VRSCTEST mining address: its getaddressutxos reply is ~85 MB,

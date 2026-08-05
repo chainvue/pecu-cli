@@ -64,7 +64,7 @@ before blaming the command — `cargo run` is usually what you are measuring.
 |---|---|---|
 | `pecu doctor` | Node reachability, chain tip, config paths, build info | ✅ done |
 | `pecu key gen\|import\|list\|show\|export\|phrase` | Encrypted keystore (Argon2id + ChaCha20-Poly1305) | ✅ done |
-| `pecu wallet balance\|utxos` | Spendable, withheld and token balances | ✅ done |
+| `pecu wallet balance\|utxos` | Spendable, withheld, token and unconfirmed balances | ✅ done |
 | `pecu tx explain` | Says what every output in a transaction actually *is* | ✅ done |
 | `pecu send` | Transparent sends, native and token | ✅ done |
 | `pecu plan send` / `pecu sign` / `pecu broadcast` | The air-gap trio, over files or QR codes | ✅ done |
@@ -89,7 +89,7 @@ answering.
 │ keys        ~/.config/verus-pecu/keys (0 keys)      │
 ├─ BUILD ─────────────────────────────────────────────┤
 │ pecu        0.1.0                                   │
-│ verus-sdk   ae08bc0                                 │
+│ verus-sdk   4044fb1                                 │
 │ features    network                                 │
 ├─ NODE ──────────────────────────────────────────────┤
 │ chain       VRSCTEST                                │
@@ -198,6 +198,41 @@ number, and a wallet that prints one is wrong.
 | `HELD BY ID` | Native value in pay-to-identity outputs — a VerusID's own funds, spendable by its authority rather than by a key |
 | `IN CONDITIONS` | Native value in every other CryptoCondition output |
 | `TOTAL` | The sum, which is what a block explorer shows |
+
+A sixth section appears only when something is moving. A UTXO set and a delta
+list both agree that an unconfirmed payment does not exist, so an address that
+has just been paid reports its old balance until a block is mined — the one
+answer a wallet must not give while money is demonstrably on its way:
+
+```
+├─ PENDING ──────────────────────────────────────────────┤
+│ in flight   1 transaction                              │
+│ INCOMING  348.54919600  VRSCTEST                       │
+│ OUTGOING  348.54929600  VRSCTEST                       │
+│ NET        -0.00010000  VRSCTEST                       │
+└────────────────────────────────────────────────────────┘
+  ▸ pending: in this node's mempool, not in any block, and excluded from the
+    totals above. It may confirm, be replaced, or never arrive, and another
+    node may not have seen it at all
+```
+
+That is a real self-send caught mid-flight: everything leaves the address and
+comes back, so the net is exactly the fee. It costs one request —
+`ChainReader::address_mempool` — where the alternative is `mempool()` plus one
+`raw_transaction()` per txid, scanning outputs.
+
+- **It is never added to `TOTAL`.** Confirmed figures and mempool figures answer
+  different questions, so they get different sections; a reader who adds them up
+  should have to mean it.
+- **A failed mempool read says so.** Like the token lookup, `Err` means
+  *unknown*, and the panel prints `⚠ unknown: …` rather than nothing at all —
+  silence here reads as "nothing pending", which is the wrong answer stated as a
+  fact. `--json` carries `"known": false`.
+- **`wallet utxos` marks the outputs a pending transaction already claims.** The
+  chain still shows them unspent, so coin selection still offers them; funding a
+  second payment from one builds a double spend the node refuses with
+  `bad-txns-inputs-spent`. Unconfirmed arrivals appear there too, at `0`
+  confirmations, and are never counted as spendable.
 
 `HELD BY ID` is where an i-address keeps everything it owns. The SDK deliberately
 keeps those outputs out of the spendable bucket — the native builders would
@@ -541,17 +576,22 @@ The house style is *phosphor*: green on black, box-drawing frames, dim labels an
 bright values. Panels shrink to fit their content rather than filling the window.
 
 ```
-┌─ WALLET ───────────────────────────────────────────┐
-│ addr   RXyz9k2mP…7Qa4                              │
-│ tip    ▸ 3,481,207        node ✓ api.verustest.net │
-├────────────────────────────────────────────────────┤
-│ SPENDABLE  312.50000000  VRSCTEST  (4 utxos)       │
-│ IMMATURE     6.00000000  VRSCTEST  (1 coinbase)    │
-├─ TOKENS ───────────────────────────────────────────┤
-│ 1200.00000000  pecu@    iJhCe4Ap7…y8Kd             │
-│    0.50000000  bridge@  i3f7QwErT…V2Lm             │
-└────────────────────────────────────────────────────┘
-  ▸ 2 CryptoCondition outputs carry no currency
+┌─ WALLET ────────────────────────────────────────────────┐
+│ addr        RXyz9k2mP…7Qa4                              │
+│ tip         ▸ 3,481,207        node ✓ api.verustest.net │
+├─────────────────────────────────────────────────────────┤
+│ SPENDABLE  312.50000000  VRSCTEST  (4 utxos)            │
+│ WITHHELD     6.00000000  VRSCTEST  (1 coinbase)         │
+├─ TOKENS ────────────────────────────────────────────────┤
+│ 1200.00000000  pecu@    iJhCe4Ap7…y8Kd                  │
+│    0.50000000  bridge@  i3f7QwErT…V2Lm                  │
+├─ PENDING ───────────────────────────────────────────────┤
+│ in flight   2 transactions                              │
+│ INCOMING   0.25000000  VRSCTEST                         │
+│ OUTGOING   1.00010000  VRSCTEST                         │
+│ NET       -0.75010000  VRSCTEST                         │
+└─────────────────────────────────────────────────────────┘
+  ▸ pending: in this node's mempool, not in any block, and excluded from the totals above
 ```
 
 It is deliberately readable when piped. `--theme plain` drops the frames, the
@@ -562,11 +602,11 @@ bypass the renderer completely once commands have data to serialise.
 ```
 $ pecu dev ui --theme plain
 WALLET
-  addr   RXyz9k2mP...7Qa4
-  tip    - 3,481,207        node ok api.verustest.net
+  addr        RXyz9k2mP...7Qa4
+  tip         - 3,481,207        node ok api.verustest.net
 
   SPENDABLE  312.50000000  VRSCTEST  (4 utxos)
-  IMMATURE     6.00000000  VRSCTEST  (1 coinbase)
+  WITHHELD     6.00000000  VRSCTEST  (1 coinbase)
 ```
 
 `pecu dev ui` renders every widget in the kit — it is both the design reference

@@ -6,17 +6,22 @@ expression: "gallery(\"phosphor\")"
   ├─┘├┤ │  │ │   widget gallery
   ┴  └─┘└─┘└─┘
 
-┌─ WALLET ───────────────────────────────────────────┐
-│ addr   RXyz9k2mP…7Qa4                              │
-│ tip    ▸ 3,481,207        node ✓ api.verustest.net │
-├────────────────────────────────────────────────────┤
-│ SPENDABLE  312.50000000  VRSCTEST  (4 utxos)       │
-│ IMMATURE     6.00000000  VRSCTEST  (1 coinbase)    │
-├─ TOKENS ───────────────────────────────────────────┤
-│ 1200.00000000  pecu@    iJhCe4Ap7…y8Kd             │
-│    0.50000000  bridge@  i3f7QwErT…V2Lm             │
-└────────────────────────────────────────────────────┘
-  ▸ 2 CryptoCondition outputs carry no currency
+┌─ WALLET ────────────────────────────────────────────────┐
+│ addr        RXyz9k2mP…7Qa4                              │
+│ tip         ▸ 3,481,207        node ✓ api.verustest.net │
+├─────────────────────────────────────────────────────────┤
+│ SPENDABLE  312.50000000  VRSCTEST  (4 utxos)            │
+│ WITHHELD     6.00000000  VRSCTEST  (1 coinbase)         │
+├─ TOKENS ────────────────────────────────────────────────┤
+│ 1200.00000000  pecu@    iJhCe4Ap7…y8Kd                  │
+│    0.50000000  bridge@  i3f7QwErT…V2Lm                  │
+├─ PENDING ───────────────────────────────────────────────┤
+│ in flight   2 transactions                              │
+│ INCOMING   0.25000000  VRSCTEST                         │
+│ OUTGOING   1.00010000  VRSCTEST                         │
+│ NET       -0.75010000  VRSCTEST                         │
+└─────────────────────────────────────────────────────────┘
+  ▸ pending: in this node's mempool, not in any block, and excluded from the totals above
 
 ┌─ UTXOS ───────────────────────────────────────────────┐
 │ OUTPOINT                   AMOUNT   CONF  STATUS      │

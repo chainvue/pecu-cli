@@ -125,11 +125,25 @@ impl Table {
 
     fn lay_out(&self, cells: &[Text], widths: &[usize]) -> Text {
         let empty = Text::new();
-        let last = self.columns.len().saturating_sub(1);
+        // The last column that has anything in it, rather than the last column
+        // that exists. A row which leaves the final cells blank — the totals
+        // rows in `wallet balance`, where only some lines carry a note — would
+        // otherwise end in the gutter leading up to them, and pay for a column
+        // it does not use with trailing whitespace.
+        let Some(last) = self
+            .columns
+            .iter()
+            .enumerate()
+            .rposition(|(index, _)| cells.get(index).is_some_and(|cell| cell.width() > 0))
+        else {
+            // A blank row is a blank line, not a line of padding. Falling
+            // through would emit the right-aligned columns' padding.
+            return Text::preformatted(String::new(), 0);
+        };
         let mut line = String::new();
         let mut width = 0;
 
-        for (index, column) in self.columns.iter().enumerate() {
+        for (index, column) in self.columns.iter().enumerate().take(last + 1) {
             if index > 0 {
                 line.push_str(&" ".repeat(GUTTER));
                 width += GUTTER;

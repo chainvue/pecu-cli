@@ -19,6 +19,22 @@ pub fn sats(value: u64) -> String {
     amount(Amount::from_sat(value))
 }
 
+/// A movement rather than a holding: always signed, so `+` and `-` line up in
+/// the same column and a net of zero reads as `+0.00000000` rather than as an
+/// amount that happens to be small.
+///
+/// Formatted from the magnitude so that `i64::MIN` cannot be negated into an
+/// overflow, and so the digits after the point are never themselves negative.
+pub fn signed(satoshis: i64) -> String {
+    let sign = if satoshis < 0 { '-' } else { '+' };
+    let magnitude = satoshis.unsigned_abs();
+    format!(
+        "{sign}{}.{:08}",
+        magnitude / SATS_PER_COIN,
+        magnitude % SATS_PER_COIN
+    )
+}
+
 /// A block height, grouped: `3481207` reads as `3,481,207`.
 ///
 /// Amounts deliberately do *not* get separators — a grouped coin value is one
@@ -138,6 +154,23 @@ mod tests {
     #[test]
     fn amounts_are_never_grouped() {
         assert_eq!(sats(1_234_567_800_000_000), "12345678.00000000");
+    }
+
+    #[test]
+    fn a_movement_always_carries_its_sign() {
+        assert_eq!(signed(150_000_000), "+1.50000000");
+        assert_eq!(signed(-150_000_000), "-1.50000000");
+        // Not "0.00000000": the column is movements, and an unsigned entry in
+        // it reads as a holding.
+        assert_eq!(signed(0), "+0.00000000");
+    }
+
+    #[test]
+    fn the_most_negative_amount_formats_rather_than_overflowing() {
+        // `-i64::MIN` panics in debug and wraps in release. Formatting from the
+        // magnitude is what keeps a hostile or broken reply from taking the
+        // process down.
+        assert_eq!(signed(i64::MIN), "-92233720368.54775808");
     }
 
     #[test]

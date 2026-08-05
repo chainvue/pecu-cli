@@ -44,11 +44,21 @@ fn help_lists_every_top_level_command() {
 
 #[test]
 fn long_version_names_the_pinned_sdk_revision() {
+    // Read from `Cargo.toml` rather than written out again here. The revision
+    // lives in two places — the dependency and a literal in `cli.rs`, which
+    // cannot read it — and an assertion that repeated it would be a third,
+    // failing only after the first two had already drifted apart.
+    let manifest = include_str!("../Cargo.toml");
+    let rev = manifest
+        .lines()
+        .find_map(|line| line.split_once("rev = \"")?.1.split('"').next())
+        .expect("Cargo.toml should pin verus-sdk by rev");
+
     pecu()
         .arg("--version")
         .assert()
         .success()
-        .stdout(contains("verus-sdk rev ae08bc0"));
+        .stdout(contains(format!("verus-sdk rev {}", &rev[..7])));
 }
 
 #[test]

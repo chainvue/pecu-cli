@@ -44,10 +44,30 @@ pub fn gallery(ui: &Ui) {
         ),
     ]);
     balances.push(vec![
-        Text::of("IMMATURE", palette.label),
+        // "WITHHELD", matching `wallet balance`. The node routes any output it
+        // calls unspendable into this bucket, not only immature coinbase.
+        Text::of("WITHHELD", palette.label),
         Text::of(fmt::amount(Amount::from_sat(600_000_000)), palette.value),
         Text::of("VRSCTEST", palette.muted),
         Text::of("(1 coinbase)", palette.muted),
+    ]);
+
+    // Movements, not holdings — the one table here whose numbers are signed.
+    let mut pending = Table::headerless([Align::Left, Align::Right, Align::Left, Align::Left]);
+    pending.push(vec![
+        Text::of("INCOMING", palette.label),
+        Text::of(fmt::amount(Amount::from_sat(25_000_000)), palette.ok),
+        Text::of("VRSCTEST", palette.muted),
+    ]);
+    pending.push(vec![
+        Text::of("OUTGOING", palette.label),
+        Text::of(fmt::amount(Amount::from_sat(100_010_000)), palette.warn),
+        Text::of("VRSCTEST", palette.muted),
+    ]);
+    pending.push(vec![
+        Text::of("NET", palette.label),
+        Text::of(fmt::signed(-75_010_000), palette.accent),
+        Text::of("VRSCTEST", palette.muted),
     ]);
 
     let mut tokens = Table::headerless([Align::Right, Align::Left, Align::Left]);
@@ -95,8 +115,12 @@ pub fn gallery(ui: &Ui) {
         .table(balances)
         .section("TOKENS")
         .table(tokens)
+        .section("PENDING")
+        .row("in flight", Text::of("2 transactions", palette.value))
+        .table(pending)
         .note(Text::of(
-            "2 CryptoCondition outputs carry no currency",
+            "pending: in this node's mempool, not in any block, and excluded from the totals \
+             above",
             palette.muted,
         ));
     ui.panel(&wallet);
