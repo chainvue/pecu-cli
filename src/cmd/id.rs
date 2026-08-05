@@ -808,20 +808,31 @@ fn timelock_panel(ui: &Ui, panel: Panel, timelock: Timelock, tip: Option<u32>) -
     match timelock {
         Timelock::None => panel,
         Timelock::UntilBlock(height) => {
+            // Past or future decides the tense, and both are ordinary states: a
+            // countdown that has elapsed leaves its height on the identity
+            // forever, because nothing clears it. "unlocks at" on a height that
+            // went by last week reads as though something were still pending.
+            let elapsed = tip.is_some_and(|tip| tip >= height);
             let panel = panel.section("TIMELOCK").row(
-                "unlocks at",
+                if elapsed { "unlocked at" } else { "unlocks at" },
                 Text::of(
                     format!("block {}", fmt::height(height.into())),
                     palette.value,
                 ),
             );
             match tip {
-                Some(tip) if tip >= height => panel.row(
-                    "state",
-                    Text::of(glyphs.ok, palette.ok)
-                        .space()
-                        .push("unlocked", palette.ok),
-                ),
+                Some(tip) if tip >= height => panel
+                    .row(
+                        "state",
+                        Text::of(glyphs.ok, palette.ok)
+                            .space()
+                            .push("unlocked", palette.ok),
+                    )
+                    .note(Text::of(
+                        "the height stays on the identity after a countdown finishes — a \
+                         leftover, not a pending unlock",
+                        palette.muted,
+                    )),
                 Some(tip) => panel
                     .row(
                         "state",

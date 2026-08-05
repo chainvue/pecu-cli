@@ -48,7 +48,8 @@ use thiserror::Error;
 use verus_sdk::identity::{Timelock, MAX_UNLOCK_DELAY};
 use verus_sdk::network::{
     current_identity, prepare_identity_recovery, prepare_identity_revocation,
-    prepare_identity_unlock, prepare_identity_update, FlowError, Held, IdentityChange, Unsent,
+    prepare_identity_unlock, prepare_identity_update, ChainReader, FlowError, Held, IdentityChange,
+    Unsent,
 };
 use verus_sdk::verus_keys::{Address, AddressKind, PrivateKey};
 use verus_sdk::verus_tx::Destination;
@@ -201,6 +202,11 @@ fn flow(what: &'static str, source: FlowError) -> LifecycleError {
         }
         // Not failures to build: answers. Saying "the change could not be
         // built" for either would send someone looking for a fault.
+        FlowError::Content(message) if message.contains("passed") => {
+            "nothing to do — it is already unlocked. The height stays on the identity after a \
+             countdown finishes; `pecu id update --unlock-delay` locks it again"
+                .to_string()
+        }
         FlowError::Content(message) if message.contains("already counting down") => {
             "nothing to do — the countdown is running. `pecu id show <name@>` reports the \
              height it opens at, and nothing can bring that forward"
@@ -665,16 +671,31 @@ pub fn unlock(
     let node = node::connect(&settings.profile)?;
     let before = held(ui, &node, &args.name)?;
     let delay = match before.identity.timelock() {
-        Timelock::DelayAfterUnlock(delay) => Some(delay),
+        Timelock::DelayAfterUnlock(delay) => delay,
+        // A countdown that has elapsed leaves this height set forever — nothing
+        // clears it — so `UntilBlock` in the past is a permanent resting state,
+        // not a rare one. Calling it "counting down" is false for every
+        // identity that has ever been unlocked, which is most of them.
         Timelock::UntilBlock(height) => {
-            return Err(flow(
-                "starting the unlock",
-                FlowError::Content(format!(
+            ui.sdk("node.block_count()");
+            let tip = node.block_count().ok();
+            ui.sdk_result(match tip {
+                Some(tip) => fmt::height(tip.into()),
+                None => "unknown".to_string(),
+            });
+            let message = match tip {
+                Some(tip) if tip >= height => format!(
+                    "{} is not locked — block {height} passed {} ago, and the height stays on \
+                     the identity because nothing clears it",
+                    args.name,
+                    fmt::plural((tip - height) as usize, "block", "blocks")
+                ),
+                _ => format!(
                     "{} is already counting down to block {height}; there is nothing to start",
                     args.name
-                )),
-            )
-            .into())
+                ),
+            };
+            return Err(flow("starting the unlock", FlowError::Content(message)).into());
         }
         Timelock::None => {
             return Err(flow(
@@ -717,15 +738,13 @@ pub fn unlock(
         "UNLOCK"
     })
     .row("identity", name_row(ui, &args.name));
-    if let Some(delay) = delay {
-        panel = panel.row(
-            "delay",
-            Text::of(
-                fmt::plural(delay as usize, "block", "blocks"),
-                palette.value,
-            ),
-        );
-    }
+    panel = panel.row(
+        "delay",
+        Text::of(
+            fmt::plural(delay as usize, "block", "blocks"),
+            palette.value,
+        ),
+    );
     panel = panel
         .row(
             "signed by",

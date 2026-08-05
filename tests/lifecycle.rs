@@ -153,12 +153,18 @@ fn a_recovered_identity_no_longer_answers_to_the_keys_it_was_taken_from() {
     let assertion = Command::cargo_bin("pecu")
         .expect("built")
         .env("PECU_HOME", &funded)
+        // `pecucli7@` rather than the recovered identity, and deliberately: the
+        // recovered one carries a leftover unlock height, and the SDK's
+        // timelock check refuses *any* update that restates it, before it ever
+        // reaches the question this test is about. `rescued` is not one of
+        // `pecucli7@`'s primary addresses, which is the same wrong-key case
+        // without that in the way.
         .args([
             "id",
             "update",
-            RESCUED,
+            OURS_ADDRESS,
             "--from",
-            "faucet",
+            "rescued",
             "--min-sigs",
             "1",
             "--allow-authority-change",
@@ -264,8 +270,39 @@ fn unlocking_something_already_counting_down_has_nothing_to_start() {
         .args(["id", "unlock", RESCUED, "--from", "rescued", "--dry-run"])
         .assert()
         .failure()
-        // Short: miette wraps, and "counting down" splits across the break.
-        .stderr(contains("already counting"));
+        // Either resting state is a legitimate answer and both must read as
+        // one: still counting down, or finished and leaving its height behind.
+        // What must never appear is "the countdown is running" for a height
+        // that went by — which is what this said before the SDK pointed out
+        // that nothing ever clears it.
+        .stderr(contains("already counting").or(contains("is not locked")));
+}
+
+#[test]
+#[ignore = "talks to api.verustest.net"]
+fn a_countdown_that_finished_is_not_reported_as_still_running() {
+    let Ok(funded) = std::env::var("PECU_FUNDED_HOME") else {
+        eprintln!("PECU_FUNDED_HOME is not set — skipping");
+        return;
+    };
+
+    // `unlock_after` keeps its height forever once a countdown elapses, so this
+    // is where most identities end up rather than a corner case.
+    let assertion = Command::cargo_bin("pecu")
+        .expect("built")
+        .env("PECU_HOME", &funded)
+        .args(["id", "show", RESCUED])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+
+    if stdout.contains("unlocked at") {
+        assert!(
+            !stdout.contains("unlocks at"),
+            "an elapsed countdown is in the past tense:\n{stdout}"
+        );
+        assert!(stdout.contains("leftover"), "{stdout}");
+    }
 }
 
 /// The consensus rule, caught before a fee is spent.
