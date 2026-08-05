@@ -165,9 +165,19 @@ fn attempt(ui: &Ui, settings: &Settings, globals: &Globals, args: &SendArgs) -> 
 
     if globals.dry_run {
         if !ui.is_json() {
+            // The bytes themselves, not just the reading of them. Without these
+            // a dry run in a terminal has nothing to hand to anything else —
+            // and they are what an air-gapped signer would carry across.
             ui.blank();
-            ui.note("--dry-run: nothing was broadcast");
-            ui.note("the signed transaction is above; `pecu tx explain <hex>` reads it back");
+            ui.panel(
+                &Panel::new("SIGNED TRANSACTION")
+                    .wrapped(0, Text::of(&unsent.hex, ui.theme.palette.value))
+                    .note(Text::of(
+                        "nothing was broadcast. `pecu tx explain <hex>` reads this back, \
+                         and `--json` gives it unwrapped",
+                        ui.theme.palette.muted,
+                    )),
+            );
         }
         return Ok(());
     }
