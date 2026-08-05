@@ -63,15 +63,17 @@ fn long_version_names_the_pinned_sdk_revision() {
 
 #[test]
 fn unimplemented_commands_say_so_and_exit_non_zero() {
-    // Deliberately the last command scheduled to land, so this needs updating
-    // as rarely as possible. When `id read` ships, delete this test — there
-    // will be no stub left for it to be about.
-    pecu()
-        .args(["id", "read"])
-        .assert()
-        .failure()
-        .stderr(contains("not implemented"))
-        .stderr(contains("M8"));
+    // The last stubs left, and parked rather than merely unwritten: the SDK has
+    // no flows for them yet. When they land, delete this test — there will be
+    // no stub for it to be about.
+    for command in ["update", "revoke", "recover"] {
+        pecu()
+            .args(["id", command])
+            .assert()
+            .failure()
+            .stderr(contains("not implemented"))
+            .stderr(contains("M7b"));
+    }
 }
 
 #[test]

@@ -386,9 +386,128 @@ pub enum IdCommand {
     /// Recover a revoked identity
     Recover,
     /// Prove control of an identity by signing a challenge
-    Login,
+    Login {
+        #[command(subcommand)]
+        command: LoginCommand,
+    },
     /// Publish VDXF data under an identity
-    Publish,
+    Publish(IdPublishArgs),
     /// Read VDXF data from an identity
-    Read,
+    Read(IdReadArgs),
+}
+
+/// Signing in with a VerusID, split across the three parties that do it: the
+/// site that asks, the holder who signs, and the site again when it checks.
+#[derive(Debug, Subcommand)]
+pub enum LoginCommand {
+    /// Issue a single-use challenge for someone to sign
+    Challenge(LoginChallengeArgs),
+    /// Sign a challenge as an identity you hold a key for
+    Sign(LoginSignArgs),
+    /// Check a signature against the identity as it stood when it was made
+    Verify(LoginVerifyArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct LoginChallengeArgs {
+    /// Who is asking. It goes into the signed message, so a signature made for
+    /// one site cannot be presented at another
+    #[arg(long, short = 'a', value_name = "TEXT")]
+    pub audience: String,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct LoginSignArgs {
+    /// The identity to sign as
+    #[arg(value_name = "NAME@|i-ADDRESS")]
+    pub name: String,
+
+    /// Who asked. Must match what the verifier will check against
+    #[arg(long, short = 'a', value_name = "TEXT")]
+    pub audience: String,
+
+    /// The challenge they issued
+    #[arg(long, short = 'c', value_name = "HEX")]
+    pub challenge: String,
+
+    /// Which stored key signs. Must be one of the identity's primary addresses
+    #[arg(long, short = 'f', value_name = "LABEL")]
+    pub from: Option<String>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct LoginVerifyArgs {
+    /// The identity that claims to have signed
+    #[arg(value_name = "NAME@|i-ADDRESS")]
+    pub name: String,
+
+    /// Who asked
+    #[arg(long, short = 'a', value_name = "TEXT")]
+    pub audience: String,
+
+    /// The challenge that was issued
+    #[arg(long, short = 'c', value_name = "HEX")]
+    pub challenge: String,
+
+    /// The signature to check, base64 as every Verus tool exchanges it
+    #[arg(long, short = 's', value_name = "BASE64")]
+    pub signature: String,
+
+    /// How old the signature may be, in blocks. Roughly a block a minute, so
+    /// the default of 60 is an hour
+    #[arg(long, value_name = "BLOCKS")]
+    pub max_age: Option<u32>,
+
+    /// Check the signature alone, without requiring that this machine issued
+    /// the challenge. Replay is then nobody's job — for challenges that came
+    /// from somewhere else and are tracked there
+    #[arg(long)]
+    pub stateless: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct IdPublishArgs {
+    /// The identity to write to. You must hold enough of its primary keys
+    #[arg(value_name = "NAME@|i-ADDRESS")]
+    pub name: String,
+
+    /// The VDXF key name, as `pecu id read` takes it back
+    #[arg(value_name = "KEY")]
+    pub key: String,
+
+    /// The value: text, `@file` to read a file, or `-` for stdin
+    #[arg(value_name = "VALUE")]
+    pub value: Option<String>,
+
+    /// Which stored key signs and pays the fee. Must be a primary address
+    #[arg(long, short = 'f', value_name = "LABEL")]
+    pub from: Option<String>,
+
+    /// Whose namespace the key hangs under. Defaults to the identity itself
+    #[arg(long, value_name = "NAME@|i-ADDRESS")]
+    pub namespace: Option<String>,
+
+    /// Delete the key instead of writing to it
+    #[arg(long, conflicts_with = "value")]
+    pub remove: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct IdReadArgs {
+    /// The identity to read
+    #[arg(value_name = "NAME@|i-ADDRESS")]
+    pub name: String,
+
+    /// The VDXF key name. Without one, every key the identity holds
+    #[arg(value_name = "KEY")]
+    pub key: Option<String>,
+
+    /// Whose namespace the key hangs under. Defaults to the identity itself
+    #[arg(long, value_name = "NAME@|i-ADDRESS")]
+    pub namespace: Option<String>,
+
+    /// Every value ever published under this key, oldest first, rather than
+    /// what stands there now
+    #[arg(long, requires = "key")]
+    pub history: bool,
 }

@@ -69,8 +69,8 @@ before blaming the command — `cargo run` is usually what you are measuring.
 | `pecu send` | Transparent sends, native and token | ✅ done |
 | `pecu plan send` / `pecu sign` / `pecu broadcast` | The air-gap trio, over files or QR codes | ✅ done |
 | `pecu id show\|register` | Read an identity; register one (two-phase, resumable) | ✅ done |
-| `pecu id update\|revoke\|recover` | The rest of the lifecycle | M7b |
-| `pecu id login\|publish\|read` | Sign-in with VerusID, and VDXF data | M8 |
+| `pecu id update\|revoke\|recover` | The rest of the lifecycle | ⏳ waiting on SDK flows |
+| `pecu id login\|publish\|read` | Sign-in with VerusID, and VDXF data on chain | ✅ done |
 | `pecu completions <shell>` | Shell completion script | ✅ done |
 
 ### `pecu doctor`
@@ -457,6 +457,106 @@ commitment.
 The success message says *broadcast*, not *registered* — the identity does not
 exist until the transaction is mined, and `id show` will say nothing is called
 that until then.
+
+### `pecu id login`
+
+Signing in as a VerusID, without handing anyone a key. Three commands because
+there are three moments, and they usually happen on three different machines:
+
+```sh
+pecu id login challenge --audience https://example.com          # the site asks
+pecu id login sign alice@ --audience … --challenge …            # you answer
+pecu id login verify alice@ --audience … --challenge … -s …     # the site checks
+```
+
+```
+┌─ VERIFIED ───────────────────────────────────────────────┐
+│ identity    pecucli7.VRSCTEST@                           │
+│ address     i7r29bDQfrwjkTxjv4bcYD6B1ZV7WZ4kGo           │
+│ audience    https://pecu.example                         │
+│ signed at   1,177,069  (within 60 blocks)                │
+│ signed by   RComfCn4wHHsGR8vWBAU7T1r3tHHyxN9Hm           │
+│ ✓ the signature is good, and this challenge is now spent │
+└──────────────────────────────────────────────────────────┘
+```
+
+**A signature is a bearer token, so the challenge is single use.** Anyone who
+sees a valid signature can present it again — the cryptography cannot tell the
+difference, because the bytes really are a valid signature by the right key over
+the right message. The only defence is that the verifier remembers what it
+asked. So `challenge` writes to `<config>/logins/<challenge>.json` and `verify`
+**consumes** it:
+
+```
+$ pecu id login verify …          # the same signature, a second time
+Error: pecu::unknown_challenge
+  × this machine did not issue that challenge
+```
+
+A *failed* verification does not spend it. Burning a challenge on a rejected
+attempt would let anyone who can guess one deny a real login by wasting it.
+
+`--stateless` skips the store, for a challenge issued somewhere else and tracked
+there. It says so in the output, because a verification that is not checking
+replay must not look like one that is.
+
+**Verified against the identity as it stood when it was signed**, not as it
+stands now — a key rotated out last week must not invalidate a login made before
+the rotation. Revocation is the deliberate exception and is retroactive: it is
+the break-glass action and takes effect immediately. Both rules are the SDK's;
+what this adds is the freshness bound (`--max-age`, 60 blocks by default),
+without which a signature is a credential that never expires.
+
+The audience is inside the signed bytes, length-prefixed alongside the
+challenge, so a signature made for one site does not verify at another and
+neither field can be shifted into the other.
+
+### `pecu id publish` · `pecu id read`
+
+A VerusID carries a `contentmultimap`: named slots, on chain, readable by
+anyone.
+
+```sh
+pecu id publish alice@ greeting "hello"      # text, @file or - for stdin
+pecu id publish alice@ greeting --remove     # delete the key
+pecu id read alice@ greeting                 # what stands there now
+pecu id read alice@ greeting --history       # every value ever published
+pecu id read alice@                          # every key it holds
+```
+
+```
+┌─ VALUE ────────────────────────────────────────────┐
+│ identity      pecucli7@                            │
+│ key           greeting                             │
+│ key address   iHKP4SMTKchkNrsueWz3wguQxgJSZC3QE7   │
+├────────────────────────────────────────────────────┤
+│ hello from verus-pecu-cli                          │
+└────────────────────────────────────────────────────┘
+```
+
+**The name is not what is stored.** `greeting` is hashed, with a **namespace**,
+to a 20-byte VDXF key — so two applications that both pick the name `profile` do
+not write over each other. The namespace defaults to the identity being written
+to, which is the self-consistent choice: what `publish alice@ greeting` writes,
+`read alice@ greeting` finds. `--namespace` reads what somebody else's
+application published. The hashing is one-way, so `pecu id read alice@` with no
+key lists raw i-addresses — nothing can turn those back into names.
+
+**Publishing is an identity update, and an update restates the whole identity.**
+There is no append: writing a key replaces what stood under it. The SDK reads
+the current identity out of the output script consensus reads and puts
+everything else back untouched, so nothing else is lost — but the entry you
+touch is replaced wholesale. It costs a miner fee, and the signing key must be
+one of the identity's own primary addresses.
+
+**An empty value is refused rather than read as a deletion.** On chain they are
+the same thing, and guessing which was meant is how a key gets deleted by
+accident — say `--remove` and mean it.
+
+`--history` is the audit view. It uses `getidentitycontent`, which *accumulates*
+every value across a height range, so a key carried forward unchanged by a later
+update appears once per update. That is a history, not a state; `read` without
+it is what the identity actually holds.
 
 ### `--explain`
 

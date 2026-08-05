@@ -83,6 +83,40 @@ pub fn read_hex(input: Option<&str>) -> Result<Vec<u8>, PayloadError> {
     })
 }
 
+/// Read a payload that is *not* hex: whatever bytes were given, verbatim.
+///
+/// The counterpart to [`read_hex`], for VDXF values, where the payload is
+/// arbitrary content rather than an encoding of something. Nothing is stripped
+/// — a value's whitespace is part of it — except the single trailing newline a
+/// shell or an editor adds, which is almost never meant and is easy to add back
+/// deliberately with a file.
+///
+/// `None` and `-` both mean stdin.
+pub fn read_bytes(input: Option<&str>) -> Result<Vec<u8>, PayloadError> {
+    let bytes = match input {
+        None | Some("-") => {
+            let mut buffer = Vec::new();
+            std::io::stdin()
+                .read_to_end(&mut buffer)
+                .map_err(|source| PayloadError::Stdin { source })?;
+            buffer
+        }
+        Some(argument) => match argument.strip_prefix('@') {
+            Some(path) => {
+                let path = PathBuf::from(path);
+                // Bytes, not a string: a value may legitimately not be text.
+                std::fs::read(&path).map_err(|source| PayloadError::Unreadable { path, source })?
+            }
+            None => argument.as_bytes().to_vec(),
+        },
+    };
+
+    Ok(match bytes.strip_suffix(b"\n") {
+        Some(trimmed) => trimmed.strip_suffix(b"\r").unwrap_or(trimmed).to_vec(),
+        None => bytes,
+    })
+}
+
 /// Write hex to a file, with a trailing newline so `cat` behaves.
 pub fn write_hex(path: &std::path::Path, hex: &str) -> Result<(), PayloadError> {
     std::fs::write(path, format!("{hex}\n")).map_err(|source| PayloadError::Unwritable {

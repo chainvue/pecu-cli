@@ -9,15 +9,19 @@ pub mod dev;
 pub mod doctor;
 pub mod id;
 pub mod key;
+pub mod login;
 pub mod send;
 pub mod tx;
+pub mod vdxf;
 pub mod wallet;
 
 use clap::CommandFactory;
 use miette::Diagnostic;
 use thiserror::Error;
 
-use crate::cli::{Cli, Command, DevCommand, IdCommand, PlanCommand, TxCommand, WalletCommand};
+use crate::cli::{
+    Cli, Command, DevCommand, IdCommand, LoginCommand, PlanCommand, TxCommand, WalletCommand,
+};
 use crate::config::Settings;
 use crate::ui::Ui;
 
@@ -119,14 +123,37 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
             command: IdCommand::Register(args),
         } => id::register(&ui, &Settings::resolve(&cli.globals)?, &cli.globals, args),
 
+        Command::Id {
+            command: IdCommand::Login { command },
+        } => {
+            let settings = Settings::resolve(&cli.globals)?;
+            match command {
+                LoginCommand::Challenge(args) => login::challenge(&ui, &settings, args),
+                LoginCommand::Sign(args) => login::sign(&ui, &settings, args),
+                LoginCommand::Verify(args) => login::verify(&ui, &settings, args),
+            }
+        }
+
+        Command::Id {
+            command: IdCommand::Publish(args),
+        } => vdxf::publish(&ui, &Settings::resolve(&cli.globals)?, &cli.globals, args),
+
+        Command::Id {
+            command: IdCommand::Read(args),
+        } => vdxf::read_command(&ui, &Settings::resolve(&cli.globals)?, args),
+
         Command::Id { command } => Err(match command {
-            IdCommand::Show { .. } | IdCommand::Register(_) => unreachable!("handled above"),
-            IdCommand::Update => NotYet::at("id update", "M7"),
-            IdCommand::Revoke => NotYet::at("id revoke", "M7"),
-            IdCommand::Recover => NotYet::at("id recover", "M7"),
-            IdCommand::Login => NotYet::at("id login", "M8"),
-            IdCommand::Publish => NotYet::at("id publish", "M8"),
-            IdCommand::Read => NotYet::at("id read", "M8"),
+            IdCommand::Show { .. }
+            | IdCommand::Register(_)
+            | IdCommand::Login { .. }
+            | IdCommand::Publish(_)
+            | IdCommand::Read(_) => unreachable!("handled above"),
+            // Parked until the SDK grows flows for them: the offline builders
+            // want the caller to locate the identity's own output and assemble
+            // its funding, and getting either wrong is expensive.
+            IdCommand::Update => NotYet::at("id update", "M7b"),
+            IdCommand::Revoke => NotYet::at("id revoke", "M7b"),
+            IdCommand::Recover => NotYet::at("id recover", "M7b"),
         }),
     }
 }

@@ -113,6 +113,16 @@ impl Paths {
         self.root.join("pending")
     }
 
+    /// Login challenges this machine has issued and not yet accepted.
+    ///
+    /// A verifier that does not remember what it asked for cannot tell a fresh
+    /// login from a replayed one — the signature is the same bytes either time.
+    /// This is that memory, and `id login verify` consumes an entry rather than
+    /// reading it.
+    pub fn logins_dir(&self) -> PathBuf {
+        self.root.join("logins")
+    }
+
     /// How many keys the keystore holds. A missing directory is zero, not an
     /// error: not having made a key yet is the normal first state.
     pub fn key_count(&self) -> usize {
