@@ -158,9 +158,9 @@ fn attempt(ui: &Ui, settings: &Settings, globals: &Globals, args: &SendArgs) -> 
             return Ok(());
         }
     } else {
-        review(
+        ui.panel(&review(
             ui, settings, &envelope, &recipient, amount, &unsent, &decoded,
-        );
+        ));
     }
 
     if globals.dry_run {
@@ -361,6 +361,7 @@ fn carrying(others: &[verus_sdk::network::AddressUtxo], currency: CurrencyId) ->
 /// Deliberately built from the *finished transaction*, not from the arguments:
 /// the point of a confirmation is to show what was actually constructed, and
 /// re-printing the input would confirm nothing.
+#[allow(clippy::too_many_arguments)]
 fn review(
     ui: &Ui,
     settings: &Settings,
@@ -369,7 +370,7 @@ fn review(
     amount: Amount,
     unsent: &Unsent<verus_sdk::network::Sent>,
     decoded: &Option<TxV4>,
-) {
+) -> Panel {
     let palette = ui.theme.palette;
     let glyphs = ui.theme.glyphs;
     let currency = &settings.profile.currency;
@@ -410,6 +411,13 @@ fn review(
         )
         .row("txid", Text::of(&unsent.outcome.txid, palette.value));
 
+    // Before the outputs, not after them: an expiry height is a fact about the
+    // transaction, and tacking it onto the end of the output list read as if it
+    // belonged to the last one.
+    if let Some(transaction) = decoded {
+        panel = panel.row("expiry", expiry(ui, transaction));
+    }
+
     match decoded {
         Some(transaction) => {
             panel = panel.section("OUTPUTS AS BUILT");
@@ -424,7 +432,6 @@ fn review(
                     )
                     .wrapped(5, describe(ui, &output.script_pubkey));
             }
-            panel = panel.row("expiry", expiry(ui, transaction));
         }
         // Should not happen — these are bytes the SDK just built — but silently
         // skipping the decoded view would turn the confirmation into a summary
@@ -439,7 +446,7 @@ fn review(
         }
     }
 
-    ui.panel(&panel);
+    panel
 }
 
 fn expiry(ui: &Ui, transaction: &TxV4) -> Text {
@@ -586,4 +593,123 @@ fn emit_json_sent(sent: &verus_sdk::network::Sent) {
         }))
         .expect("plain data")
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use unicode_width::UnicodeWidthStr;
+    use verus_sdk::network::Sent;
+
+    use super::*;
+    use crate::cli::Theme as ThemeFlag;
+    use crate::config::Paths;
+    use crate::keystore::{Cipher, Kdf, ENVELOPE_VERSION};
+
+    /// A real VRSCTEST transaction, so the review panel is exercised against
+    /// bytes the daemon actually produced rather than something hand-rolled.
+    fn fixture_transaction() -> TxV4 {
+        let hex = include_str!("../../fixtures/identity-spend.hex");
+        TxV4::deserialize(&hex::decode(hex.trim()).expect("valid fixture")).expect("a transaction")
+    }
+
+    fn envelope() -> Envelope {
+        Envelope {
+            version: ENVELOPE_VERSION,
+            label: "paper".into(),
+            address: "RJ7gsKDjUjPS8XZzENqmQMmWJRLuTnw5hp".into(),
+            compressed: true,
+            created: 0,
+            kdf: Kdf {
+                algorithm: "argon2id".into(),
+                salt: String::new(),
+                memory_kib: 1,
+                iterations: 1,
+                parallelism: 1,
+            },
+            cipher: Cipher {
+                algorithm: "chacha20poly1305".into(),
+                nonce: String::new(),
+            },
+            ciphertext: String::new(),
+        }
+    }
+
+    fn rendered() -> String {
+        let ui = Ui::new(ThemeFlag::Phosphor, false, false);
+        let settings =
+            Settings::resolve_in(Paths::at("/nonexistent"), None, None).expect("builtin");
+        let transaction = fixture_transaction();
+        let unsent = Unsent {
+            hex: String::new(),
+            txid: "2aada7…".into(),
+            outcome: Sent {
+                txid: "2aada7…".into(),
+                fee: Amount::from_sat(10_000),
+                change: Amount::from_sat(489_990_000),
+                hex: String::new(),
+            },
+        };
+        let recipient = Recipient {
+            address: "RJ7gsKDjUjPS8XZzENqmQMmWJRLuTnw5hp".into(),
+            shown: "RJ7gsKDjUjPS8XZzENqmQMmWJRLuTnw5hp".into(),
+        };
+        let panel = review(
+            &ui,
+            &settings,
+            &envelope(),
+            &recipient,
+            Amount::from_sat(10_000_000),
+            &unsent,
+            &Some(transaction),
+        );
+        panel.render(&ui.theme)
+    }
+
+    #[test]
+    fn expiry_is_a_transaction_fact_not_a_trailing_output() {
+        let out = rendered();
+        let expiry = out.find("expiry").expect("an expiry row");
+        let outputs = out.find("OUTPUTS AS BUILT").expect("the outputs section");
+        assert!(
+            expiry < outputs,
+            "expiry rendered after the output list, where it reads as belonging \
+             to the last output:\n{out}"
+        );
+    }
+
+    #[test]
+    fn the_review_names_every_figure_that_matters() {
+        let out = rendered();
+        for wanted in [
+            "from",
+            "to",
+            "amount",
+            "fee",
+            "change",
+            "txid",
+            "expiry",
+            "0.10000000", // amount
+            "0.00010000", // fee
+            "4.89990000", // change
+            "paper",      // which key pays
+        ] {
+            assert!(out.contains(wanted), "`{wanted}` missing from:\n{out}");
+        }
+    }
+
+    #[test]
+    fn the_review_frame_stays_rectangular() {
+        let out = rendered();
+        let widths: Vec<usize> = out
+            .lines()
+            .map(crate::ui::text::strip_ansi)
+            .filter(|line| line.starts_with(['┌', '│', '├', '└']))
+            .map(|line| UnicodeWidthStr::width(line.as_str()))
+            .collect();
+        assert!(!widths.is_empty(), "nothing was framed:\n{out}");
+        assert!(
+            widths.windows(2).all(|pair| pair[0] == pair[1]),
+            "ragged frame {widths:?}:\n{out}"
+        );
+    }
 }

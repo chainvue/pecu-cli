@@ -204,6 +204,27 @@ impl Text {
     }
 }
 
+/// Drop SGR escapes so a rendered line can be measured the way a terminal would
+/// see it. Only `ESC [ … m` is ever emitted here, so this does not need to be a
+/// general ANSI parser.
+#[cfg(test)]
+pub fn strip_ansi(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(character) = chars.next() {
+        if character != '\u{1b}' {
+            out.push(character);
+            continue;
+        }
+        for escaped in chars.by_ref() {
+            if escaped == 'm' {
+                break;
+            }
+        }
+    }
+    out
+}
+
 /// Split a word into pieces of at most `width` cells.
 ///
 /// Character-counted rather than width-counted: everything that reaches here is

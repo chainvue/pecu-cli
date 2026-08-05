@@ -399,25 +399,7 @@ mod tests {
     use crate::ui::table::{Align, Table};
     use crate::ui::theme::Skin;
 
-    /// Drop SGR escapes so a line can be measured the way a terminal would see
-    /// it. Only `ESC [ … m` is ever emitted here, so this does not need to be a
-    /// general ANSI parser.
-    fn visible(line: &str) -> String {
-        let mut out = String::with_capacity(line.len());
-        let mut chars = line.chars();
-        while let Some(character) = chars.next() {
-            if character != '\u{1b}' {
-                out.push(character);
-                continue;
-            }
-            for escaped in chars.by_ref() {
-                if escaped == 'm' {
-                    break;
-                }
-            }
-        }
-        out
-    }
+    use crate::ui::text::strip_ansi as visible;
 
     fn frame_widths(rendered: &str) -> Vec<usize> {
         rendered
