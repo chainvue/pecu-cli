@@ -15,8 +15,12 @@ fmt: ## Format the source tree
 fmt-check: ## Fail if the tree is unformatted
 	cargo fmt --all -- --check
 
+# Clippy gets its own target directory on purpose. It swaps the rustc wrapper, so
+# sharing target/ with build and run refingerprints every crate -- and with the
+# SDK in the graph, switching between `make check` and `cargo run` costs a full
+# ~70s rebuild each way. Separate directories cost disk and nothing else.
 lint: ## Clippy, warnings are errors
-	cargo clippy --all-targets -- -D warnings
+	CARGO_TARGET_DIR=target/lint cargo clippy --all-targets -- -D warnings
 
 test: ## Offline tests only — must pass with the network unplugged
 	cargo test

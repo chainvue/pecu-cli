@@ -44,6 +44,20 @@ make snapshots   # accept the current UI output as the new snapshots
 make run ARGS="doctor"
 ```
 
+**Use the built binary for anything interactive.** `cargo run` re-checks the build
+graph every time, and switching between `make check` and `cargo run` used to cost
+a full rebuild — with the SDK in the dependency graph that is over a minute.
+`make lint` now gives clippy its own target directory so it stops refingerprinting
+everything the other commands built. Even so:
+
+```sh
+cargo build --release
+./target/release/pecu id show VRSCTEST@     # ~0.2s, the same as curl to the node
+```
+
+Commands are as fast as the node answers. If one feels slow, time the binary
+before blaming the command — `cargo run` is usually what you are measuring.
+
 ## Commands
 
 | Command | Does | Status |
