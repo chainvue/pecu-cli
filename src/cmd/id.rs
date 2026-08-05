@@ -18,6 +18,7 @@ use std::path::PathBuf;
 
 use miette::Diagnostic;
 use thiserror::Error;
+use verus_sdk::money::Amount;
 use verus_sdk::network::{
     prepare_registration, AwaitingCommitment, ChainReader, CommitmentStatus, FlowError, Pending,
     RegistrationOptions,
@@ -109,6 +110,13 @@ pub enum IdError {
     #[error("cancelled")]
     #[diagnostic(code(pecu::cancelled), help("nothing was broadcast"))]
     Cancelled,
+
+    #[error("--json will not register without --yes")]
+    #[diagnostic(
+        code(pecu::needs_yes),
+        help("registering burns 100 VRSCTEST. --json is machine-readable output, not consent to spend it: the confirmation prompt would go to the same stream you are parsing, and there is nobody to answer it. Add --yes to go ahead, or --dry-run to see the cost and stop")
+    )]
+    NeedsYes,
 
     #[error("cannot ask for confirmation")]
     #[diagnostic(
@@ -491,9 +499,39 @@ fn begin(
         ui.panel(&cost_panel(
             ui, settings, name, &envelope, &pending, &options,
         ));
-        if !globals.yes {
-            confirm(ui)?;
+    }
+
+    // Stops here, and crucially *before* the save below. A saved registration is
+    // what the next run resumes; one whose commitment was never broadcast would
+    // send that run to poll for a transaction nobody made.
+    //
+    // The salt drawn above is discarded with it. That is free — nothing was
+    // committed to, so the next real run simply draws another.
+    if globals.dry_run {
+        if ui.is_json() {
+            emit(&serde_json::json!({
+                "kind": "estimate",
+                "name": name,
+                "registration_fee": pending.registration_fee.to_sat(),
+                "referral": options.referral,
+                "primary_addresses": options.primary_addresses,
+                "min_sigs": options.min_sigs,
+                "broadcast": false,
+            }));
+        } else {
+            ui.blank();
+            ui.note("nothing was broadcast and nothing was saved. Drop --dry-run to claim it");
         }
+        return Ok(());
+    }
+
+    // `--json` is output, not consent — the same rule `pecu send` follows, and
+    // this one burns a hundred coins rather than moving them.
+    if !globals.yes {
+        if ui.is_json() {
+            return Err(IdError::NeedsYes.into());
+        }
+        confirm(ui)?;
     }
 
     // Saved *before* anything is broadcast. The salt inside cannot be recovered
@@ -687,6 +725,68 @@ fn resume(
     Ok(())
 }
 
+/// What a registration actually costs, and where it goes.
+///
+/// `Pending::registration_fee` is chain policy — the fee *before* any referral
+/// discount, as the SDK documents it. Naming a referral makes the registrant
+/// pay **less**: each referrer receives `fee / (levels + 2)` and the outlay is
+/// `fee * (levels + 1) / (levels + 2)`, with the remainder burned. On VRSCTEST
+/// that is 80 paid rather than 100, of which 20 reaches a single referrer.
+///
+/// Showing the undiscounted figure beside a referral was wrong twice over: too
+/// high, and describing money as burned when a fifth of it is a payment to
+/// somebody.
+struct Referral {
+    /// What the registrant actually parts with.
+    outlay: Amount,
+    /// What reaches referrers, one payout per level in the chain.
+    paid_out: Amount,
+    /// What is destroyed.
+    burned: Amount,
+    payouts: usize,
+}
+
+impl Referral {
+    fn of(pending: &Pending<AwaitingCommitment>) -> Self {
+        let fee = pending.registration_fee.to_sat();
+        let divisor = u64::from(pending.referral_levels) + 2;
+        let each = fee / divisor;
+        let outlay = fee / divisor * (u64::from(pending.referral_levels) + 1);
+        // One payout per referrer actually in the chain, which is the depth the
+        // referrer was itself referred at — not the number of levels allowed.
+        let payouts = pending.referral_chain.len();
+        let paid_out = each.saturating_mul(payouts as u64);
+        Self {
+            outlay: Amount::from_sat(outlay),
+            paid_out: Amount::from_sat(paid_out),
+            burned: Amount::from_sat(outlay.saturating_sub(paid_out)),
+            payouts,
+        }
+    }
+}
+
+/// The fee row: what leaves the funding address, and what becomes of it.
+fn fee_row(ui: &Ui, pending: &Pending<AwaitingCommitment>, currency: &str) -> Text {
+    let palette = ui.theme.palette;
+    if pending.referral_chain.is_empty() {
+        return Text::of(fmt::amount(pending.registration_fee), palette.accent)
+            .space()
+            .push(currency, palette.muted)
+            .push("  burned, not recoverable", palette.warn);
+    }
+    let split = Referral::of(pending);
+    Text::of(fmt::amount(split.outlay), palette.accent)
+        .space()
+        .push(currency, palette.muted)
+        .push(
+            format!(
+                "  reduced from {} by the referral",
+                fmt::amount(pending.registration_fee)
+            ),
+            palette.muted,
+        )
+}
+
 fn cost_panel(
     ui: &Ui,
     settings: &Settings,
@@ -705,13 +805,7 @@ fn cost_panel(
                 .space()
                 .push(format!("({})", envelope.label), palette.muted),
         )
-        .row(
-            "fee",
-            Text::of(fmt::amount(pending.registration_fee), palette.accent)
-                .space()
-                .push(currency, palette.muted)
-                .push("  burned, not recoverable", palette.warn),
-        )
+        .row("fee", fee_row(ui, pending, currency))
         .row(
             "signatures",
             Text::of(
@@ -731,7 +825,25 @@ fn cost_panel(
         );
     }
     if let Some(referral) = &options.referral {
-        panel = panel.row("referral", Text::of(referral, palette.value));
+        let split = Referral::of(pending);
+        panel = panel
+            .row("referral", Text::of(referral, palette.accent))
+            .row(
+                "  to referrers",
+                Text::of(fmt::amount(split.paid_out), palette.value)
+                    .space()
+                    .push(currency, palette.muted)
+                    .push(
+                        format!("  across {}", fmt::plural(split.payouts, "level", "levels")),
+                        palette.muted,
+                    ),
+            )
+            .row(
+                "  burned",
+                Text::of(fmt::amount(split.burned), palette.value)
+                    .space()
+                    .push(currency, palette.muted),
+            );
     }
     panel
         .note(Text::of(

@@ -534,6 +534,31 @@ is broadcast**, and re-running the same command picks it up:
   ▸ run the same command again in a minute
 ```
 
+**A referral makes you pay less, not more.** Each referrer receives
+`fee / (levels + 2)` and your outlay is `fee * (levels + 1) / (levels + 2)`;
+whatever the payouts do not consume is burned. On VRSCTEST — 100 coins, 3
+levels — that is 80 out of pocket rather than 100:
+
+```
+│ fee              80.00000000 VRSCTEST  reduced from 100.00000000 by the referral │
+│ referral         pecucli7@                                                       │
+│   to referrers   20.00000000 VRSCTEST  across 1 level                            │
+│   burned         60.00000000 VRSCTEST                                            │
+```
+
+Both numbers come from the **currency being registered under**, not the chain,
+so they differ per currency. The SDK's `registration_fee` is policy *before* the
+discount — showing that beside a referral overstated the cost by a fifth and
+called money burned when part of it is a payment to somebody.
+
+**`--dry-run` costs nothing and writes nothing.** It prepares the registration,
+prints what it would cost, and stops before both the commitment and the saved
+file — a saved registration whose commitment was never broadcast would send the
+next run to poll for a transaction nobody made.
+
+**`--json` will not register without `--yes`.** Same rule as `pecu send`, and
+this one burns a hundred coins rather than moving them.
+
 The SDK makes the ordering hard to get wrong: `complete` exists only on
 `Pending<ReadyToRegister>`, and the only way to hold one is a `poll` that saw the
 commitment confirm. Running step two early is a **compile error**, not a spent

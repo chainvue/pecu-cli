@@ -239,6 +239,116 @@ fn a_name_nobody_registered_is_an_answer_not_a_crash() {
         .stderr(contains("nothing on this chain is called"));
 }
 
+/// A dry run must leave nothing behind.
+///
+/// The saved registration is what the next run resumes. One written for a
+/// commitment that was never broadcast would send that run to poll for a
+/// transaction nobody made.
+#[test]
+#[ignore = "talks to api.verustest.net"]
+fn a_dry_run_registration_saves_nothing_and_sends_nothing() {
+    let Ok(funded) = std::env::var("PECU_FUNDED_HOME") else {
+        eprintln!("PECU_FUNDED_HOME is not set — skipping");
+        return;
+    };
+
+    let assertion = Command::cargo_bin("pecu")
+        .expect("built")
+        .env("PECU_HOME", &funded)
+        .args([
+            "id",
+            "register",
+            "pecudryrun1",
+            "--from",
+            "faucet",
+            "--dry-run",
+            "--json",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+    let document: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+
+    assert_eq!(document["broadcast"], false);
+    assert_eq!(document["kind"], "estimate");
+    assert_eq!(document["registration_fee"], 10_000_000_000u64);
+
+    let saved = std::path::Path::new(&funded)
+        .join("pending")
+        .join("pecudryrun1.json");
+    assert!(
+        !saved.exists(),
+        "a dry run wrote {}, which the next run would try to resume",
+        saved.display()
+    );
+}
+
+/// A referral makes the registrant pay *less*, and the panel has to say so.
+///
+/// `registration_fee` is chain policy before any discount. Showing it beside a
+/// referral overstated the cost by a fifth and described money as burned when
+/// part of it is a payment to the referrer.
+#[test]
+#[ignore = "talks to api.verustest.net"]
+fn a_referral_reduces_the_outlay_and_the_split_is_shown() {
+    let Ok(funded) = std::env::var("PECU_FUNDED_HOME") else {
+        eprintln!("PECU_FUNDED_HOME is not set — skipping");
+        return;
+    };
+
+    let assertion = Command::cargo_bin("pecu")
+        .expect("built")
+        .env("PECU_HOME", &funded)
+        .args([
+            "id",
+            "register",
+            "pecudryrun2",
+            "--from",
+            "faucet",
+            "--referral",
+            OURS,
+            "--dry-run",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+
+    // VRSCTEST: 100 over 3 levels is 20 to each referrer, 80 paid, 60 burned.
+    assert!(stdout.contains("80.00000000"), "{stdout}");
+    assert!(stdout.contains("20.00000000"), "{stdout}");
+    assert!(stdout.contains("60.00000000"), "{stdout}");
+    // And it must not still call the whole undiscounted fee burned.
+    assert!(
+        !stdout.contains("100.00000000 VRSCTEST  burned"),
+        "the undiscounted fee is still described as burned:\n{stdout}"
+    );
+}
+
+/// Registering burns a hundred coins. `--json` is output, not consent.
+#[test]
+#[ignore = "talks to api.verustest.net"]
+fn json_output_is_not_consent_to_register() {
+    let Ok(funded) = std::env::var("PECU_FUNDED_HOME") else {
+        eprintln!("PECU_FUNDED_HOME is not set — skipping");
+        return;
+    };
+
+    Command::cargo_bin("pecu")
+        .expect("built")
+        .env("PECU_HOME", &funded)
+        .args([
+            "id",
+            "register",
+            "pecudryrun3",
+            "--from",
+            "faucet",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("--yes"));
+}
+
 #[test]
 #[ignore = "talks to api.verustest.net"]
 fn a_taken_name_is_refused_before_a_passphrase_is_asked_for() {
