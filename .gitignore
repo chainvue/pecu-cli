@@ -5,6 +5,11 @@
 # insta review leftovers
 **/*.snap.new
 
+# QR frames and transaction payloads written while trying things out
+*-[0-9].png
+*.hex
+!fixtures/*.hex
+
 # never let real key material or plans into the repo
 *.wif
 *.key
