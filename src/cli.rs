@@ -124,11 +124,11 @@ pub enum Command {
         command: PlanCommand,
     },
 
-    /// Sign a plan offline
-    Sign,
+    /// Sign a plan offline. Opens no socket
+    Sign(SignArgs),
 
     /// Hand finished bytes to the node
-    Broadcast,
+    Broadcast(BroadcastArgs),
 
     /// The VerusID lifecycle
     Id {
@@ -270,7 +270,76 @@ pub enum TxCommand {
 #[derive(Debug, Subcommand)]
 pub enum PlanCommand {
     /// Plan a payment from a watch-only address
-    Send,
+    Send(PlanSendArgs),
+}
+
+/// A payment planned without a key.
+#[derive(Debug, Clone, Args)]
+pub struct PlanSendArgs {
+    /// Who gets paid
+    #[arg(long, short = 't', value_name = "ADDRESS")]
+    pub to: String,
+
+    /// How much, in coins
+    #[arg(long, short = 'm', value_name = "COINS")]
+    pub amount: String,
+
+    /// Which address pays. A stored key contributes its address only — this
+    /// step never unlocks anything
+    #[command(flatten)]
+    pub target: WalletTarget,
+
+    /// Also write the plan here
+    #[arg(long, short = 'o', value_name = "FILE")]
+    pub out: Option<std::path::PathBuf>,
+
+    #[command(flatten)]
+    pub qr: QrOut,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct SignArgs {
+    /// The plan: hex, `@file`, or `-` for stdin
+    #[arg(value_name = "HEX|@FILE")]
+    pub input: Option<String>,
+
+    /// Read the plan from QR codes in a PNG instead. Repeat for several frames
+    #[arg(long, value_name = "PNG")]
+    pub qr_in: Vec<std::path::PathBuf>,
+
+    /// Which stored key signs. Defaults to the only one, if there is only one
+    #[arg(long, short = 'k', value_name = "LABEL")]
+    pub key: Option<String>,
+
+    /// Also write the result here
+    #[arg(long, short = 'o', value_name = "FILE")]
+    pub out: Option<std::path::PathBuf>,
+
+    #[command(flatten)]
+    pub qr: QrOut,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct BroadcastArgs {
+    /// The signed transaction: hex, `@file`, or `-` for stdin
+    #[arg(value_name = "HEX|@FILE")]
+    pub input: Option<String>,
+
+    /// Read it from QR codes in a PNG instead. Repeat for several frames
+    #[arg(long, value_name = "PNG")]
+    pub qr_in: Vec<std::path::PathBuf>,
+}
+
+/// How to hand a payload across the gap as QR codes.
+#[derive(Debug, Clone, Args)]
+pub struct QrOut {
+    /// Draw the payload as QR codes in the terminal
+    #[arg(long)]
+    pub qr: bool,
+
+    /// Write the payload as QR codes to `<STEM>-1.png`, `<STEM>-2.png`, …
+    #[arg(long, value_name = "STEM")]
+    pub qr_out: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]

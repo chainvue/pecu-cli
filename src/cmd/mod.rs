@@ -4,6 +4,7 @@
 //! answers with [`NotYet`] rather than a panic or a silent no-op, so
 //! `pecu --help` is an honest map of what this build can do.
 
+pub mod airgap;
 pub mod dev;
 pub mod doctor;
 pub mod key;
@@ -96,15 +97,18 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
             send::run(&ui, &Settings::resolve(&cli.globals)?, &cli.globals, args)
         }
 
-        Command::Plan { command } => Err(NotYet::at(
-            match command {
-                PlanCommand::Send => "plan send",
-            },
-            "M6",
-        )),
+        Command::Plan { command } => match command {
+            PlanCommand::Send(args) => {
+                airgap::plan_send(&ui, &Settings::resolve(&cli.globals)?, &cli.globals, args)
+            }
+        },
 
-        Command::Sign => Err(NotYet::at("sign", "M6")),
-        Command::Broadcast => Err(NotYet::at("broadcast", "M6")),
+        Command::Sign(args) => {
+            airgap::sign(&ui, &Settings::resolve(&cli.globals)?, &cli.globals, args)
+        }
+        Command::Broadcast(args) => {
+            airgap::broadcast(&ui, &Settings::resolve(&cli.globals)?, &cli.globals, args)
+        }
 
         Command::Id { command } => Err(match command {
             IdCommand::Show => NotYet::at("id show", "M7"),

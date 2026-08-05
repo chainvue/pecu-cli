@@ -6,6 +6,7 @@ mod config;
 mod explain;
 mod keystore;
 mod node;
+mod payload;
 mod ui;
 
 use clap::Parser;

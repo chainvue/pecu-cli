@@ -53,7 +53,7 @@ make run ARGS="doctor"
 | `pecu wallet balance\|utxos` | Spendable, withheld and token balances | ✅ done |
 | `pecu tx explain` | Says what every output in a transaction actually *is* | ✅ done |
 | `pecu send` | Transparent sends, native and token | ✅ done |
-| `pecu plan send` / `pecu sign` / `pecu broadcast` | The air-gap trio, over files or terminal QR codes | M6 |
+| `pecu plan send` / `pecu sign` / `pecu broadcast` | The air-gap trio, over files or QR codes | ✅ done |
 | `pecu id show\|register\|update\|revoke\|recover` | VerusID lifecycle | M7 |
 | `pecu id login\|publish\|read` | Sign-in with VerusID, and VDXF data | M8 |
 | `pecu completions <shell>` | Shell completion script | ✅ done |
@@ -260,6 +260,71 @@ returns is *incapable* of being sent; broadcasting is a separate, explicit step.
 
 **Mainnet cannot spend until you say so.** `allow_spend` is `false` there by
 default — see [Configuration](#configuration).
+
+### The air gap
+
+Three commands, because there are three machines' worth of trust.
+
+```sh
+# 1. where the node is. No key on this machine at all.
+pecu plan send --address RComf…N9Hm --to RJ7gs…w5hp --amount 0.4 --qr-out plan.png
+
+# 2. where the key is. This one opens no socket.
+pecu sign --qr-in plan-1.png --key cold --qr-out signed.png
+
+# 3. back where the node is. Carries no key.
+pecu broadcast --qr-in signed-1.png
+```
+
+Files and pipes work just as well — `--out plan.hex`, then `pecu sign @plan.hex`,
+then `pecu broadcast @signed.hex`. Everything accepts hex as an argument, `@file`,
+or `-` for stdin.
+
+```
+┌─ PLAN ─────────────────────────────────────────────────────────┐
+│ from           RComfCn4wHHsGR8vWBAU7T1r3tHHyxN9Hm              │
+│ spending       449.74990000 VRSCTEST across 1 input            │
+│ paying out     449.74980000 VRSCTEST                           │
+│ fee and burn   0.00010000 VRSCTEST                             │
+│ expiry         height 1,176,653                                │
+│ commits        ✓ every input covers every output (SIGHASH_ALL) │
+├─ OUTPUTS ──────────────────────────────────────────────────────┤
+│ #0 0.30000000 VRSCTEST                                         │
+│      → RJ7gsKDjUjPS8XZzENqmQMmWJRLuTnw5hp                      │
+│ #1 449.44980000 VRSCTEST                                       │
+│      → RComfCn4wHHsGR8vWBAU7T1r3tHHyxN9Hm                      │
+└────────────────────────────────────────────────────────────────┘
+```
+
+**`sign` genuinely needs no network.** Not "does not usually use one" — there is
+a test that signs a plan with `--node https://127.0.0.1:1` and succeeds. If that
+ever stops being true, the suite fails.
+
+**`commits` is the row to read.** Whoever planned the transaction chose the
+outputs, and a signature is the irreversible step. Outputs are only binding on
+your input if your input commits to them: under `SIGHASH_NONE` they are not
+covered at all, and whoever holds the partial can redirect the money after you
+sign. `sign` refuses without `--yes` when that check fails.
+
+**A partial that still needs another signature is never dressed up as finished.**
+It comes back as a partial, with a non-zero exit and instructions to pass it on.
+
+#### QR framing
+
+A QR code holds at most 4296 alphanumeric characters, so payloads are split into
+numbered frames:
+
+```
+PECU1:2/5:A1B2C3…
+```
+
+They reassemble in any order and duplicates are ignored — a stack of photographs
+is rarely tidy — but a *missing* frame is refused by number, because a payload
+silently short by one is a transaction that fails at the daemon for no visible
+reason. Hex is upper-cased so QR uses alphanumeric mode at 5.5 bits per character
+rather than byte mode at 8.
+
+`--qr` draws in the terminal; `--qr-out <stem>` writes `<stem>-1.png`, `-2.png`, …
 
 ### `--explain`
 

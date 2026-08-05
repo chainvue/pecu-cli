@@ -8,6 +8,7 @@
 pub mod banner;
 pub mod fmt;
 pub mod panel;
+pub mod qr;
 pub mod table;
 pub mod text;
 pub mod theme;
