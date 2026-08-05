@@ -33,7 +33,7 @@ struct NodeReport {
 
 pub fn run(ui: &Ui, settings: &Settings) -> miette::Result<()> {
     let profile = &settings.profile;
-    let report = probe(&profile.node);
+    let report = probe(profile);
 
     if ui.is_json() {
         emit_json(settings, &report);
@@ -49,8 +49,9 @@ pub fn run(ui: &Ui, settings: &Settings) -> miette::Result<()> {
     }
 }
 
-fn probe(url: &str) -> Result<NodeReport, NodeError> {
-    let node = node::connect(url)?;
+fn probe(profile: &crate::config::Profile) -> Result<NodeReport, NodeError> {
+    let url = &profile.node;
+    let node = node::connect(profile)?;
 
     let started = Instant::now();
     let chain = node
@@ -132,6 +133,10 @@ fn render(ui: &Ui, settings: &Settings, report: &Result<NodeReport, NodeError>) 
         .row(
             "stored keys",
             Text::of(fmt::plural(key_count, "key", "keys"), palette.value),
+        )
+        .row(
+            "reply cap",
+            Text::of(format!("{} MiB", profile.max_response_mb), palette.value),
         )
         .section("BUILD")
         .row("pecu", Text::of(env!("CARGO_PKG_VERSION"), palette.value))
@@ -236,6 +241,7 @@ fn emit_json(settings: &Settings, report: &Result<NodeReport, NodeError>) {
             "explorer": profile.explorer,
             "currency": profile.currency,
             "allow_spend": profile.allow_spend,
+            "max_response_mb": profile.max_response_mb,
         },
         "paths": {
             "root": paths.root(),

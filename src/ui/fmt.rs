@@ -64,6 +64,33 @@ pub fn fit(text: &str, max: usize, ellipsis: &str) -> String {
     elide(text, head, max - marker - head, ellipsis)
 }
 
+/// Make text that came from a node safe to print.
+///
+/// The SDK is explicit that currency and identity names are **untrusted display
+/// text**: Verus permits far more in a name than it looks like it does, and the
+/// node is simply repeating what somebody registered. Printed raw, a name can
+/// carry ANSI escapes that repaint the terminal, a newline that forges an extra
+/// row in a balance table, or characters chosen to read as an address or a
+/// number.
+///
+/// So: control characters and escapes are replaced, everything is folded onto
+/// one line, and the result is capped. What comes back is display text and
+/// nothing more — the currency **id** is the part that identifies anything, and
+/// it is always shown alongside.
+pub fn untrusted(text: &str, max: usize, ellipsis: &str) -> String {
+    let cleaned: String = text
+        .chars()
+        .map(|character| {
+            if character.is_control() || character == '\u{7f}' {
+                '·'
+            } else {
+                character
+            }
+        })
+        .collect();
+    fit(cleaned.trim(), max, ellipsis)
+}
+
 /// An address, shortened the way a wallet UI shortens one.
 pub fn address(text: &str, ellipsis: &str) -> String {
     elide(text, 9, 4, ellipsis)
@@ -139,6 +166,26 @@ mod tests {
     #[test]
     fn fitting_gives_up_rather_than_producing_nonsense_in_a_tiny_budget() {
         assert_eq!(fit("abcdefgh", 2, "…"), "abcdefgh");
+    }
+
+    #[test]
+    fn untrusted_text_cannot_repaint_the_terminal_or_forge_a_row() {
+        let hostile = "ok\u{1b}[31m\nSPENDABLE  999.00000000\r";
+        let safe = untrusted(hostile, 60, "…");
+        assert!(!safe.contains('\u{1b}'), "escape survived: {safe:?}");
+        assert!(!safe.contains('\n'), "newline survived: {safe:?}");
+        assert!(!safe.contains('\r'), "carriage return survived: {safe:?}");
+    }
+
+    #[test]
+    fn untrusted_text_is_capped() {
+        let long = "n".repeat(500);
+        assert!(untrusted(&long, 20, "…").chars().count() <= 20);
+    }
+
+    #[test]
+    fn ordinary_names_pass_through_untouched() {
+        assert_eq!(untrusted("Bridge.vETH", 40, "…"), "Bridge.vETH");
     }
 
     #[test]

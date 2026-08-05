@@ -50,8 +50,8 @@ make run ARGS="doctor"
 |---|---|---|
 | `pecu doctor` | Node reachability, chain tip, config paths, build info | ✅ done |
 | `pecu key gen\|import\|list\|show\|export\|phrase` | Encrypted keystore (Argon2id + ChaCha20-Poly1305) | ✅ done |
-| `pecu wallet balance\|utxos` | Spendable, immature and token balances | M4 |
-| `pecu tx explain` | Says what every output in a transaction actually *is* | M4 |
+| `pecu wallet balance\|utxos` | Spendable, withheld and token balances | ✅ done |
+| `pecu tx explain` | Says what every output in a transaction actually *is* | ✅ done |
 | `pecu send` | Transparent sends, native and token | M5 |
 | `pecu plan send` / `pecu sign` / `pecu broadcast` | The air-gap trio, over files or terminal QR codes | M6 |
 | `pecu id show\|register\|update\|revoke\|recover` | VerusID lifecycle | M7 |
@@ -91,6 +91,110 @@ It exits non-zero when the node cannot be reached, but still prints the local
 half — "my setting is being ignored" and "the node is down" are different
 problems, and the output should tell them apart. `pecu doctor --json` gives the
 same report as machine-readable data, including when the node is down.
+
+### `pecu tx explain`
+
+Says what every output in a transaction actually *is*. Offline for hex; a txid is
+the one input that needs a node, and only to fetch the bytes.
+
+```sh
+pecu tx explain <txid>                    # fetches the hex, decodes it locally
+pecu tx explain <raw hex>                 # offline
+pecu tx explain <output script hex>       # offline, a bare scriptPubKey
+cat tx.hex | pecu tx explain -
+```
+
+```
+┌─ TRANSACTION ──────────────────────────────────────────────────────────────┐
+│ txid     df69640e4cfafe7cbe9cabd3c790ed3c556f7ee340e5f10ce73dd1b590f0556d  │
+│ expiry   height 1,167,853                                                  │
+├─ INPUTS ───────────────────────────────────────────────────────────────────┤
+│ #0 e740a3149f…600f15:0                                                     │
+│ #1 ec69f05ffd…728670:0                                                     │
+├─ OUTPUTS ──────────────────────────────────────────────────────────────────┤
+│ 7 outputs — 105.00000000 in native satoshis                                │
+│ #0 0.00000000                                                              │
+│      the VerusID verusrpc-test-mrhu3gpo3wws@ — 1-of-1, revocation          │
+│      iEiEX5Voi…nAyd, recovery iEiEX5Voi…nAyd                               │
+│ #2 0.00000000                                                              │
+│      a CryptoCondition this SDK does not decode (eval 13) — ▲ IT MAY HOLD  │
+│      CURRENCY; do not treat this output as empty                           │
+│ #5 100.00000000                                                            │
+│      reserves held for i9G2QgG74f7tErEyF3cWp2x1exBGbFa19t: 100.00000000    │
+│      iJhCezBEx…f2yq                                                        │
+│ #6 5.00000000                                                              │
+│      → i9G2QgG74f7tErEyF3cWp2x1exBGbFa19t held for a VerusID, not a key    │
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Why an output needs decoding at all.** On Bitcoin an output is a script and a
+number of satoshis, and the number is the value. On Verus that is true only for
+the plain ones. A token lives in the *payload* of a CryptoCondition output whose
+satoshi field is zero; an identity is an output; a conversion in flight is an
+output; a name commitment is an output. Reading the satoshi column of a Verus
+transaction and calling it the value is how a wallet reports that an address
+holds nothing while it holds a fortune in tokens.
+
+So this says what each output *is*, and where it cannot tell, it says so —
+including whether the thing it cannot read is **able** to hold money. That last
+distinction is the one worth having: an undecodable output that provably cannot
+carry currency is safe to ignore, and one that can is not.
+
+An output that fails to decode does not fail the transaction. It sits beside the
+ones that decoded fine, marked, because refusing the whole thing would throw away
+the answer you came for.
+
+### `pecu wallet`
+
+Read-only, and deliberately so: it takes an address, not a key. Watching a
+balance is the one wallet job that needs no secret, and a command that cannot
+unlock anything cannot spend anything.
+
+```sh
+pecu wallet balance --address iJhCezBExJHvtyH3fGhNnt2NhU4Ztkf2yq
+pecu wallet balance --key demo    # the address of a stored key
+pecu wallet balance               # the sole stored key, if there is exactly one
+pecu wallet utxos --key demo
+```
+
+```
+┌─ WALLET ──────────────────────────────────────┐
+│ address   iJhCezBExJHvtyH3fGhNnt2NhU4Ztkf2yq  │
+│ tip       ▸ 1,176,557                         │
+├───────────────────────────────────────────────┤
+│ SPENDABLE  0.00000000  VRSCTEST  (0 outputs)  │
+│ WITHHELD   0.00000000  VRSCTEST  (15 outputs) │
+├─ TOKENS ──────────────────────────────────────┤
+│ 9272.49511041  (unnamed)  iHBwQo7LU…dK9f      │
+└───────────────────────────────────────────────┘
+```
+
+That is a real VRSCTEST address, and it is the whole point: **zero satoshis, and
+9272 in tokens.** A Verus balance is three numbers, not one — what is spendable
+now, what the node withheld, and what is held in CryptoCondition outputs whose
+value is in the payload rather than the satoshi field.
+
+- **`WITHHELD`, not "immature".** Coinbase maturity is the usual cause, but the
+  SDK routes *any* output the node reports as unspendable into that bucket. An
+  output with a million confirmations labelled "immature" is a wrong answer
+  printed confidently.
+- **A failed token lookup means "unknown", never "none".** It is a separate call
+  from the native figure so that one bucket being uncountable cannot take the
+  other down with it, and `--json` says `"known": false` rather than an empty list.
+- **Currency names are untrusted.** They come from the node and Verus permits
+  more in a name than it looks like it does, so they are stripped of control
+  characters, folded onto one line and capped before printing — and the currency
+  **id** is always shown next to the name, because the id is the part that
+  identifies anything.
+- **Addresses are parsed before the node sees them.** A typo'd address comes back
+  from a node as an empty balance, which reads as "no funds" — the one wrong
+  answer a wallet must never give.
+- **Several stored keys are refused, not guessed between.** Picking one silently
+  would report the wrong address's balance.
+
+A long-lived mining address can have a UTXO set far past the SDK's 8 MiB reply
+ceiling. That is a memory bound against a hostile node, not a bug; raise it for a
+profile with `max_response_mb` and the error says so.
 
 ### `pecu key`
 
@@ -178,6 +282,11 @@ node = "https://api.verustest.net"
 # should take a deliberate act, not a forgotten --profile.
 [profiles.mainnet]
 allow_spend = true
+
+# Ceiling on a single RPC reply. A memory bound against a hostile or overloaded
+# node, not a performance knob. 8 MiB covers any ordinary wallet; a long-lived
+# mining address can need far more.
+max_response_mb = 8
 ```
 
 A profile that appears only in the file inherits testnet's defaults for whatever

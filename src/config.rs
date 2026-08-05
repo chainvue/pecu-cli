@@ -21,6 +21,10 @@ use crate::cli::Globals;
 /// an example app, and the first thing a reader runs should not spend real money.
 pub const DEFAULT_PROFILE: &str = "testnet";
 
+/// The SDK's own reply ceiling, mirrored here so it can be overridden per
+/// profile. See [`Profile::max_response_mb`].
+pub const DEFAULT_MAX_RESPONSE_MB: u64 = 8;
+
 #[derive(Debug, Error, Diagnostic)]
 pub enum ConfigError {
     #[error("cannot work out where to put pecu's files")]
@@ -136,6 +140,8 @@ pub struct ProfileFile {
     pub currency: Option<String>,
     /// Whether commands that move money may run against this profile.
     pub allow_spend: Option<bool>,
+    /// Ceiling on a single RPC reply, in MiB.
+    pub max_response_mb: Option<u64>,
 }
 
 /// A profile with every field decided.
@@ -149,6 +155,13 @@ pub struct Profile {
     /// Mainnet ships as `false`: spending real coins from an example app should
     /// take a deliberate act, not a forgotten `--profile`.
     pub allow_spend: bool,
+    /// Ceiling on a single RPC reply, in MiB.
+    ///
+    /// A bound against a hostile or overloaded node, not a performance knob.
+    /// The SDK's own default is 8 MiB, which covers any ordinary wallet; a
+    /// long-lived mining address can have a UTXO set an order of magnitude
+    /// larger than that, and raising this is the deliberate way to read one.
+    pub max_response_mb: u64,
 }
 
 impl Profile {
@@ -160,6 +173,7 @@ impl Profile {
                 explorer: "https://testex.verus.io".into(),
                 currency: "VRSCTEST".into(),
                 allow_spend: true,
+                max_response_mb: DEFAULT_MAX_RESPONSE_MB,
             }),
             "mainnet" => Some(Self {
                 name: name.into(),
@@ -167,6 +181,7 @@ impl Profile {
                 explorer: "https://explorer.verus.io".into(),
                 currency: "VRSC".into(),
                 allow_spend: false,
+                max_response_mb: DEFAULT_MAX_RESPONSE_MB,
             }),
             _ => None,
         }
@@ -265,6 +280,9 @@ impl Settings {
             }
             if let Some(allow_spend) = overrides.allow_spend {
                 profile.allow_spend = allow_spend;
+            }
+            if let Some(cap) = overrides.max_response_mb {
+                profile.max_response_mb = cap;
             }
         }
 

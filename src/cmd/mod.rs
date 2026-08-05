@@ -7,6 +7,8 @@
 pub mod dev;
 pub mod doctor;
 pub mod key;
+pub mod tx;
+pub mod wallet;
 
 use clap::CommandFactory;
 use miette::Diagnostic;
@@ -65,20 +67,29 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
             command,
         ),
 
-        Command::Wallet { command } => Err(NotYet::at(
+        Command::Wallet { command } => {
+            let settings = Settings::resolve(&cli.globals)?;
             match command {
-                WalletCommand::Balance => "wallet balance",
-                WalletCommand::Utxos => "wallet utxos",
-            },
-            "M4",
-        )),
+                WalletCommand::Balance { target } => wallet::balance(
+                    &ui,
+                    &settings,
+                    target.address.as_deref(),
+                    target.key.as_deref(),
+                ),
+                WalletCommand::Utxos { target } => wallet::utxos(
+                    &ui,
+                    &settings,
+                    target.address.as_deref(),
+                    target.key.as_deref(),
+                ),
+            }
+        }
 
-        Command::Tx { command } => Err(NotYet::at(
-            match command {
-                TxCommand::Explain => "tx explain",
-            },
-            "M4",
-        )),
+        Command::Tx { command } => match command {
+            TxCommand::Explain { input } => {
+                tx::explain(&ui, &Settings::resolve(&cli.globals)?, input.as_deref())
+            }
+        },
 
         Command::Send => Err(NotYet::at("send", "M5")),
 

@@ -208,15 +208,42 @@ pub enum KeyCommand {
 #[derive(Debug, Subcommand)]
 pub enum WalletCommand {
     /// Spendable, immature and token balances
-    Balance,
+    Balance {
+        #[command(flatten)]
+        target: WalletTarget,
+    },
     /// The individual outputs behind the balance
-    Utxos,
+    Utxos {
+        #[command(flatten)]
+        target: WalletTarget,
+    },
+}
+
+/// Which address to look at. Read-only commands take an address, never a key —
+/// watching a balance needs no secret.
+#[derive(Debug, Clone, Args)]
+#[group(multiple = false)]
+pub struct WalletTarget {
+    /// Look at this address
+    #[arg(long, short = 'a', value_name = "R…")]
+    pub address: Option<String>,
+
+    /// Look at the address of a stored key
+    #[arg(long, short = 'k', value_name = "LABEL")]
+    pub key: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum TxCommand {
     /// Say what every output in a transaction actually is
-    Explain,
+    ///
+    /// Takes a txid, a raw transaction as hex, or a bare output script as hex.
+    /// Only a txid needs a node; the decoding is offline either way.
+    Explain {
+        /// txid, raw hex, or `-` to read hex on stdin
+        #[arg(value_name = "TXID|HEX")]
+        input: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]

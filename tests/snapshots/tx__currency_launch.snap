@@ -1,0 +1,33 @@
+---
+source: tests/tx.rs
+expression: "explain(\"currency-launch-fractional-one-reserve.hex\")"
+---
+┌─ TRANSACTION ──────────────────────────────────────────────────────────────┐
+│ txid     df69640e4cfafe7cbe9cabd3c790ed3c556f7ee340e5f10ce73dd1b590f0556d  │
+│ expiry   height 1,167,853                                                  │
+├─ INPUTS ───────────────────────────────────────────────────────────────────┤
+│ #0 e740a3149f…600f15:0                                                     │
+│ #1 ec69f05ffd…728670:0                                                     │
+├─ OUTPUTS ──────────────────────────────────────────────────────────────────┤
+│ 7 outputs — 105.00000000 in native satoshis                                │
+│ #0 0.00000000                                                              │
+│      the VerusID verusrpc-test-mrhu3gpo3wws@ — 1-of-1, revocation          │
+│      iEiEX5Voi…nAyd, recovery iEiEX5Voi…nAyd                               │
+│ #1 0.00000000                                                              │
+│      a CryptoCondition this SDK does not decode (eval 2) — it cannot hold  │
+│      currency                                                              │
+│ #2 0.00000000                                                              │
+│      a CryptoCondition this SDK does not decode (eval 13) — ▲ IT MAY HOLD  │
+│      CURRENCY; do not treat this output as empty                           │
+│ #3 0.00000000                                                              │
+│      a CryptoCondition this SDK does not decode (eval 5) — it cannot hold  │
+│      currency                                                              │
+│ #4 0.00000000                                                              │
+│      a CryptoCondition this SDK does not decode (eval 12) — it cannot hold │
+│      currency                                                              │
+│ #5 100.00000000                                                            │
+│      reserves held for i9G2QgG74f7tErEyF3cWp2x1exBGbFa19t: 100.00000000    │
+│      iJhCezBEx…f2yq                                                        │
+│ #6 5.00000000                                                              │
+│      → i9G2QgG74f7tErEyF3cWp2x1exBGbFa19t held for a VerusID, not a key    │
+└────────────────────────────────────────────────────────────────────────────┘

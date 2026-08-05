@@ -43,6 +43,11 @@ enum Item {
     },
     /// A line that spans the panel.
     Line(Text),
+    /// Prose, wrapped to the panel and indented on every line.
+    Wrapped {
+        indent: usize,
+        text: Text,
+    },
     /// A divider carrying a title.
     Section(String),
     /// A plain divider.
@@ -90,6 +95,14 @@ impl Panel {
     #[must_use]
     pub fn line(mut self, text: Text) -> Self {
         self.items.push(Item::Line(text));
+        self
+    }
+
+    /// A line of prose, wrapped to fit rather than allowed to break the frame,
+    /// with `indent` spaces in front of every line it becomes.
+    #[must_use]
+    pub fn wrapped(mut self, indent: usize, text: Text) -> Self {
+        self.items.push(Item::Wrapped { indent, text });
         self
     }
 
@@ -158,6 +171,16 @@ impl Panel {
                 Item::Rule => drawn.push(Drawn::Divider(None)),
                 Item::Blank => drawn.push(Drawn::Content(Text::new())),
                 Item::Line(text) => drawn.push(Drawn::Content(text.clone())),
+                Item::Wrapped { indent, text } => {
+                    // Wrapped against the theme's ceiling, not the final panel
+                    // width — that is not decided yet, and cannot exceed this.
+                    let budget = theme.width.saturating_sub(*indent);
+                    for line in text.wrap(budget) {
+                        let width = line.width();
+                        let padded = format!("{}{}", " ".repeat(*indent), line.render());
+                        drawn.push(Drawn::Content(Text::preformatted(padded, indent + width)));
+                    }
+                }
                 Item::Row { label, value } => {
                     let assembled = Text::of(pad(label, label_width), palette.label)
                         .push(" ".repeat(LABEL_GUTTER), palette.label)
@@ -278,6 +301,14 @@ impl Panel {
                 Item::Rule | Item::Blank => out.push('\n'),
                 Item::Line(text) => {
                     out.push_str("  ");
+                    out.push_str(&text.render());
+                    out.push('\n');
+                }
+                // Left unwrapped: there is no frame to break, and piped output
+                // is likelier to be fed to something than read.
+                Item::Wrapped { indent, text } => {
+                    out.push_str("  ");
+                    out.push_str(&" ".repeat(*indent));
                     out.push_str(&text.render());
                     out.push('\n');
                 }

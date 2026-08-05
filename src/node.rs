@@ -13,6 +13,8 @@ use miette::Diagnostic;
 use thiserror::Error;
 use verus_sdk::network::{HttpTransport, RpcClient, RpcError};
 
+use crate::config::Profile;
+
 /// Long enough for a public node under load, short enough that a wrong URL
 /// fails while you are still looking at the terminal.
 const TIMEOUT: Duration = Duration::from_secs(20);
@@ -59,6 +61,11 @@ impl NodeError {
                  try your own daemon with --node"
             ),
             RpcError::Node { code, .. } => format!("the daemon rejected the call with code {code}"),
+            RpcError::ResponseTooLarge { cap } => format!(
+                "the reply was over the {} MiB ceiling — this address has an unusually large \
+                 number of outputs; raise `max_response_mb` for this profile in config.toml",
+                cap / (1024 * 1024)
+            ),
             RpcError::Malformed(_) | RpcError::Unexpected(_) => {
                 "the endpoint answered something this SDK build did not expect — it may not be a \
                  Verus node, or may be a different daemon version"
@@ -79,12 +86,17 @@ impl NodeError {
 ///
 /// Builds no connection: the first request does that. So this succeeding means
 /// the URL is well formed, not that anything is listening.
-pub fn connect(url: &str) -> Result<Node, NodeError> {
+pub fn connect(profile: &Profile) -> Result<Node, NodeError> {
+    let url = &profile.node;
     let transport = HttpTransport::new(url)
         .map_err(|source| NodeError::Endpoint {
             url: url.to_string(),
             source: Box::new(source),
         })?
-        .with_timeout(TIMEOUT);
+        .with_timeout(TIMEOUT)
+        .with_max_response_bytes(
+            usize::try_from(profile.max_response_mb.saturating_mul(1024 * 1024))
+                .unwrap_or(usize::MAX),
+        );
     Ok(RpcClient::new(transport))
 }

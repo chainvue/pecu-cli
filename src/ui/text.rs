@@ -102,6 +102,85 @@ impl Text {
         out
     }
 
+    /// Break into lines no wider than `width`, keeping every span's style.
+    ///
+    /// Word-wrapped, because most of what needs this is prose describing an
+    /// output. A single word wider than the whole line — a hash, a raw script —
+    /// is hard-split rather than allowed to overflow: it has no spaces to break
+    /// on, and letting it run would break the frame around it.
+    ///
+    /// Preformatted text is returned untouched. Its width is carried rather than
+    /// measurable, so there is no honest way to split it.
+    pub fn wrap(&self, width: usize) -> Vec<Text> {
+        if width == 0 || self.known_width.is_some() {
+            return vec![self.clone()];
+        }
+
+        let mut lines: Vec<Text> = Vec::new();
+        let mut line = Text::new();
+        let mut used = 0usize;
+        let mut pending_space: Option<Style> = None;
+
+        for (word, style) in self.words() {
+            if word == " " {
+                pending_space = Some(style);
+                continue;
+            }
+            let word_width = UnicodeWidthStr::width(word.as_str());
+
+            if used > 0 && used + usize::from(pending_space.is_some()) + word_width > width {
+                lines.push(std::mem::take(&mut line));
+                used = 0;
+                pending_space = None;
+            }
+            if let Some(space) = pending_space.take() {
+                if used > 0 {
+                    line = line.push(" ", space);
+                    used += 1;
+                }
+            }
+
+            // Still too wide on a line of its own: chop it.
+            if word_width > width {
+                for chunk in chunks(&word, width) {
+                    if used > 0 {
+                        lines.push(std::mem::take(&mut line));
+                        used = 0;
+                    }
+                    let chunk_width = UnicodeWidthStr::width(chunk.as_str());
+                    line = line.push(chunk, style);
+                    used += chunk_width;
+                }
+                continue;
+            }
+
+            line = line.push(word, style);
+            used += word_width;
+        }
+
+        if used > 0 || lines.is_empty() {
+            lines.push(line);
+        }
+        lines
+    }
+
+    /// Words and the single spaces between them, each carrying its span's style.
+    fn words(&self) -> Vec<(String, Style)> {
+        let mut pieces = Vec::new();
+        for span in &self.spans {
+            let mut parts = span.text.split(' ').peekable();
+            while let Some(part) = parts.next() {
+                if !part.is_empty() {
+                    pieces.push((part.to_string(), span.style));
+                }
+                if parts.peek().is_some() {
+                    pieces.push((" ".to_string(), span.style));
+                }
+            }
+        }
+        pieces
+    }
+
     pub fn render(&self) -> String {
         let mut out = String::new();
         for span in &self.spans {
@@ -125,9 +204,64 @@ impl Text {
     }
 }
 
+/// Split a word into pieces of at most `width` cells.
+///
+/// Character-counted rather than width-counted: everything that reaches here is
+/// a hash or a raw script, which is ASCII.
+fn chunks(word: &str, width: usize) -> Vec<String> {
+    word.chars()
+        .collect::<Vec<_>>()
+        .chunks(width.max(1))
+        .map(|chunk| chunk.iter().collect())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plain(lines: &[Text]) -> Vec<String> {
+        lines.iter().map(Text::render).collect()
+    }
+
+    #[test]
+    fn wrapping_breaks_on_spaces_and_keeps_every_word() {
+        let text = Text::raw("the quick brown fox jumps over the lazy dog");
+        let lines = text.wrap(16);
+        for line in &lines {
+            assert!(line.width() <= 16, "too wide: {:?}", line.render());
+        }
+        assert_eq!(
+            plain(&lines).join(" "),
+            "the quick brown fox jumps over the lazy dog"
+        );
+    }
+
+    #[test]
+    fn wrapping_hard_splits_a_word_with_nowhere_to_break() {
+        let hash = "a".repeat(50);
+        let lines = Text::raw(&hash).wrap(20);
+        assert_eq!(lines.len(), 3);
+        for line in &lines {
+            assert!(line.width() <= 20);
+        }
+        assert_eq!(plain(&lines).concat(), hash);
+    }
+
+    #[test]
+    fn wrapping_preserves_styles_across_the_break() {
+        let styled = Text::raw("aaaa ").push("bbbb", Style::new().bold());
+        let lines = styled.wrap(4);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].render(), "aaaa");
+        assert!(lines[1].render().contains("bbbb"));
+        assert!(lines[1].render().contains('\u{1b}'), "style was dropped");
+    }
+
+    #[test]
+    fn text_that_already_fits_comes_back_as_one_line() {
+        assert_eq!(Text::raw("short").wrap(40).len(), 1);
+    }
 
     #[test]
     fn width_ignores_escapes_and_counts_wide_characters() {

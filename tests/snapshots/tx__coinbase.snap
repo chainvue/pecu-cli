@@ -1,0 +1,24 @@
+---
+source: tests/tx.rs
+expression: "explain(\"coinbase.hex\")"
+---
+┌─ TRANSACTION ──────────────────────────────────────────────────────────────────┐
+│ txid     7f291acf765bf375baae43337c5b27fd123800e5486782ea00f0ff90603cd894      │
+│ expiry   ▲ never — this transaction stays minable forever                      │
+├─ INPUTS ───────────────────────────────────────────────────────────────────────┤
+│ #0 0000000000…000000:4294967295                                                │
+├─ OUTPUTS ──────────────────────────────────────────────────────────────────────┤
+│ 4 outputs — 3.00010000 in native satoshis                                      │
+│ #0 3.00010000                                                                  │
+│      → R9UJQch4pJLAo649s5yQh5hp2tXZij9oQG pays a bare public key, 33 bytes — a │
+│      mined coinbase                                                            │
+│ #1 0.00000000                                                                  │
+│      a CryptoCondition this SDK does not decode (eval 4) — it cannot hold      │
+│      currency                                                                  │
+│ #2 0.00000000                                                                  │
+│      a CryptoCondition this SDK does not decode (eval 6) — it cannot hold      │
+│      currency                                                                  │
+│ #3 0.00000000                                                                  │
+│      a CryptoCondition this SDK does not decode (eval 20) — it cannot hold     │
+│      currency                                                                  │
+└────────────────────────────────────────────────────────────────────────────────┘
