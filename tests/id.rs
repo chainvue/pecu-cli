@@ -181,6 +181,32 @@ fn an_identity_that_is_its_own_revocation_authority_is_flagged() {
     assert!(stdout.contains("cannot take it back"), "{stdout}");
 }
 
+/// `flags` is a bitfield, and reading it whole would freeze currency-bearing
+/// identities out of their own funds.
+///
+/// `VRSCTEST@` reports `flags = 1`, which is `FLAG_ACTIVE_CURRENCY` — it has
+/// launched a currency — and not `FLAG_LOCKED`, which is `2`. Testing the field
+/// against zero rather than masking would call it locked. Pinned to that exact
+/// value on the SDK developer's warning.
+#[test]
+#[ignore = "talks to api.verustest.net"]
+fn a_currency_bearing_identity_is_not_mistaken_for_a_locked_one() {
+    let home = home();
+    let assertion = pecu(&home)
+        .args(["id", "show", CHAIN_IDENTITY, "--json"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+    let document: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+
+    assert_eq!(
+        document["identity"]["flags"], 1,
+        "the premise of this test has changed:\n{document:#}"
+    );
+    assert_eq!(document["timelock"]["kind"], "none", "{document:#}");
+    assert_eq!(document["timelock"]["spendable"], true, "{document:#}");
+}
+
 /// Every identity says whether it is locked, including the ones that are not.
 ///
 /// This was omitted for unlocked identities on the reasoning that the section's

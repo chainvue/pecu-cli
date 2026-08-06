@@ -15,7 +15,6 @@ use std::io::{IsTerminal, Write};
 use miette::Diagnostic;
 use thiserror::Error;
 use verus_sdk::decode::{decode_output_script, OutputKind};
-use verus_sdk::identity::Timelock;
 use verus_sdk::money::{Amount, Utxo};
 use verus_sdk::network::{
     prepare_send, prepare_send_from_identity, prepare_send_token, spendable, ChainReader,
@@ -99,13 +98,6 @@ pub enum SendError {
         help("there is no terminal to confirm on — pass --yes to send without asking, or --dry-run to stop before broadcasting")
     )]
     CannotConfirm,
-
-    #[error("`{identity}` is timelocked and cannot spend until block {unlock}")]
-    #[diagnostic(
-        code(pecu::identity_locked),
-        help("consensus refuses the spend, and says only `mandatory-script-verify-flag-failed` — after the transaction is built and signed. `pecu id show` reports the height it opens at, and nothing can bring that forward")
-    )]
-    IdentityLocked { identity: String, unlock: String },
 
     #[error("--json will not broadcast without --yes")]
     #[diagnostic(
@@ -372,30 +364,6 @@ fn build_from_identity(
     to: &Recipient,
     amount: Amount,
 ) -> Result<Unsent<verus_sdk::network::Sent>, miette::Report> {
-    // A timelocked identity cannot spend, and the SDK does not check: the flow
-    // builds happily and consensus refuses with a message that names nothing.
-    // Two reads to say which identity and until when, on a path that already
-    // makes several.
-    ui.sdk(format!("node.identity({identity:?})"));
-    if let Ok(record) = node.identity(identity) {
-        let timelock = crate::cmd::id::timelock_of(&record.identity);
-        let tip = node.block_count().unwrap_or(0);
-        if !timelock.spendable_at(tip) {
-            ui.sdk_result(format!("locked: {timelock:?}"));
-            return Err(SendError::IdentityLocked {
-                identity: identity.to_string(),
-                unlock: match timelock {
-                    Timelock::UntilBlock(height) => fmt::height(height.into()),
-                    // A delay has no height until somebody asks for one, which
-                    // is the honest answer rather than a number.
-                    _ => "— no unlock has been requested".to_string(),
-                },
-            }
-            .into());
-        }
-        ui.sdk_result("not timelocked".to_string());
-    }
-
     ui.sdk(format!(
         "verus_sdk::network::prepare_send_from_identity(&node, &[&key], {identity:?}, {:?}, {})",
         to.address,
@@ -444,6 +412,20 @@ fn identity_spend_error(identity: &str, source: FlowError) -> SendError {
         FlowError::NoSuchIdentity(_) => {
             "check the name — `pecu id show <name@>` reads it off the chain".to_string()
         }
+        // Refused before the transaction is built, since verus-rust-sdk#109.
+        // Consensus would have answered `mandatory-script-verify-flag-failed`,
+        // naming neither the identity nor the height.
+        FlowError::Tx(TxError::FundsTimelocked { unlock_at }) => match unlock_at {
+            Some(height) => format!(
+                "{identity} opens at block {} — `pecu id show {identity}` counts it down, and \
+                 nothing can bring it forward",
+                fmt::height((*height).into())
+            ),
+            None => format!(
+                "{identity} carries an unlock delay and nobody has started it, so its funds \
+                 have no unlock height yet. `pecu id unlock {identity}` starts the countdown"
+            ),
+        },
         FlowError::Tx(TxError::AlreadyRevoked) => {
             "a revoked identity cannot spend. Its recovery authority can restore it first"
                 .to_string()

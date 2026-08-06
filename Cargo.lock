@@ -2319,7 +2319,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "verus-flows"
 version = "0.0.0"
-source = "git+https://github.com/chainvue/verus-rust-sdk?rev=673a84fc396172c67f220c8e60162f3e520368b0#673a84fc396172c67f220c8e60162f3e520368b0"
+source = "git+https://github.com/chainvue/verus-rust-sdk?rev=498c396eb2016d2e010ac78eae1839c858455c59#498c396eb2016d2e010ac78eae1839c858455c59"
 dependencies = [
  "hex",
  "rand",
@@ -2337,7 +2337,7 @@ dependencies = [
 [[package]]
 name = "verus-keys"
 version = "0.0.0"
-source = "git+https://github.com/chainvue/verus-rust-sdk?rev=673a84fc396172c67f220c8e60162f3e520368b0#673a84fc396172c67f220c8e60162f3e520368b0"
+source = "git+https://github.com/chainvue/verus-rust-sdk?rev=498c396eb2016d2e010ac78eae1839c858455c59#498c396eb2016d2e010ac78eae1839c858455c59"
 dependencies = [
  "bs58",
  "k256",
@@ -2351,7 +2351,7 @@ dependencies = [
 [[package]]
 name = "verus-light"
 version = "0.0.0"
-source = "git+https://github.com/chainvue/verus-rust-sdk?rev=673a84fc396172c67f220c8e60162f3e520368b0#673a84fc396172c67f220c8e60162f3e520368b0"
+source = "git+https://github.com/chainvue/verus-rust-sdk?rev=498c396eb2016d2e010ac78eae1839c858455c59#498c396eb2016d2e010ac78eae1839c858455c59"
 dependencies = [
  "hex",
  "thiserror 2.0.19",
@@ -2392,7 +2392,7 @@ dependencies = [
 [[package]]
 name = "verus-rpc"
 version = "0.0.0"
-source = "git+https://github.com/chainvue/verus-rust-sdk?rev=673a84fc396172c67f220c8e60162f3e520368b0#673a84fc396172c67f220c8e60162f3e520368b0"
+source = "git+https://github.com/chainvue/verus-rust-sdk?rev=498c396eb2016d2e010ac78eae1839c858455c59#498c396eb2016d2e010ac78eae1839c858455c59"
 dependencies = [
  "hex",
  "serde",
@@ -2406,7 +2406,7 @@ dependencies = [
 [[package]]
 name = "verus-sapling"
 version = "0.0.0"
-source = "git+https://github.com/chainvue/verus-rust-sdk?rev=673a84fc396172c67f220c8e60162f3e520368b0#673a84fc396172c67f220c8e60162f3e520368b0"
+source = "git+https://github.com/chainvue/verus-rust-sdk?rev=498c396eb2016d2e010ac78eae1839c858455c59#498c396eb2016d2e010ac78eae1839c858455c59"
 dependencies = [
  "bech32",
  "hex",
@@ -2424,7 +2424,7 @@ dependencies = [
 [[package]]
 name = "verus-sdk"
 version = "0.0.0"
-source = "git+https://github.com/chainvue/verus-rust-sdk?rev=673a84fc396172c67f220c8e60162f3e520368b0#673a84fc396172c67f220c8e60162f3e520368b0"
+source = "git+https://github.com/chainvue/verus-rust-sdk?rev=498c396eb2016d2e010ac78eae1839c858455c59#498c396eb2016d2e010ac78eae1839c858455c59"
 dependencies = [
  "verus-flows",
  "verus-keys",
@@ -2438,7 +2438,7 @@ dependencies = [
 [[package]]
 name = "verus-tx"
 version = "0.0.0"
-source = "git+https://github.com/chainvue/verus-rust-sdk?rev=673a84fc396172c67f220c8e60162f3e520368b0#673a84fc396172c67f220c8e60162f3e520368b0"
+source = "git+https://github.com/chainvue/verus-rust-sdk?rev=498c396eb2016d2e010ac78eae1839c858455c59#498c396eb2016d2e010ac78eae1839c858455c59"
 dependencies = [
  "verus-tx-currency",
  "verus-tx-identity",
@@ -2451,7 +2451,7 @@ dependencies = [
 [[package]]
 name = "verus-tx-currency"
 version = "0.0.0"
-source = "git+https://github.com/chainvue/verus-rust-sdk?rev=673a84fc396172c67f220c8e60162f3e520368b0#673a84fc396172c67f220c8e60162f3e520368b0"
+source = "git+https://github.com/chainvue/verus-rust-sdk?rev=498c396eb2016d2e010ac78eae1839c858455c59#498c396eb2016d2e010ac78eae1839c858455c59"
 dependencies = [
  "hex",
  "verus-keys",
@@ -2464,7 +2464,7 @@ dependencies = [
 [[package]]
 name = "verus-tx-identity"
 version = "0.0.0"
-source = "git+https://github.com/chainvue/verus-rust-sdk?rev=673a84fc396172c67f220c8e60162f3e520368b0#673a84fc396172c67f220c8e60162f3e520368b0"
+source = "git+https://github.com/chainvue/verus-rust-sdk?rev=498c396eb2016d2e010ac78eae1839c858455c59#498c396eb2016d2e010ac78eae1839c858455c59"
 dependencies = [
  "hex",
  "serde",
@@ -2478,7 +2478,7 @@ dependencies = [
 [[package]]
 name = "verus-tx-market"
 version = "0.0.0"
-source = "git+https://github.com/chainvue/verus-rust-sdk?rev=673a84fc396172c67f220c8e60162f3e520368b0#673a84fc396172c67f220c8e60162f3e520368b0"
+source = "git+https://github.com/chainvue/verus-rust-sdk?rev=498c396eb2016d2e010ac78eae1839c858455c59#498c396eb2016d2e010ac78eae1839c858455c59"
 dependencies = [
  "hex",
  "serde",
@@ -2492,7 +2492,7 @@ dependencies = [
 [[package]]
 name = "verus-tx-primitives"
 version = "0.0.0"
-source = "git+https://github.com/chainvue/verus-rust-sdk?rev=673a84fc396172c67f220c8e60162f3e520368b0#673a84fc396172c67f220c8e60162f3e520368b0"
+source = "git+https://github.com/chainvue/verus-rust-sdk?rev=498c396eb2016d2e010ac78eae1839c858455c59#498c396eb2016d2e010ac78eae1839c858455c59"
 dependencies = [
  "hex",
  "serde",
@@ -2504,7 +2504,7 @@ dependencies = [
 [[package]]
 name = "verus-tx-protocol"
 version = "0.0.0"
-source = "git+https://github.com/chainvue/verus-rust-sdk?rev=673a84fc396172c67f220c8e60162f3e520368b0#673a84fc396172c67f220c8e60162f3e520368b0"
+source = "git+https://github.com/chainvue/verus-rust-sdk?rev=498c396eb2016d2e010ac78eae1839c858455c59#498c396eb2016d2e010ac78eae1839c858455c59"
 dependencies = [
  "hex",
  "serde",
@@ -2517,7 +2517,7 @@ dependencies = [
 [[package]]
 name = "verus-tx-transparent"
 version = "0.0.0"
-source = "git+https://github.com/chainvue/verus-rust-sdk?rev=673a84fc396172c67f220c8e60162f3e520368b0#673a84fc396172c67f220c8e60162f3e520368b0"
+source = "git+https://github.com/chainvue/verus-rust-sdk?rev=498c396eb2016d2e010ac78eae1839c858455c59#498c396eb2016d2e010ac78eae1839c858455c59"
 dependencies = [
  "hex",
  "verus-keys",
@@ -2528,7 +2528,7 @@ dependencies = [
 [[package]]
 name = "verus-wire"
 version = "0.0.0"
-source = "git+https://github.com/chainvue/verus-rust-sdk?rev=673a84fc396172c67f220c8e60162f3e520368b0#673a84fc396172c67f220c8e60162f3e520368b0"
+source = "git+https://github.com/chainvue/verus-rust-sdk?rev=498c396eb2016d2e010ac78eae1839c858455c59#498c396eb2016d2e010ac78eae1839c858455c59"
 dependencies = [
  "blake2b_simd",
  "sha2",

@@ -353,7 +353,7 @@ fn a_timelocked_identity_is_refused_before_the_transaction_is_built() {
         .assert()
         .success();
     let state = String::from_utf8_lossy(&shown.get_output().stdout).into_owned();
-    if !state.contains("locked for") {
+    if !state.contains("locked for") && !state.contains("no unlock requested") {
         eprintln!("pecurevoke1@ is not locked right now — skipping");
         return;
     }
@@ -377,7 +377,12 @@ fn a_timelocked_identity_is_refused_before_the_transaction_is_built() {
         .failure();
     let stderr = String::from_utf8_lossy(&assertion.get_output().stderr).into_owned();
 
-    assert!(stderr.contains("timelocked"), "{stderr}");
+    // Either lock form is a legitimate answer: a height to wait for, or a
+    // delay nobody has started, which has no height at all.
+    assert!(
+        stderr.contains("locked") || stderr.contains("no unlock has been started"),
+        "{stderr}"
+    );
     // Named, and not blamed on the node.
     assert!(stderr.contains("pecurevoke1@"), "{stderr}");
     assert!(

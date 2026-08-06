@@ -89,7 +89,7 @@ answering.
 │ keys        ~/.config/verus-pecu/keys (0 keys)      │
 ├─ BUILD ─────────────────────────────────────────────┤
 │ pecu        0.1.0                                   │
-│ verus-sdk   673a84f                                 │
+│ verus-sdk   498c396                                 │
 │ features    network                                 │
 ├─ NODE ──────────────────────────────────────────────┤
 │ chain       VRSCTEST                                │
@@ -708,13 +708,14 @@ nothing, after the transaction is built and signed. A stolen key cannot shorten
 a lock either — that was measured too, and it is the property the whole feature
 rests on.
 
-**A timelocked identity cannot spend its own funds**, and that is refused here
-rather than by consensus. `send --from-identity` on a locked identity used to
+**A timelocked identity cannot spend its own funds**, and that is refused before
+the transaction is built. `send --from-identity` on a locked identity used to
 build and sign a perfectly good transaction and then collect
 `mandatory-script-verify-flag-failed`, which names neither the identity nor the
-height. It now says which and until when — reported upstream as
-chainvue/verus-rust-sdk#107, since the SDK has the predicate for it and the
-send flow does not use it.
+height. Reported as chainvue/verus-rust-sdk#107 and fixed in the SDK, so the
+refusal now costs no extra request and distinguishes the two forms: a height to
+wait for, or a delay nobody has started — which has no height at all, and whose
+remedy is `pecu id unlock`.
 
 **An over-long delay is refused rather than clamped.** Consensus caps it at
 `MAX_UNLOCK_DELAY` (~22 years). The daemon's own helper silently clamps instead

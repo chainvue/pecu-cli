@@ -263,6 +263,22 @@ fn unlocking_something_already_counting_down_has_nothing_to_start() {
         return;
     };
 
+    // Only meaningful when there is nothing to start. A delay-locked identity
+    // is precisely the case `unlock` exists for, and this identity moves
+    // between the two as the tests that lock it run — so the state is read
+    // rather than assumed.
+    let shown = Command::cargo_bin("pecu")
+        .expect("built")
+        .env("PECU_HOME", &funded)
+        .args(["id", "show", "pecurevoke1@"])
+        .assert()
+        .success();
+    let state = String::from_utf8_lossy(&shown.get_output().stdout).into_owned();
+    if state.contains("no unlock requested") {
+        eprintln!("pecurevoke1@ is delay-locked, which is what unlock is for — skipping");
+        return;
+    }
+
     Command::cargo_bin("pecu")
         .expect("built")
         .env("PECU_HOME", &funded)
