@@ -172,9 +172,19 @@ fn flow(what: &'static str, source: FlowError) -> CurrencyError {
              `pecu id show <name@>` lists them"
                 .to_string()
         }
+        // Both variants: the builder's, and the flow's own funding check, which
+        // is the one that actually fires here. Matching only the first sent
+        // this to "run `pecu doctor`" — the node is fine, the key is empty.
         FlowError::Tx(TxError::InsufficientFunds { required, .. }) => format!(
-            "the signing key pays the launch fee as well. It needs at least {}",
+            "the launch fee comes from the signing key, not from the identity. It needs at \
+             least {}",
             fmt::sats(*required)
+        ),
+        FlowError::InsufficientFunds {
+            needed, address, ..
+        } => format!(
+            "the launch fee comes from the signing key, not from the identity — {address} \
+             needs {needed}. `pecu send --to {address} --amount …` tops it up"
         ),
         FlowError::Content(_) => {
             "the definition was rejected before anything was signed".to_string()
