@@ -136,6 +136,12 @@ pub enum Command {
         command: IdCommand,
     },
 
+    /// Currencies, which are defined by identities
+    Currency {
+        #[command(subcommand)]
+        command: CurrencyCommand,
+    },
+
     /// Print a shell completion script
     Completions {
         /// Shell to generate for
@@ -527,4 +533,56 @@ pub struct IdUnlockArgs {
     /// the delay plus the transaction's expiry; this adds to it
     #[arg(long, value_name = "BLOCKS", default_value_t = 0)]
     pub extra_blocks: u32,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CurrencyCommand {
+    /// Read a currency definition off the chain
+    Show {
+        /// The currency: a name like `bridge@`, or an i-address
+        #[arg(value_name = "NAME@|i-ADDRESS")]
+        name: String,
+    },
+    /// Define a currency under an identity you control
+    Launch(CurrencyLaunchArgs),
+}
+
+/// Launching a token.
+///
+/// A fractional basket is deliberately not here: reserves, weights, conversion
+/// rates and preconversion limits are six vectors indexed by the same list, and
+/// choosing them is a design exercise rather than a set of flags.
+#[derive(Debug, Clone, Args)]
+pub struct CurrencyLaunchArgs {
+    /// The identity that will define it. Its i-address becomes the currency's
+    /// id, and it can never define another
+    #[arg(value_name = "NAME@|i-ADDRESS")]
+    pub name: String,
+
+    /// Which stored key signs and pays. Must be a primary address of that
+    /// identity
+    #[arg(long, short = 'f', value_name = "LABEL")]
+    pub from: Option<String>,
+
+    /// Supply that exists at launch, before preallocations
+    #[arg(long, value_name = "COINS")]
+    pub supply: Option<String>,
+
+    /// Give some of the supply to an identity, as `i-ADDRESS:COINS`. Repeat for
+    /// several
+    #[arg(long, value_name = "i-ADDRESS:COINS")]
+    pub preallocate: Vec<String>,
+
+    /// Let the defining identity mint more later. Off by default: a fixed
+    /// supply is the thing holders can verify, and this cannot be undone
+    #[arg(long)]
+    pub mintable: bool,
+
+    /// The block conversions open at. Defaults to the tip plus --start-in
+    #[arg(long, value_name = "HEIGHT", conflicts_with = "start_in")]
+    pub start_block: Option<u32>,
+
+    /// How many blocks ahead to start, when --start-block is not given
+    #[arg(long, value_name = "BLOCKS", default_value_t = 20)]
+    pub start_in: u32,
 }

@@ -5,6 +5,7 @@
 //! `pecu --help` is an honest map of what this build can do.
 
 pub mod airgap;
+pub mod currency;
 pub mod dev;
 pub mod doctor;
 pub mod id;
@@ -18,7 +19,9 @@ use clap::CommandFactory;
 use miette::Diagnostic;
 use thiserror::Error;
 
-use crate::cli::{Cli, Command, DevCommand, IdCommand, PlanCommand, TxCommand, WalletCommand};
+use crate::cli::{
+    Cli, Command, CurrencyCommand, DevCommand, IdCommand, PlanCommand, TxCommand, WalletCommand,
+};
 use crate::config::Settings;
 use crate::ui::Ui;
 
@@ -54,6 +57,16 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
                 Ok(())
             }
         },
+
+        Command::Currency { command } => {
+            let settings = Settings::resolve(&cli.globals)?;
+            match command {
+                CurrencyCommand::Show { name } => currency::show(&ui, &settings, name),
+                CurrencyCommand::Launch(args) => {
+                    currency::launch(&ui, &settings, &cli.globals, args)
+                }
+            }
+        }
 
         Command::Completions { shell } => {
             let mut command = Cli::command();

@@ -71,6 +71,7 @@ before blaming the command — `cargo run` is usually what you are measuring.
 | `pecu id show\|register` | Read an identity; register one (two-phase, resumable) | ✅ done |
 | `pecu id update\|revoke\|recover\|unlock` | The rest of the lifecycle, including timelocks | ✅ done |
 | `pecu id login\|publish\|read` | Sign-in with VerusID, and VDXF data | M8 |
+| `pecu currency show\|launch` | Read a currency definition; launch a token | ✅ done |
 | `pecu completions <shell>` | Shell completion script | ✅ done |
 
 ### `pecu doctor`
@@ -725,6 +726,55 @@ this refuses, before a key is unlocked.
 **Recovery without `--primary` brings the identity back under exactly the keys it
 had when it was revoked** — including any that were compromised, which is usually
 not what a recovery is for. The panel says so either way.
+
+### `pecu currency`
+
+```sh
+pecu currency show TST@
+pecu currency launch mytoken@ --from mykey --supply 1000000
+pecu currency launch mytoken@ --from mykey --mintable --preallocate iAlice…:500
+```
+
+**A currency is something an identity becomes.** There is no separate object:
+the currency's id *is* the defining identity's i-address, and consensus marks
+that identity so it can **never define another**. Closer to claiming a name than
+to deploying a contract.
+
+```
+┌─ CURRENCY ──────────────────────────────────────────────────────┐
+│ name          TST                                               │
+│ currency id   iK2k8YH1jfR7RLmEZ3zac2Mkx5rxSgbMqg                │
+│ parent        iJhCezBExJHvtyH3fGhNnt2NhU4Ztkf2yq                │
+│ kind          token                                             │
+│ control       centralized — the defining identity can mint more │
+│ starts        block 879,130                                     │
+├─ PREALLOCATED ──────────────────────────────────────────────────┤
+│               200.0 VRSCTEST  iK2k8YH1j…bMqg                    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**`options` and `proofprotocol` are decoded, not printed.** They are a bitfield
+and an enum, they are what the currency *is*, and neither is inferable from the
+name. `options: 32` on a panel tells a reader nothing they can act on; `token`
+does. The raw values are still in `--json` alongside the decoded ones.
+
+**`--supply` becomes a preallocation to the defining identity**, and has to. A
+token's supply is the **sum of its preallocations** — `initial_supply` is read
+only for a fractional currency, so setting it on a token produces one with no
+supply at all. The panel shows the resulting preallocation rather than hiding
+the substitution.
+
+**Decentralized by default.** `--mintable` sets `proofprotocol = 2`, letting the
+identity mint more later. It cannot be undone, and a fixed supply is the
+property a holder can actually verify, so it is an opt-in.
+
+**Fractional baskets are deliberately absent.** Reserves, weights, conversion
+rates and preconversion limits are six vectors indexed by the same list — the
+SDK checks the lengths agree, but choosing the numbers is a design exercise
+rather than a set of flags, and half a basket is worse than none.
+
+It costs `currencyregistrationfee`, 200 VRSCTEST at the time of writing, read
+from the parent's chain policy rather than assumed.
 
 ### `--explain`
 
