@@ -544,7 +544,10 @@ pub enum CurrencyCommand {
         name: String,
     },
     /// Define a currency under an identity you control
-    Launch(CurrencyLaunchArgs),
+    ///
+    /// Boxed because a full basket definition carries far more than a name, and
+    /// an enum is as large as its largest variant.
+    Launch(Box<CurrencyLaunchArgs>),
 }
 
 /// Launching a token.
@@ -588,6 +591,67 @@ pub struct CurrencyLaunchArgs {
     /// supply is the thing holders can verify, and this cannot be undone
     #[arg(long, conflicts_with = "reserve")]
     pub mintable: bool,
+
+    /// Seed a reserve before launch, as `NAME@:COINS`. Repeat per reserve
+    #[arg(long, value_name = "NAME@:COINS", requires = "reserve")]
+    pub contribute: Vec<String>,
+
+    /// Least anyone may preconvert into a reserve, as `NAME@:COINS`
+    #[arg(long, value_name = "NAME@:COINS", requires = "reserve")]
+    pub min_preconvert: Vec<String>,
+
+    /// Most anyone may preconvert into a reserve, as `NAME@:COINS`
+    #[arg(long, value_name = "NAME@:COINS", requires = "reserve")]
+    pub max_preconvert: Vec<String>,
+
+    /// Pre-launch conversion rate for a reserve, as `NAME@:RATE`
+    #[arg(long, value_name = "NAME@:RATE", requires = "reserve")]
+    pub conversion: Vec<String>,
+
+    /// Discount for converting before launch, as a percentage
+    #[arg(long, value_name = "PERCENT", requires = "reserve")]
+    pub prelaunch_discount: Option<String>,
+
+    /// Share of the launch carved out to the defining identity, as a percentage
+    #[arg(long, value_name = "PERCENT", requires = "reserve")]
+    pub prelaunch_carveout: Option<String>,
+
+    /// What registering a sub-identity under this currency costs
+    #[arg(long, value_name = "COINS")]
+    pub id_registration_fee: Option<String>,
+
+    /// How many referral levels a sub-identity registration pays. Sets the
+    /// referral option bit on its own
+    #[arg(long, value_name = "N")]
+    pub id_referral_levels: Option<u32>,
+
+    /// What importing an identity into this currency costs
+    #[arg(long, value_name = "COINS")]
+    pub id_import_fee: Option<String>,
+
+    /// A referral is mandatory for sub-identity registration
+    #[arg(long, requires = "id_referral_levels")]
+    pub id_referral_required: bool,
+
+    /// An NFT. Also hands control of the defining identity to the token
+    #[arg(long, conflicts_with = "reserve")]
+    pub nft: bool,
+
+    /// Only identities may hold it
+    #[arg(long)]
+    pub id_restricted: bool,
+
+    /// Identities may stake it
+    #[arg(long)]
+    pub id_staking: bool,
+
+    /// No identities may be registered under it
+    #[arg(long, conflicts_with_all = ["id_registration_fee", "id_referral_levels", "id_import_fee"])]
+    pub no_ids: bool,
+
+    /// The block it stops at. Zero, the default, means never
+    #[arg(long, value_name = "HEIGHT")]
+    pub end_block: Option<u32>,
 
     /// The block conversions open at. Defaults to the tip plus --start-in
     #[arg(long, value_name = "HEIGHT", conflicts_with = "start_in")]

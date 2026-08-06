@@ -77,6 +77,24 @@ pub enum CurrencyError {
     )]
     BadAmount { value: String },
 
+    #[error("`{value}` is not `currency:amount` for --{what}")]
+    #[diagnostic(
+        code(pecu::bad_per_reserve),
+        help("a per-reserve value names the reserve it belongs to, as `VRSCTEST:10` — keyed by name so it cannot land on the wrong currency")
+    )]
+    BadPerReserve { what: &'static str, value: String },
+
+    #[error("`{name}` is not one of this basket's reserves, in --{what}")]
+    #[diagnostic(
+        code(pecu::not_a_reserve),
+        help("every per-reserve value has to name a currency given with --reserve")
+    )]
+    NotAReserve { what: &'static str, name: String },
+
+    #[error("`{value}` is not a percentage for --{what}")]
+    #[diagnostic(code(pecu::bad_percent), help("a number of percent, as `10` or `2.5`"))]
+    BadPercent { what: &'static str, value: String },
+
     #[error("`{value}` is not `currency:percent`")]
     #[diagnostic(
         code(pecu::bad_reserve),
@@ -226,6 +244,62 @@ fn resolve_reserve(
         }
     };
     Ok(id)
+}
+
+/// A per-reserve amount, keyed by the reserve's name rather than its position.
+///
+/// The definition stores these as vectors indexed by the reserve list, and
+/// `serialize_definition` refuses one whose length disagrees — but a vector of
+/// the *right* length with entries in the wrong order is accepted and prices
+/// the basket against the wrong currencies. Keying by name and filling the gaps
+/// with zero removes the possibility rather than checking for it.
+fn per_reserve(
+    entries: &[String],
+    names: &[&str],
+    what: &'static str,
+) -> Result<Vec<Amount>, CurrencyError> {
+    if entries.is_empty() {
+        // Empty is the only safe "unset": a zero-filled vector of the right
+        // length is a different statement, and not the one a caller who said
+        // nothing was making.
+        return Ok(Vec::new());
+    }
+    let mut amounts = vec![Amount::ZERO; names.len()];
+    for entry in entries {
+        let bad = || CurrencyError::BadPerReserve {
+            what,
+            value: entry.clone(),
+        };
+        let (name, value) = entry.rsplit_once(':').ok_or_else(bad)?;
+        let slot = names
+            .iter()
+            .position(|reserve| {
+                reserve
+                    .trim_end_matches('@')
+                    .eq_ignore_ascii_case(name.trim_end_matches('@'))
+            })
+            .ok_or_else(|| CurrencyError::NotAReserve {
+                what,
+                name: name.to_string(),
+            })?;
+        amounts[slot] = Amount::from_coins_str(value).map_err(|_| bad())?;
+    }
+    Ok(amounts)
+}
+
+/// The satoshi-scaled fraction back as the percentage somebody typed.
+fn scaled_percent(scaled: u64) -> String {
+    let percent = fmt::amount(Amount::from_sat(scaled.saturating_mul(100)));
+    format!("{}%", percent.trim_end_matches('0').trim_end_matches('.'))
+}
+
+/// A percentage as the satoshi-scaled fraction consensus stores.
+fn percent(value: &str, what: &'static str) -> Result<u64, CurrencyError> {
+    let scaled = Amount::from_coins_str(value).map_err(|_| CurrencyError::BadPercent {
+        what,
+        value: value.to_string(),
+    })?;
+    Ok(scaled.to_sat() / 100)
 }
 
 /// Everything the option bitfield says, in words.
@@ -596,11 +670,73 @@ pub fn launch(
         definition.initial_supply = supply.unwrap_or(Amount::ZERO);
         definition.currencies = reserves;
         definition.weights = weights;
-        // Left at zero, as every basket on this chain has them: conversions
-        // are pre-launch prices and contributions are what was put in before
-        // it opened, and neither is something to invent at definition time.
-        // `serialize_definition` refuses a vector whose length disagrees with
-        // the reserve list, so empty is the only safe "unset".
+        definition.conversions = per_reserve(&args.conversion, &names, "conversion")?;
+        definition.min_preconversion = per_reserve(&args.min_preconvert, &names, "min-preconvert")?;
+        definition.max_preconversion = per_reserve(&args.max_preconvert, &names, "max-preconvert")?;
+
+        let contributions = per_reserve(&args.contribute, &names, "contribute")?;
+        if !contributions.is_empty() {
+            // `with_contributions` sets `preconverted` to match. The daemon
+            // initialises the two equal and never reveals the second in its
+            // RPC output, so setting one alone is invisible and wrong.
+            definition = definition.with_contributions(contributions);
+        }
+
+        if let Some(value) = &args.prelaunch_discount {
+            definition.prelaunch_discount = percent(value, "prelaunch-discount")?;
+        }
+        if let Some(value) = &args.prelaunch_carveout {
+            // `i32` on the wire, not `i64`: a carveout over about 21% of a
+            // whole would overflow it, which is a refusal rather than a wrap.
+            definition.prelaunch_carveout = i32::try_from(percent(value, "prelaunch-carveout")?)
+                .map_err(|_| CurrencyError::BadPercent {
+                    what: "prelaunch-carveout",
+                    value: value.clone(),
+                })?;
+        }
+    }
+
+    if let Some(value) = &args.id_registration_fee {
+        definition.id_registration_fees = Amount::from_coins_str(value)
+            .map_err(|_| CurrencyError::BadAmount {
+                value: value.clone(),
+            })?
+            .to_sat();
+    }
+    if let Some(levels) = args.id_referral_levels {
+        definition.id_referral_levels = u64::from(levels);
+        // The count alone does nothing: consensus pays referrals only when the
+        // option bit says to, so setting one without the other publishes a
+        // policy that never applies.
+        definition.options |= option::ID_REFERRALS;
+        if args.id_referral_required {
+            definition.options |= option::ID_REFERRALREQUIRED;
+        }
+    }
+    if let Some(value) = &args.id_import_fee {
+        definition.id_import_fees = Amount::from_coins_str(value)
+            .map_err(|_| CurrencyError::BadAmount {
+                value: value.clone(),
+            })?
+            .to_sat();
+    }
+    if let Some(height) = args.end_block {
+        definition.end_block = u64::from(height);
+    }
+    if args.nft {
+        // Also sets FLAG_TOKENIZED_CONTROL on the identity in the builder:
+        // whoever holds the token controls the identity, and the revocation
+        // and recovery authorities stop deciding.
+        definition.options |= option::NFT_TOKEN;
+    }
+    if args.id_restricted {
+        definition.options |= option::ID_RESTRICTED;
+    }
+    if args.id_staking {
+        definition.options |= option::ID_STAKING;
+    }
+    if args.no_ids {
+        definition.options |= option::NO_IDS;
     }
     if args.mintable {
         // `proofprotocol = 2` is what lets the defining identity mint more
@@ -761,22 +897,107 @@ fn launch_panel(
                     .push("  the reserves are priced against this", palette.muted),
             )
             .section("RESERVES");
-        for (id, weight) in definition.currencies.iter().zip(&definition.weights) {
+        for (index, (id, weight)) in definition
+            .currencies
+            .iter()
+            .zip(&definition.weights)
+            .enumerate()
+        {
+            // The percentage back, not the fraction of SATOSHIDEN stored: the
+            // reader typed one and should be able to check it.
+            let mut row = Text::of(
+                format!("{:>6}%", (*weight as f64) * 100.0 / SATOSHIDEN as f64),
+                palette.value,
+            )
+            .push("  ", palette.muted)
+            .push(
+                fmt::address(
+                    &Address::new(AddressKind::Identity, id.to_bytes()).to_string(),
+                    glyphs.ellipsis,
+                ),
+                palette.muted,
+            );
+            // Everything else this reserve carries, on its own line, because a
+            // seed contribution and a preconversion limit are money and belong
+            // where the ratio is rather than in a separate list to cross-refer.
+            for (label, values) in [
+                ("seeded", &definition.initial_contributions),
+                ("min", &definition.min_preconversion),
+                ("max", &definition.max_preconversion),
+                ("rate", &definition.conversions),
+            ] {
+                if let Some(amount) = values.get(index).filter(|a| **a != Amount::ZERO) {
+                    row = row.push(format!("  {label} {}", fmt::amount(*amount)), palette.muted);
+                }
+            }
+            panel = panel.row("", row);
+        }
+
+        if definition.prelaunch_discount != 0 {
+            panel = panel.row(
+                "discount",
+                Text::of(scaled_percent(definition.prelaunch_discount), palette.value)
+                    .push("  to anyone converting before launch", palette.muted),
+            );
+        }
+        if definition.prelaunch_carveout != 0 {
+            panel = panel.row(
+                "carveout",
+                Text::of(
+                    scaled_percent(u64::try_from(definition.prelaunch_carveout).unwrap_or(0)),
+                    palette.warn,
+                )
+                .push("  of the launch, to this identity", palette.muted),
+            );
+        }
+    }
+
+    // What it will cost to register `alice.thiscurrency@`. Published in the
+    // definition and unchangeable, so it belongs on the panel that approves it.
+    if definition.id_registration_fees != 0
+        || definition.id_referral_levels != 0
+        || definition.id_import_fees != 0
+        || definition.options & option::NO_IDS != 0
+    {
+        panel = panel.section("SUB-IDENTITIES");
+        if definition.options & option::NO_IDS != 0 {
             panel = panel.row(
                 "",
-                // The percentage back, not the fraction of SATOSHIDEN stored:
-                // the reader typed one and should be able to check it.
+                Text::of("none may be registered under it", palette.warn),
+            );
+        }
+        if definition.id_registration_fees != 0 {
+            panel = panel.row(
+                "registration",
                 Text::of(
-                    format!("{:>6}%", (*weight as f64) * 100.0 / SATOSHIDEN as f64),
+                    fmt::amount(Amount::from_sat(definition.id_registration_fees)),
+                    palette.value,
+                ),
+            );
+        }
+        if definition.id_referral_levels != 0 {
+            panel = panel.row(
+                "referrals",
+                Text::of(
+                    fmt::plural(definition.id_referral_levels as usize, "level", "levels"),
                     palette.value,
                 )
-                .push("  ", palette.muted)
                 .push(
-                    fmt::address(
-                        &Address::new(AddressKind::Identity, id.to_bytes()).to_string(),
-                        glyphs.ellipsis,
-                    ),
+                    if definition.options & option::ID_REFERRALREQUIRED != 0 {
+                        "  and one is mandatory"
+                    } else {
+                        "  optional"
+                    },
                     palette.muted,
+                ),
+            );
+        }
+        if definition.id_import_fees != 0 {
+            panel = panel.row(
+                "import",
+                Text::of(
+                    fmt::amount(Amount::from_sat(definition.id_import_fees)),
+                    palette.value,
                 ),
             );
         }
@@ -953,6 +1174,53 @@ mod tests {
         // Minting overrides both, because it is about who rather than what.
         assert!(describe_control(2, true).contains("can mint"));
         assert!(describe_control(2, false).contains("can mint"));
+    }
+
+    #[test]
+    fn per_reserve_values_land_on_the_reserve_they_name() {
+        let names = ["VRSCTEST", "TST", "SILQ"];
+        // Given out of order and with a gap: the middle reserve gets nothing,
+        // and the two that were named get their own amounts. Positional
+        // vectors are how an amount ends up against the wrong currency, and
+        // this is the shape that would do it.
+        let got = per_reserve(
+            &["SILQ:7".to_string(), "VRSCTEST:1".to_string()],
+            &names,
+            "contribute",
+        )
+        .expect("valid");
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0].to_sat(), 100_000_000);
+        assert_eq!(got[1], Amount::ZERO);
+        assert_eq!(got[2].to_sat(), 700_000_000);
+    }
+
+    #[test]
+    fn nothing_given_stays_empty_rather_than_becoming_zeroes() {
+        // An empty vector and a zero-filled one of the right length are
+        // different statements, and only the first is what a caller who said
+        // nothing meant.
+        assert!(per_reserve(&[], &["VRSCTEST"], "contribute")
+            .expect("valid")
+            .is_empty());
+    }
+
+    #[test]
+    fn a_per_reserve_value_for_something_that_is_not_a_reserve_is_refused() {
+        assert!(per_reserve(&["SILQ:7".to_string()], &["VRSCTEST"], "contribute").is_err());
+        assert!(per_reserve(&["VRSCTEST".to_string()], &["VRSCTEST"], "contribute").is_err());
+        // The `@` form is how identities are written everywhere else here, so
+        // it has to match a bare reserve name.
+        assert!(per_reserve(&["VRSCTEST@:7".to_string()], &["VRSCTEST"], "contribute").is_ok());
+    }
+
+    #[test]
+    fn percentages_round_trip_through_the_scaling_consensus_stores() {
+        // 10% is 0.1 of one whole, which is 10_000_000 satoshi-scaled.
+        assert_eq!(percent("10", "x").expect("valid"), 10_000_000);
+        assert_eq!(percent("2.5", "x").expect("valid"), 2_500_000);
+        assert_eq!(scaled_percent(10_000_000), "10%");
+        assert_eq!(scaled_percent(2_500_000), "2.5%");
     }
 
     #[test]

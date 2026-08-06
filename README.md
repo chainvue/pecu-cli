@@ -71,7 +71,7 @@ before blaming the command — `cargo run` is usually what you are measuring.
 | `pecu id show\|register` | Read an identity; register one (two-phase, resumable) | ✅ done |
 | `pecu id update\|revoke\|recover\|unlock` | The rest of the lifecycle, including timelocks | ✅ done |
 | `pecu id login\|publish\|read` | Sign-in with VerusID, and VDXF data | M8 |
-| `pecu currency show\|launch` | Read a currency definition; launch a token or a fractional basket | ✅ done |
+| `pecu currency show\|launch` | Read a currency definition; launch a token, NFT or fractional basket | ✅ done |
 | `pecu completions <shell>` | Shell completion script | ✅ done |
 
 ### `pecu doctor`
@@ -807,9 +807,48 @@ zero on every reserve, and is refused.
 **`--mintable` and `--reserve` do not compose.** A basket mints and burns by
 conversion; `--mintable` is the token idea of an issuer topping up a supply.
 
-What is still absent: conversion rates, preconversion limits, prelaunch
-discounts and carveouts. Every basket on VRSCTEST leaves the first two at zero,
-which is what this writes.
+**The prelaunch economics, and the sub-identity policy.** All of it is per
+reserve, and all of it is keyed by the reserve's *name*:
+
+```sh
+pecu currency launch mybasket@ --from key --supply 100 \
+  --reserve VRSCTEST:60 --reserve TST:40 \
+  --contribute VRSCTEST:10 --contribute TST:5 \
+  --min-preconvert VRSCTEST:1 --max-preconvert VRSCTEST:1000 \
+  --prelaunch-discount 5 --prelaunch-carveout 10 \
+  --id-registration-fee 25 --id-referral-levels 2 --id-import-fee 0.02
+```
+
+```
+RESERVES
+                     60%  iJhCezBEx…f2yq  seeded 10.00000000  min 1.00000000  max 1000.00000000
+                     40%  iK2k8YH1j…bMqg  seeded 5.00000000
+  discount       5%  to anyone converting before launch
+  carveout       10%  of the launch, to this identity
+
+SUB-IDENTITIES
+  registration   25.00000000
+  referrals      2 levels  optional
+  import         0.02000000
+```
+
+**Keyed by name rather than by position, deliberately.** The definition stores
+these as vectors indexed by the reserve list, and `serialize_definition` refuses
+one whose *length* disagrees — but a vector of the right length in the wrong
+order is accepted, and prices the basket against the wrong currencies. Naming
+the reserve removes the possibility instead of checking for it, and a reserve
+you say nothing about gets zero rather than somebody else's number.
+
+`--id-referral-levels` sets the referral option bit on its own: consensus pays
+referrals only when the bit says to, so a level count without it publishes a
+policy that never applies.
+
+Everything above appears on the panel before you confirm, because none of it can
+be changed afterwards.
+
+Still absent: `notaries` and `min_notaries_confirm`, which only matter
+cross-chain, and `gateway_converter_issuance`, which belongs to the gateway case
+the SDK refuses outright.
 
 It costs `currencyregistrationfee`, 200 VRSCTEST at the time of writing, read
 from the parent's chain policy rather than assumed.
