@@ -175,10 +175,14 @@ fn supply_lands_where_the_chain_actually_reads_it() {
     let assertion = Command::cargo_bin("pecu")
         .expect("built")
         .env("PECU_HOME", &funded)
+        // `pecudepth2@` rather than `pecudepth3@`: the latter defined a
+        // currency at `2fecffbb…` and so can never define another, which
+        // refuses before this test reaches its question. A dry run consumes
+        // nothing, so the slot stays free for whoever wants it.
         .args([
             "currency",
             "launch",
-            "pecudepth3@",
+            "pecudepth2@",
             "--from",
             "faucet",
             "--supply",
@@ -193,10 +197,80 @@ fn supply_lands_where_the_chain_actually_reads_it() {
 
     assert_eq!(document["broadcast"], false);
     assert_eq!(document["supply"], 100_000_000_000_000u64);
+    // The currency's id is the defining identity's own i-address — this one is
+    // `pecudepth2@`'s, which is the whole of what "a currency is something an
+    // identity becomes" means in practice.
+    assert_eq!(
+        document["currency_id"],
+        "iSHPgvF7f4huHK5WZ52tURDkZxbkCvsYke"
+    );
+    assert_eq!(document["mintable"], false);
+}
+
+/// The one-way rule, and the advice that goes with it.
+///
+/// `pecudepth3@` defined a currency at `2fecffbb…`, so it can never define
+/// another. The refusal arrives as `FlowError::NotReady`, not `Content` —
+/// matching the wrong variant sent this to "run `pecu doctor`", which is wrong
+/// twice over: the node is fine and no retry helps.
+#[test]
+#[ignore = "talks to api.verustest.net"]
+fn an_identity_that_already_defines_a_currency_is_refused_by_name() {
+    let Ok(funded) = std::env::var("PECU_FUNDED_HOME") else {
+        eprintln!("PECU_FUNDED_HOME is not set — skipping");
+        return;
+    };
+
+    let assertion = Command::cargo_bin("pecu")
+        .expect("built")
+        .env("PECU_HOME", &funded)
+        .args([
+            "currency",
+            "launch",
+            "pecudepth3@",
+            "--from",
+            "faucet",
+            "--supply",
+            "5",
+            "--dry-run",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assertion.get_output().stderr).into_owned();
+
+    assert!(stderr.contains("already defines a currency"), "{stderr}");
+    assert!(stderr.contains("Register another"), "{stderr}");
+    assert!(
+        !stderr.contains("pecu doctor"),
+        "a one-way rule is not a node problem:\n{stderr}"
+    );
+}
+
+/// What this project launched, read back through its own command.
+#[test]
+#[ignore = "talks to api.verustest.net"]
+fn the_currency_this_project_launched_reads_back() {
+    let home = home();
+    let assertion = pecu(&home)
+        .args(["currency", "show", "pecudepth3@", "--json"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+    let document: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+
     // The currency's id is the defining identity's own i-address.
     assert_eq!(
         document["currency_id"],
         "i7kDJurgpZA63cjPTuyK49CeCKihB5ryDB"
     );
-    assert_eq!(document["mintable"], false);
+    assert_eq!(document["kinds"][0], "token");
+    // Decentralized: `--mintable` was not passed, so the supply is fixed.
+    assert_eq!(document["proof_protocol"], 1);
+
+    // The supply is the preallocation, which is the trap `--supply` exists to
+    // avoid: setting `initial_supply` here would have launched it empty.
+    let preallocations = document["definition"]["preallocations"]
+        .as_array()
+        .expect("preallocations");
+    assert_eq!(preallocations.len(), 1, "{document:#}");
 }

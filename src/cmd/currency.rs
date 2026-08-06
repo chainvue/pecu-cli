@@ -120,8 +120,10 @@ fn flow(what: &'static str, source: FlowError) -> CurrencyError {
              `pecu id register <name>`"
                 .to_string()
         }
-        // The one-way rule, and the commonest way to meet it.
-        FlowError::Content(message) if message.contains("already") => {
+        // The one-way rule, and the commonest way to meet it. `NotReady`, not
+        // `Content` — matching the wrong variant sent this to "run `pecu
+        // doctor`", which is wrong twice: the node is fine and no retry helps.
+        FlowError::NotReady(message) if message.contains("already") => {
             "an identity defines a currency once and never again. Register another identity \
              to define another currency"
                 .to_string()
@@ -234,12 +236,43 @@ pub fn show(ui: &Ui, settings: &Settings, name: &str) -> miette::Result<()> {
         return Ok(());
     }
 
-    ui.panel(&panel(ui, settings, &found));
+    ui.panel(&panel(ui, &node, &found));
     ui.explain_panel();
     Ok(())
 }
 
-fn panel(ui: &Ui, settings: &Settings, found: &CurrencySummary) -> Panel {
+/// Whether the currency has started, which decides whether its supply exists.
+///
+/// A launch names a future block, and until the chain reaches it the currency
+/// is defined but not live — its preallocations are not holdable yet, which is
+/// otherwise a confusing "I launched it and the balance is zero". The tip costs
+/// one request and is what makes the difference sayable.
+fn starts_row(ui: &Ui, node: &crate::node::Node, found: &CurrencySummary) -> Text {
+    let palette = ui.theme.palette;
+    let glyphs = ui.theme.glyphs;
+    let row = Text::of(
+        format!("block {}", fmt::height(found.start_block.into())),
+        palette.value,
+    );
+    match node.block_count() {
+        Ok(tip) if tip >= found.start_block => row
+            .push("  ", palette.muted)
+            .push(glyphs.ok, palette.ok)
+            .space()
+            .push("live", palette.ok),
+        Ok(tip) => row.push(
+            format!(
+                "  {} not yet — {} to go",
+                glyphs.warn,
+                fmt::plural((found.start_block - tip) as usize, "block", "blocks")
+            ),
+            palette.warn,
+        ),
+        Err(_) => row,
+    }
+}
+
+fn panel(ui: &Ui, node: &crate::node::Node, found: &CurrencySummary) -> Panel {
     let palette = ui.theme.palette;
     let glyphs = ui.theme.glyphs;
 
@@ -283,13 +316,7 @@ fn panel(ui: &Ui, settings: &Settings, found: &CurrencySummary) -> Panel {
             "control",
             Text::of(describe_control(found.proof_protocol), palette.value),
         )
-        .row(
-            "starts",
-            Text::of(
-                format!("block {}", fmt::height(found.start_block.into())),
-                palette.value,
-            ),
-        );
+        .row("starts", starts_row(ui, node, found));
     if found.end_block != 0 {
         panel = panel.row(
             "ends",
@@ -321,7 +348,13 @@ fn panel(ui: &Ui, settings: &Settings, found: &CurrencySummary) -> Panel {
                         "",
                         Text::of(format!("{amount}"), palette.value)
                             .space()
-                            .push(&settings.profile.currency, palette.muted)
+                            // The currency being defined, not the chain's own.
+                            // A preallocation of this token labelled VRSCTEST
+                            // reads as a million coins of the wrong thing.
+                            .push(
+                                fmt::untrusted(&found.name, NAME_BUDGET, glyphs.ellipsis),
+                                palette.muted,
+                            )
                             .push("  ", palette.muted)
                             .push(fmt::address(recipient, glyphs.ellipsis), palette.muted),
                     );
