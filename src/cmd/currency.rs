@@ -26,8 +26,8 @@
 
 use miette::Diagnostic;
 use thiserror::Error;
-use verus_sdk::currency::{option, CurrencyDefinition};
-use verus_sdk::money::Amount;
+use verus_sdk::currency::{option, CurrencyDefinition, CurrencyId};
+use verus_sdk::money::{Amount, SATS_PER_COIN as SATOSHIDEN};
 use verus_sdk::network::{prepare_launch, ChainReader, CurrencySummary, FlowError};
 use verus_sdk::verus_keys::{Address, AddressKind};
 
@@ -76,6 +76,27 @@ pub enum CurrencyError {
         help("a decimal number of coins, at most eight places")
     )]
     BadAmount { value: String },
+
+    #[error("`{value}` is not `currency:percent`")]
+    #[diagnostic(
+        code(pecu::bad_reserve),
+        help("a reserve is a currency and its share of the basket, as `VRSCTEST:25`. The shares must total exactly 100")
+    )]
+    BadReserve { value: String },
+
+    #[error("the reserve percentages total {total}%, not 100%")]
+    #[diagnostic(
+        code(pecu::weights_do_not_total),
+        help("a fractional basket's weights are its reserve ratios and consensus reads them as fractions of one whole. Anything else prices the basket wrongly, permanently and with no way to correct it")
+    )]
+    WeightsDoNotTotal { total: String },
+
+    #[error("a basket needs a supply to price against")]
+    #[diagnostic(
+        code(pecu::basket_needs_supply),
+        help("the pre-launch price of each reserve is derived from the initial supply, and a supply of zero makes every one of them zero. Pass --supply")
+    )]
+    BasketNeedsSupply,
 
     #[error("`{value}` is not `address:amount`")]
     #[diagnostic(
@@ -149,6 +170,64 @@ fn flow(what: &'static str, source: FlowError) -> CurrencyError {
     }
 }
 
+/// `NAME@:PERCENT` — a reserve currency and its share of the basket.
+///
+/// Percentages rather than the raw weights consensus stores, which are
+/// fractions of `SATOSHIDEN`. "25" is the number a person means; `25000000` is
+/// the number the chain holds, and asking for the second invites an
+/// off-by-a-factor that prices the basket wrongly forever.
+fn split_reserve(entry: &str) -> Result<(&str, i32), CurrencyError> {
+    let bad = || CurrencyError::BadReserve {
+        value: entry.to_string(),
+    };
+    let (name, percent) = entry.rsplit_once(':').ok_or_else(bad)?;
+
+    // A percentage of one whole, in satoshis: 25 becomes 0.25 * SATOSHIDEN.
+    let scaled = Amount::from_coins_str(percent).map_err(|_| bad())?;
+    // `i32` because that is what the definition holds. A weight over 100% is
+    // caught by the total check rather than here, where the message would be
+    // about a type.
+    let weight = i32::try_from(scaled.to_sat() / 100).map_err(|_| bad())?;
+    Ok((name, weight))
+}
+
+/// Resolve a reserve's name to the currency id the definition holds.
+///
+/// Separate from [`split_reserve`] so the syntax and the ratios can be checked
+/// with no node at all: a typo'd percentage should not need a reachable chain
+/// to be refused, and the total is what decides whether the basket is even
+/// coherent.
+fn resolve_reserve(
+    ui: &Ui,
+    node: &crate::node::Node,
+    name: &str,
+) -> Result<CurrencyId, miette::Report> {
+    let bad = || CurrencyError::BadReserve {
+        value: name.to_string(),
+    };
+    let id = match name.parse::<Address>() {
+        Ok(address) => CurrencyId::from_bytes(address.hash()),
+        Err(_) => {
+            let looked_up = name.strip_suffix('@').unwrap_or(name);
+            ui.sdk(format!("node.currency_definition({looked_up:?})"));
+            let found =
+                node.currency_definition(looked_up)
+                    .map_err(|_| CurrencyError::NotFound {
+                        name: name.to_string(),
+                    })?;
+            ui.sdk_result(found.currency_id.clone());
+            CurrencyId::from_bytes(
+                found
+                    .currency_id
+                    .parse::<Address>()
+                    .map_err(|_| bad())?
+                    .hash(),
+            )
+        }
+    };
+    Ok(id)
+}
+
 /// Everything the option bitfield says, in words.
 ///
 /// A currency's nature is in these bits and nowhere else — the name does not
@@ -181,12 +260,18 @@ fn describe_options(options: u32) -> Vec<&'static str> {
     found
 }
 
-/// Who may mint, which `proofprotocol` decides and nothing else reveals.
-fn describe_control(proof_protocol: u32) -> &'static str {
-    match proof_protocol {
-        1 => "decentralized — supply is fixed by the definition",
-        2 => "centralized — the defining identity can mint more",
-        3 => "notarized from another chain",
+/// Who may mint, and what that means for the supply.
+///
+/// `proofprotocol` decides who, but what it implies depends on the kind: a
+/// decentralized *token* has a supply fixed at definition, while a
+/// decentralized *basket* mints and burns continuously as reserves are
+/// converted in and out. Saying "fixed" about a basket would be plainly wrong.
+fn describe_control(proof_protocol: u32, fractional: bool) -> &'static str {
+    match (proof_protocol, fractional) {
+        (1, false) => "decentralized — supply is fixed by the definition",
+        (1, true) => "decentralized — supply moves as reserves convert in and out",
+        (2, _) => "centralized — the defining identity can mint more",
+        (3, _) => "notarized from another chain",
         _ => "unrecognised proof protocol",
     }
 }
@@ -230,7 +315,7 @@ pub fn show(ui: &Ui, settings: &Settings, name: &str) -> miette::Result<()> {
             // the bit values to use this.
             "kinds": describe_options(found.options),
             "proof_protocol": found.proof_protocol,
-            "control": describe_control(found.proof_protocol),
+            "control": describe_control(found.proof_protocol, found.options & option::FRACTIONAL != 0),
             "definition": found.definition,
         }));
         return Ok(());
@@ -314,7 +399,13 @@ fn panel(ui: &Ui, node: &crate::node::Node, found: &CurrencySummary) -> Panel {
     panel = panel
         .row(
             "control",
-            Text::of(describe_control(found.proof_protocol), palette.value),
+            Text::of(
+                describe_control(
+                    found.proof_protocol,
+                    found.options & option::FRACTIONAL != 0,
+                ),
+                palette.value,
+            ),
         )
         .row("starts", starts_row(ui, node, found));
     if found.end_block != 0 {
@@ -405,6 +496,45 @@ pub fn launch(
         }
     };
 
+    // The reserves decide what is being launched, and their syntax and ratios
+    // need no chain at all. Checked here so a typo'd percentage is refused
+    // without a reachable node, a keystore, or a passphrase — the ratios are
+    // also what decides whether the basket is coherent, and a wrong one prices
+    // it wrongly forever.
+    let mut names = Vec::with_capacity(args.reserve.len());
+    let mut weights = Vec::with_capacity(args.reserve.len());
+    for entry in &args.reserve {
+        let (name, weight) = split_reserve(entry)?;
+        names.push(name);
+        weights.push(weight);
+    }
+    let fractional = !names.is_empty();
+
+    if fractional {
+        // Summed as i64: a handful of i32 weights cannot overflow it, and a
+        // total that is wrong should read as wrong rather than wrap.
+        let total: i64 = weights.iter().map(|w| i64::from(*w)).sum();
+        if total != i64::try_from(SATOSHIDEN).unwrap_or(i64::MAX) {
+            return Err(CurrencyError::WeightsDoNotTotal {
+                // Back to the percentage the caller typed, not the fraction of
+                // SATOSHIDEN the chain stores: the message should name the
+                // number they wrote.
+                total: fmt::amount(Amount::from_sat(
+                    u64::try_from(total.saturating_mul(100)).unwrap_or(0),
+                ))
+                .trim_end_matches('0')
+                .trim_end_matches('.')
+                .to_string(),
+            }
+            .into());
+        }
+        // Every reserve price is `SATOSHIDEN^3 / (supply * weight)`, so a
+        // supply of zero makes all of them zero.
+        if supply.unwrap_or(Amount::ZERO) == Amount::ZERO {
+            return Err(CurrencyError::BasketNeedsSupply.into());
+        }
+    }
+
     let store = Keystore::new(&settings.paths);
     let envelope = choose_key(&store, args.from.as_deref())?;
     let node = node::connect(&settings.profile)?;
@@ -428,12 +558,18 @@ pub fn launch(
     // to notice a mistake before conversions open.
     let start_block = args.start_block.unwrap_or(tip + args.start_in);
 
-    // `--supply` is sugar for preallocating to the defining identity, and has
-    // to be: a token's supply is the **sum of its preallocations**, and
-    // `initial_supply` is read only for a fractional currency. Setting that
-    // field on a token produces one with no supply at all, which is what this
-    // flag would otherwise have done.
-    if let Some(amount) = supply {
+    // Names to ids, which is the only part that needs the chain.
+    let mut reserves = Vec::with_capacity(names.len());
+    for name in &names {
+        reserves.push(resolve_reserve(ui, &node, name)?);
+    }
+
+    // `--supply` is sugar for preallocating to the defining identity for a
+    // *token*, and has to be: a token's supply is the **sum of its
+    // preallocations**, and `initial_supply` is read only for a fractional
+    // currency. Setting that field on a token produces one with no supply.
+    // A basket is the other way round, and takes the field directly.
+    if let Some(amount) = supply.filter(|_| !fractional) {
         ui.sdk(format!("node.identity({:?})", args.name));
         let record = node
             .identity(&args.name)
@@ -455,6 +591,17 @@ pub fn launch(
     let bare = args.name.trim_end_matches('@');
     let mut definition = CurrencyDefinition::token(parent, bare, start_block.into());
     definition.preallocations = preallocations;
+    if fractional {
+        definition.options |= option::FRACTIONAL;
+        definition.initial_supply = supply.unwrap_or(Amount::ZERO);
+        definition.currencies = reserves;
+        definition.weights = weights;
+        // Left at zero, as every basket on this chain has them: conversions
+        // are pre-launch prices and contributions are what was put in before
+        // it opened, and neither is something to invent at definition time.
+        // `serialize_definition` refuses a vector whose length disagrees with
+        // the reserve list, so empty is the only safe "unset".
+    }
     if args.mintable {
         // `proofprotocol = 2` is what lets the defining identity mint more
         // later. It is not recoverable afterwards, so it is a flag rather than
@@ -584,7 +731,10 @@ fn launch_panel(
         .row(
             "control",
             Text::of(
-                describe_control(u32::try_from(definition.proof_protocol).unwrap_or(0)),
+                describe_control(
+                    u32::try_from(definition.proof_protocol).unwrap_or(0),
+                    definition.options & option::FRACTIONAL != 0,
+                ),
                 palette.value,
             ),
         )
@@ -602,6 +752,35 @@ fn launch_panel(
                 .push(currency, palette.muted),
         )
         .row("txid", Text::of(&outcome.txid, palette.value));
+
+    if !definition.currencies.is_empty() {
+        panel = panel
+            .row(
+                "supply",
+                Text::of(fmt::amount(definition.initial_supply), palette.accent)
+                    .push("  the reserves are priced against this", palette.muted),
+            )
+            .section("RESERVES");
+        for (id, weight) in definition.currencies.iter().zip(&definition.weights) {
+            panel = panel.row(
+                "",
+                // The percentage back, not the fraction of SATOSHIDEN stored:
+                // the reader typed one and should be able to check it.
+                Text::of(
+                    format!("{:>6}%", (*weight as f64) * 100.0 / SATOSHIDEN as f64),
+                    palette.value,
+                )
+                .push("  ", palette.muted)
+                .push(
+                    fmt::address(
+                        &Address::new(AddressKind::Identity, id.to_bytes()).to_string(),
+                        glyphs.ellipsis,
+                    ),
+                    palette.muted,
+                ),
+            );
+        }
+    }
 
     if !definition.preallocations.is_empty() {
         let total = definition
@@ -639,17 +818,23 @@ fn launch_panel(
              currency's id is the identity's own i-address",
             palette.warn,
         ))
-        .note(if args.mintable {
-            Text::of(
+        .note(match (args.mintable, !definition.currencies.is_empty()) {
+            (true, _) => Text::of(
                 "centralized: the identity can mint more afterwards. Holders are trusting it \
                  not to",
                 palette.warn,
-            )
-        } else {
-            Text::of(
+            ),
+            // A basket is decentralized *and* its supply moves — saying "fixed"
+            // here contradicted the control row two lines above it.
+            (false, true) => Text::of(
+                "the reserves and their ratios cannot be changed after this. A basket that \
+                 prices wrongly prices wrongly forever",
+                palette.warn,
+            ),
+            (false, false) => Text::of(
                 "decentralized: the supply is fixed by this definition and nobody can add to it",
                 palette.muted,
-            )
+            ),
         })
 }
 
@@ -713,7 +898,6 @@ fn emit(value: &serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verus_sdk::currency::CurrencyId;
 
     #[test]
     fn the_option_bitfield_reads_as_words() {
@@ -734,9 +918,9 @@ mod tests {
 
     #[test]
     fn who_may_mint_is_stated_rather_than_numbered() {
-        assert!(describe_control(1).contains("fixed"));
-        assert!(describe_control(2).contains("can mint"));
-        assert!(describe_control(99).contains("unrecognised"));
+        assert!(describe_control(1, false).contains("fixed"));
+        assert!(describe_control(2, false).contains("can mint"));
+        assert!(describe_control(99, false).contains("unrecognised"));
     }
 
     #[test]
@@ -756,6 +940,19 @@ mod tests {
         // Decentralized until asked otherwise: a fixed supply is the property
         // a holder can check, and `--mintable` is the deliberate opt-out.
         assert_eq!(definition.proof_protocol, 1);
+    }
+
+    #[test]
+    fn a_baskets_control_is_not_described_as_a_fixed_supply() {
+        // The same `proofprotocol` means different things either side of
+        // FRACTIONAL: a token's supply is settled at definition, a basket's
+        // moves every time somebody converts.
+        assert!(describe_control(1, false).contains("fixed"));
+        assert!(describe_control(1, true).contains("moves"));
+        assert!(!describe_control(1, true).contains("fixed"));
+        // Minting overrides both, because it is about who rather than what.
+        assert!(describe_control(2, true).contains("can mint"));
+        assert!(describe_control(2, false).contains("can mint"));
     }
 
     #[test]

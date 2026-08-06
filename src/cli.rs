@@ -564,7 +564,12 @@ pub struct CurrencyLaunchArgs {
     #[arg(long, short = 'f', value_name = "LABEL")]
     pub from: Option<String>,
 
-    /// Supply that exists at launch, before preallocations
+    /// How much exists at launch.
+    ///
+    /// For a token this is preallocated to the defining identity, because a
+    /// token's supply *is* the sum of its preallocations. For a basket it is
+    /// the initial supply the reserves price against, which is a different
+    /// field entirely — the panel says which one it used
     #[arg(long, value_name = "COINS")]
     pub supply: Option<String>,
 
@@ -573,9 +578,15 @@ pub struct CurrencyLaunchArgs {
     #[arg(long, value_name = "i-ADDRESS:COINS")]
     pub preallocate: Vec<String>,
 
+    /// Back it with this reserve, as `NAME@:PERCENT`. Repeat for each one;
+    /// the percentages must total exactly 100. Giving any makes it a
+    /// fractional basket rather than a plain token
+    #[arg(long, value_name = "NAME@|i-ADDRESS:PERCENT")]
+    pub reserve: Vec<String>,
+
     /// Let the defining identity mint more later. Off by default: a fixed
     /// supply is the thing holders can verify, and this cannot be undone
-    #[arg(long)]
+    #[arg(long, conflicts_with = "reserve")]
     pub mintable: bool,
 
     /// The block conversions open at. Defaults to the tip plus --start-in

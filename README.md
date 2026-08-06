@@ -71,7 +71,7 @@ before blaming the command — `cargo run` is usually what you are measuring.
 | `pecu id show\|register` | Read an identity; register one (two-phase, resumable) | ✅ done |
 | `pecu id update\|revoke\|recover\|unlock` | The rest of the lifecycle, including timelocks | ✅ done |
 | `pecu id login\|publish\|read` | Sign-in with VerusID, and VDXF data | M8 |
-| `pecu currency show\|launch` | Read a currency definition; launch a token | ✅ done |
+| `pecu currency show\|launch` | Read a currency definition; launch a token or a fractional basket | ✅ done |
 | `pecu completions <shell>` | Shell completion script | ✅ done |
 
 ### `pecu doctor`
@@ -768,10 +768,48 @@ the substitution.
 identity mint more later. It cannot be undone, and a fixed supply is the
 property a holder can actually verify, so it is an opt-in.
 
-**Fractional baskets are deliberately absent.** Reserves, weights, conversion
-rates and preconversion limits are six vectors indexed by the same list — the
-SDK checks the lengths agree, but choosing the numbers is a design exercise
-rather than a set of flags, and half a basket is worse than none.
+**Fractional baskets** are reserve-backed: a share of each reserve, priced
+against an initial supply.
+
+```sh
+pecu currency launch mybasket@ --from key --supply 100 \
+  --reserve VRSCTEST:50 --reserve TST:50
+```
+
+```
+┌─ WOULD LAUNCH ───────────────────────────────────────────────────────┐
+│ identity      pecudepth2@                                            │
+│ currency id   iSHPgvF7f4huHK5WZ52tURDkZxbkCvsYke                     │
+│ kind          fractional basket, token                               │
+│ control       decentralized — supply moves as reserves convert in    │
+│               and out                                                │
+│ starts        block 1,178,783                                        │
+│ fee           200.00000000 VRSCTEST                                  │
+│ txid          731eaf355203611e3dd69488ed6b4c535ac1d5d629c0585e0ea274 │
+│               699653a090                                             │
+│ supply        100.00000000  the reserves are priced against this     │
+├─ RESERVES ───────────────────────────────────────────────────────────┤
+│                 62.5%  iJhCezBEx…f2yq                                │
+│                 37.5%  iK2k8YH1j…bMqg                                │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+Percentages, not the raw weights consensus stores — those are fractions of
+`SATOSHIDEN`, and asking for `25000000` instead of `25` invites an
+off-by-a-factor that prices the basket wrongly forever. They must total exactly
+100, checked before a node is reached or a key unlocked.
+
+**A basket reads `--supply` from a different field than a token does.** A
+token's supply is the sum of its preallocations; a basket's is `initial_supply`,
+which every reserve price divides by — so a basket without one gets a price of
+zero on every reserve, and is refused.
+
+**`--mintable` and `--reserve` do not compose.** A basket mints and burns by
+conversion; `--mintable` is the token idea of an issuer topping up a supply.
+
+What is still absent: conversion rates, preconversion limits, prelaunch
+discounts and carveouts. Every basket on VRSCTEST leaves the first two at zero,
+which is what this writes.
 
 It costs `currencyregistrationfee`, 200 VRSCTEST at the time of writing, read
 from the parent's chain policy rather than assumed.

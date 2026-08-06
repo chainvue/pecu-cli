@@ -274,3 +274,141 @@ fn the_currency_this_project_launched_reads_back() {
         .expect("preallocations");
     assert_eq!(preallocations.len(), 1, "{document:#}");
 }
+
+/// A basket's weights are its reserve ratios, and consensus reads them as
+/// fractions of one whole. Anything else prices it wrongly, permanently.
+#[test]
+fn reserve_percentages_that_do_not_total_a_hundred_are_refused_before_the_passphrase() {
+    let home = home();
+    generate(&home, "demo");
+    pecu(&home)
+        .env_remove("PECU_PASSPHRASE")
+        .args([
+            "currency",
+            "launch",
+            "alice@",
+            "--supply",
+            "100",
+            "--reserve",
+            "VRSCTEST:30",
+            "--reserve",
+            "TST:30",
+            "--node",
+            DEAD_NODE,
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("total 60%"))
+        .stderr(contains("passphrase").not());
+}
+
+#[test]
+fn a_reserve_without_a_percentage_is_refused() {
+    let home = home();
+    generate(&home, "demo");
+    pecu(&home)
+        .args([
+            "currency",
+            "launch",
+            "alice@",
+            "--supply",
+            "100",
+            "--reserve",
+            "VRSCTEST",
+            "--node",
+            DEAD_NODE,
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("is not `currency:percent`"));
+}
+
+#[test]
+fn a_basket_cannot_also_be_mintable() {
+    let home = home();
+    generate(&home, "demo");
+    // A basket mints and burns by conversion; `--mintable` is the token idea
+    // of an issuer topping up the supply, and the two do not compose.
+    pecu(&home)
+        .args([
+            "currency",
+            "launch",
+            "alice@",
+            "--reserve",
+            "VRSCTEST:100",
+            "--mintable",
+            "--node",
+            DEAD_NODE,
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("cannot be used with"));
+}
+
+/// A basket prices every reserve from the initial supply, so a supply of zero
+/// makes every price zero.
+#[test]
+#[ignore = "talks to api.verustest.net"]
+fn a_basket_without_a_supply_is_refused() {
+    let Ok(funded) = std::env::var("PECU_FUNDED_HOME") else {
+        eprintln!("PECU_FUNDED_HOME is not set — skipping");
+        return;
+    };
+    Command::cargo_bin("pecu")
+        .expect("built")
+        .env("PECU_HOME", &funded)
+        .args([
+            "currency",
+            "launch",
+            "pecudepth2@",
+            "--from",
+            "faucet",
+            "--reserve",
+            "VRSCTEST:100",
+            "--dry-run",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("needs a supply"));
+}
+
+/// The reserves round-trip: a percentage in is the same percentage back, and
+/// the definition carries FRACTIONAL alongside TOKEN.
+#[test]
+#[ignore = "talks to api.verustest.net"]
+fn an_uneven_basket_keeps_its_ratios_exactly() {
+    let Ok(funded) = std::env::var("PECU_FUNDED_HOME") else {
+        eprintln!("PECU_FUNDED_HOME is not set — skipping");
+        return;
+    };
+    let assertion = Command::cargo_bin("pecu")
+        .expect("built")
+        .env("PECU_HOME", &funded)
+        .args([
+            "currency",
+            "launch",
+            "pecudepth2@",
+            "--from",
+            "faucet",
+            "--supply",
+            "100",
+            "--reserve",
+            "VRSCTEST:62.5",
+            "--reserve",
+            "TST:37.5",
+            "--dry-run",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+
+    assert!(stdout.contains("fractional basket"), "{stdout}");
+    assert!(stdout.contains("62.5%"), "{stdout}");
+    assert!(stdout.contains("37.5%"), "{stdout}");
+    // A basket's supply is not fixed, and the panel must not say it is.
+    assert!(stdout.contains("moves as reserves convert"), "{stdout}");
+    assert!(
+        !stdout.contains("supply is fixed"),
+        "the panel contradicts itself:\n{stdout}"
+    );
+}
