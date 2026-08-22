@@ -26,12 +26,18 @@
 
 use miette::Diagnostic;
 use thiserror::Error;
+use verus_sdk::convert::ConversionKind;
 use verus_sdk::currency::{option, CurrencyDefinition, CurrencyId};
 use verus_sdk::money::{Amount, SATS_PER_COIN as SATOSHIDEN};
-use verus_sdk::network::{prepare_launch, ChainReader, CurrencySummary, FlowError};
+use verus_sdk::network::{
+    plan_conversion, prepare_conversion, prepare_launch, prepare_mint, spendable, ChainReader,
+    CurrencySummary, FlowError,
+};
 use verus_sdk::verus_keys::{Address, AddressKind};
 
-use crate::cli::{CurrencyLaunchArgs, Globals};
+use crate::cli::{
+    CurrencyConvertArgs, CurrencyLaunchArgs, CurrencyMintArgs, CurrencyPreconvertArgs, Globals,
+};
 use crate::config::Settings;
 use crate::keystore::{self, Envelope, Keystore};
 use crate::node;
@@ -42,6 +48,13 @@ const NAME_BUDGET: usize = 40;
 
 #[derive(Debug, Error, Diagnostic)]
 pub enum CurrencyError {
+    #[error("`{name}@` is an identity, but it has not defined a currency")]
+    #[diagnostic(
+        code(pecu::not_a_currency_yet),
+        help("every identity starts this way — a currency is something an identity becomes, and `pecu currency launch {name}@` is what makes it one. `pecu id show {name}@` reads the identity itself")
+    )]
+    NotACurrencyYet { name: String },
+
     #[error("nothing on this chain is called `{name}`")]
     #[diagnostic(
         code(pecu::no_such_currency),
@@ -141,6 +154,146 @@ pub enum CurrencyError {
     #[diagnostic(code(pecu::cancelled), help("nothing was broadcast"))]
     Cancelled,
 
+    #[error("--{what} names some reserves but not `{reserve}`, which caps it at zero")]
+    #[diagnostic(
+        code(pecu::reserve_capped_at_zero),
+        help("a cap of zero means nothing is accepted into that reserve, not that it is unlimited — and a fractional basket refunds the entire launch unless every reserve receives a contribution. So this definition cannot launch, and it cannot be changed once it is on chain. Name every reserve, or name none: an omitted vector is never consulted and leaves them all uncapped")
+    )]
+    ReserveCappedAtZero { reserve: String, what: &'static str },
+
+    #[error("that is more than `{name}` accepts into `{spend}`")]
+    #[diagnostic(
+        code(pecu::over_the_preconvert_cap),
+        help("the cap is {cap} and {already} is already in, leaving room for {room}. Consensus refunds a contribution over the cap **whole** rather than trimming it to fit, so this would land as nothing — and a fractional basket refunds the entire launch unless every reserve receives something, so an oversized contribution can lose everyone else's too. Send {room} or less")
+    )]
+    OverThePreconvertCap {
+        spend: String,
+        name: String,
+        cap: String,
+        already: String,
+        room: String,
+    },
+
+    #[error("`{name}` accepts nothing into `{spend}`")]
+    #[diagnostic(
+        code(pecu::reserve_accepts_nothing),
+        help("that reserve's maxpreconversion is zero, so consensus refunds every contribution to it rather than refusing them — the money would leave, wait for the import, and come back. The definition is on chain and cannot be changed, so this basket can only be funded through its other reserves, and a fractional basket that does not fund all of them refunds the whole launch")
+    )]
+    ReserveAcceptsNothing { spend: String, name: String },
+
+    #[error("neither `{spend}` nor `{into}` is a basket")]
+    #[diagnostic(
+        code(pecu::neither_is_a_basket),
+        help("a conversion needs a fractional basket somewhere: spend a reserve to get the basket, spend the basket to get a reserve, or pass --via <basket@> to go from one of its reserves to another")
+    )]
+    NeitherIsABasket { spend: String, into: String },
+
+    #[error("`{name}` launches at block {start_block}, and the tip is {tip}")]
+    #[diagnostic(
+        code(pecu::not_launched_yet),
+        help("a basket has no reserves to price against until it launches, so consensus refuses a conversion through it. Before the start block the thing that works is `pecu currency preconvert`, which buys at the launch price — the two are never both valid")
+    )]
+    NotLaunchedYet {
+        name: String,
+        start_block: u32,
+        tip: u32,
+    },
+
+    #[error("`{name}` refunded its launch and holds nothing")]
+    #[diagnostic(
+        code(pecu::launch_refunded),
+        help("its launch did not meet the conditions, so every contribution went back and the basket has no reserves — a fractional basket refunds unless each of its reserves receives one before the start block. The definition still reads as a currency, but nothing can be converted through it, ever")
+    )]
+    LaunchRefunded { name: String },
+
+    #[error("converting nothing is not a transaction")]
+    #[diagnostic(code(pecu::converts_nothing), help("--amount is how much to spend"))]
+    ConvertsNothing,
+
+    #[error("a conversion pays a transparent address, and `{value}` is not one")]
+    #[diagnostic(
+        code(pecu::convert_needs_r_address),
+        help("the destination is written as a bare key hash, so an identity here would pay the R-address with the same hash — one nobody holds a key to. Consensus supports paying an identity; the SDK cannot build it yet")
+    )]
+    ConvertNeedsTransparentRecipient { value: String },
+
+    #[error("`{name}` launched at block {start_block}, and the tip is {tip}")]
+    #[diagnostic(
+        code(pecu::already_launched),
+        help("a preconversion buys at the launch price and is only accepted before the start block. Afterwards the currency has reserves and an ordinary conversion is the thing that works — the two are never both valid")
+    )]
+    AlreadyLaunched {
+        name: String,
+        start_block: u32,
+        tip: u32,
+    },
+
+    #[error("`{spend}` is not one of `{name}`'s {reserves} reserves")]
+    #[diagnostic(
+        code(pecu::not_one_of_its_reserves),
+        help("a preconversion has to be paid in something the currency is actually backed by. Consensus refunds anything else rather than refusing it, so the mistake costs a wait — `pecu currency show` lists the reserves")
+    )]
+    NotOneOfItsReserves {
+        spend: String,
+        name: String,
+        reserves: usize,
+    },
+
+    #[error("no outputs at {address} carry `{spend}`")]
+    #[diagnostic(
+        code(pecu::no_token_to_spend),
+        help("the signing key holds none of that currency — `pecu wallet balance --key <label>` lists what it does hold")
+    )]
+    NoTokenToSpend { spend: String, address: String },
+
+    #[error("`{value}` is not an address")]
+    #[diagnostic(
+        code(pecu::not_an_address),
+        help("a transparent R-address, which is what a mint pays")
+    )]
+    NotAnAddress { value: String },
+
+    #[error("a mint pays a transparent address, and `{value}` is not one")]
+    #[diagnostic(
+        code(pecu::mint_needs_r_address),
+        help("the destination is written as a bare key hash, so an identity here would silently pay the R-address with the same hash — one nobody holds a key to. Consensus does support minting to an identity; the SDK cannot build it yet. Note that paying one of the identity's primary addresses is NOT equivalent: those tokens belong to whoever holds that key, not to the identity")
+    )]
+    MintNeedsTransparentRecipient { value: String },
+
+    #[error("minting nothing is not a transaction")]
+    #[diagnostic(
+        code(pecu::mints_nothing),
+        help("--amount is how much new supply to create")
+    )]
+    MintsNothing,
+
+    #[error("`{name}` is decentralized, so its supply is fixed")]
+    #[diagnostic(
+        code(pecu::not_centralized),
+        help("only a currency with `proofprotocol` 2 can mint, and that is decided once at launch by --mintable. There is no authority that could add to this one — which is the property its holders can verify")
+    )]
+    NotCentralized { name: String },
+
+    #[error("`{name}` is a fractional basket, and a basket is not minted")]
+    #[diagnostic(
+        code(pecu::cannot_mint_a_basket),
+        help("a basket's supply moves by conversion: it grows when reserves convert in and shrinks when they convert out. There is no issuer to mint it")
+    )]
+    CannotMintABasket { name: String },
+
+    #[error("consensus refused the NFT launch")]
+    #[diagnostic(
+        code(pecu::nft_unsupported),
+        help(
+            "this is an SDK gap, not a mistake in what you asked for. An identity with tokenized \
+              control carries a second destination on its recovery condition — the \
+              EVAL_IDENTITY_RECOVER contract key — and the SDK's identity output script does not \
+              emit it, so consensus derives a different script and refuses the transaction. \
+              Nothing was spent. Tracked upstream; every other currency kind launches"
+        )
+    )]
+    NftScriptGap,
+
     #[error("{what} failed")]
     #[diagnostic(code(pecu::flow_failed), help("{advice}"))]
     Flow {
@@ -151,9 +304,46 @@ pub enum CurrencyError {
     },
 }
 
+/// A launch refused at `bad-txns-failed-precheck` means something different when
+/// the definition is an NFT: the transaction the SDK builds cannot be accepted,
+/// however the flags are set. Saying so beats sending the user to `pecu doctor`
+/// for a node that is working perfectly.
+fn nft_aware(nft: bool, what: &'static str, source: FlowError) -> CurrencyError {
+    use verus_sdk::network::RpcError;
+    if nft {
+        if let FlowError::Rpc(RpcError::Node { code: -25, message }) = &source {
+            if message.contains("failed-precheck") {
+                return CurrencyError::NftScriptGap;
+            }
+        }
+    }
+    flow(what, source)
+}
+
 fn flow(what: &'static str, source: FlowError) -> CurrencyError {
+    use verus_sdk::network::RpcError;
     use verus_sdk::verus_tx::TxError;
     let advice = match &source {
+        // The defining identity has to exist before it can define anything, and
+        // the fix is one flag away. Sending this to `pecu doctor` blames a node
+        // that answered the question correctly.
+        FlowError::Rpc(RpcError::Node { code: -5, message }) if message.contains("Identity") => {
+            "a currency is defined by an identity, and that name is not on this chain yet. \
+             Add --register to create it first, for 100 VRSCTEST on top of the launch fee, or \
+             register it separately with `pecu id register <name>`"
+                .to_string()
+        }
+        // Coin selection reads confirmed outputs only, so a transaction sent
+        // moments ago has not removed the coins it spent from the candidate
+        // list. Tracked upstream; a block clears it.
+        FlowError::Rpc(RpcError::Node { code: -26, message })
+            if message.contains("inputs-spent") =>
+        {
+            "this picked coins that an earlier transaction of yours already spent — coin \
+             selection does not see the mempool yet, so two spends in quick succession can \
+             collide. Nothing was sent and nothing is lost: wait for a block and run it again"
+                .to_string()
+        }
         FlowError::NoSuchIdentity(_) => {
             "a currency is defined by an identity, and that identity has to exist first — \
              `pecu id register <name>`"
@@ -303,6 +493,28 @@ fn scaled_percent(scaled: u64) -> String {
     format!("{}%", percent.trim_end_matches('0').trim_end_matches('.'))
 }
 
+/// A reserve's share, to two decimals.
+///
+/// [`scaled_percent`] prints what consensus stores exactly, which is right for
+/// echoing back what a caller asked for — `62.5%` must not become `62.50%`. A
+/// *live* weight is a computed ratio, so it arrives as `33.333334%`, and six
+/// decimals of a number that drifts with every conversion is noise.
+fn weight_percent(scaled: u64) -> String {
+    // Nearest, not ceiling: 33.333334% is 33.33%, and rounding it up to 33.34%
+    // reports a share the chain does not hold.
+    let scale = u128::from(SATOSHIDEN);
+    let hundredths = (u128::from(scaled) * 10_000 + scale / 2) / scale;
+    let whole = hundredths / 100;
+    let rest = hundredths % 100;
+    if rest == 0 {
+        format!("{whole}%")
+    } else {
+        format!("{whole}.{rest:02}%")
+            .replace("0%", "%")
+            .replace(".%", "%")
+    }
+}
+
 /// A percentage as the satoshi-scaled fraction consensus stores.
 fn percent(value: &str, what: &'static str) -> Result<u64, CurrencyError> {
     let scaled = Amount::from_coins_str(value).map_err(|_| CurrencyError::BadPercent {
@@ -371,14 +583,7 @@ pub fn show(ui: &Ui, settings: &Settings, name: &str) -> miette::Result<()> {
     // command here takes the `@` form, because that is how a VerusID is
     // written. A currency name cannot contain `@`, so stripping one is always
     // safe and saves the reader from knowing which command wants which.
-    let looked_up = name.strip_suffix('@').unwrap_or(name);
-
-    ui.sdk(format!("node.currency_definition({looked_up:?})"));
-    let found = node
-        .currency_definition(looked_up)
-        .map_err(|_| CurrencyError::NotFound {
-            name: name.to_string(),
-        })?;
+    let found = read_currency(ui, &node, name)?;
     ui.sdk_result(format!(
         "CurrencySummary {{ {}, options: {} }}",
         found.currency_id, found.options
@@ -441,6 +646,93 @@ fn starts_row(ui: &Ui, node: &crate::node::Node, found: &CurrencySummary) -> Tex
     }
 }
 
+/// A coin amount out of the raw definition, in satoshis.
+///
+/// The daemon renders money as a JSON float, which is the one representation
+/// the SDK refuses to hold — so it is converted back at the boundary rather
+/// than carried around or printed as-is. `1e-08` and `1000000.0` are both
+/// exactly representable at this scale, and the round trip is well inside
+/// f64's 53 bits for any supply a chain can hold.
+fn coins_to_sat(value: &serde_json::Value) -> u64 {
+    let coins = value.as_f64().unwrap_or(0.0).max(0.0);
+    (coins * SATOSHIDEN as f64).round() as u64
+}
+
+fn definition_coins(found: &CurrencySummary, field: &str) -> u64 {
+    found.definition.get(field).map_or(0, coins_to_sat)
+}
+
+/// The first reserve a non-empty cap vector caps at zero.
+///
+/// Zero is "nothing accepted", not "no limit": consensus refunds anything over
+/// the cap, and once the vector exists at all a reserve nobody named is a zero
+/// rather than an absence. An empty vector is never consulted, so naming no
+/// reserves leaves every one of them uncapped — which is why this only looks at
+/// a vector that is already non-empty.
+fn capped_at_zero(caps: &[Amount]) -> Option<usize> {
+    caps.iter().position(|cap| *cap == Amount::ZERO)
+}
+
+/// Whether a basket refuses every contribution paid in `source`.
+///
+/// Same rule as [`capped_at_zero`], asked from the other side: at preconvert
+/// time the definition is already on chain, so the only useful question is
+/// whether this particular payment can land.
+fn reserve_accepts_nothing(reserves: &[String], caps: &[u64], source: &str) -> bool {
+    if caps.is_empty() {
+        return false;
+    }
+    reserves
+        .iter()
+        .position(|id| id == source)
+        .and_then(|index| caps.get(index).copied())
+        == Some(0)
+}
+
+/// How much more this reserve can take before the cap refunds a contribution,
+/// or `None` when no cap applies to it.
+///
+/// Consensus compares the **cumulative** total against the cap and refunds the
+/// whole transfer that crosses it — it does not trim to fit. So the useful
+/// question is not "is my amount under the cap" but "is what is already in,
+/// plus mine, under it".
+///
+/// `None` for an absent cap vector and for a cap of zero: the first means
+/// uncapped, and the second is a different refusal with a different
+/// explanation, handled before this is asked.
+fn cap_room(reserves: &[String], caps: &[u64], source: &str, already: u64) -> Option<u64> {
+    if caps.is_empty() {
+        return None;
+    }
+    let index = reserves.iter().position(|id| id == source)?;
+    let cap = caps.get(index).copied().filter(|cap| *cap != 0)?;
+    Some(cap.saturating_sub(already))
+}
+
+/// What a reserve has taken in so far, in satoshis.
+fn reserve_holds(found: &CurrencySummary, reserve: &str) -> u64 {
+    found
+        .definition
+        .get("bestcurrencystate")
+        .or_else(|| found.definition.get("lastconfirmedcurrencystate"))
+        .and_then(|state| state.get("currencies"))
+        .and_then(|legs| legs.get(reserve))
+        .and_then(|leg| leg.get("reservein"))
+        .map_or(0, coins_to_sat)
+}
+
+/// The reserve currency ids a definition carries, if any.
+fn target_currencies(found: &CurrencySummary) -> Option<Vec<String>> {
+    let list: Vec<String> = found
+        .definition
+        .get("currencies")?
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    (!list.is_empty()).then_some(list)
+}
+
 fn panel(ui: &Ui, node: &crate::node::Node, found: &CurrencySummary) -> Panel {
     let palette = ui.theme.palette;
     let glyphs = ui.theme.glyphs;
@@ -492,6 +784,39 @@ fn panel(ui: &Ui, node: &crate::node::Node, found: &CurrencySummary) -> Panel {
             ),
         )
         .row("starts", starts_row(ui, node, found));
+
+    // The *live* supply, not the one the definition was launched with. For a
+    // mintable currency those diverge the moment it mints, and the launch
+    // figure below is then the wrong answer to "how much of this exists".
+    // Already in the payload `currency_definition` returned — no extra request.
+    if let Some(supply) = found
+        .definition
+        .get("bestcurrencystate")
+        .or_else(|| found.definition.get("lastconfirmedcurrencystate"))
+        .and_then(|state| state.get("supply"))
+    {
+        let now = coins_to_sat(supply);
+        let at_launch = found
+            .definition
+            .get("preallocations")
+            .and_then(|v| v.as_array())
+            .map(|list| {
+                list.iter()
+                    .filter_map(serde_json::Value::as_object)
+                    .flat_map(|map| map.values())
+                    .map(coins_to_sat)
+                    .sum::<u64>()
+            })
+            .unwrap_or(0);
+        let mut row = Text::of(fmt::amount(Amount::from_sat(now)), palette.value);
+        if now != at_launch {
+            row = row.push(
+                format!("  {} at launch", fmt::amount(Amount::from_sat(at_launch))),
+                palette.muted,
+            );
+        }
+        panel = panel.row("supply", row);
+    }
     if found.end_block != 0 {
         panel = panel.row(
             "ends",
@@ -500,6 +825,158 @@ fn panel(ui: &Ui, node: &crate::node::Node, found: &CurrencySummary) -> Panel {
                 palette.value,
             ),
         );
+    }
+
+    // A basket's reserves, which are the whole of what backs it — and the only
+    // way to know what `preconvert --spend` will accept, since paying in
+    // anything else is refunded rather than refused. `currencynames` comes back
+    // in the same reply, so naming them costs no extra request.
+    if let Some(list) = target_currencies(found) {
+        panel = panel.section("RESERVES");
+        let names = found.definition.get("currencynames");
+        let weights: Vec<u64> = found
+            .definition
+            .get("weights")
+            .and_then(|v| v.as_array())
+            .map(|w| w.iter().map(coins_to_sat).collect())
+            .unwrap_or_default();
+
+        // Once a basket is live the state carries what it actually holds and
+        // what a unit costs in each reserve. Keyed by currency id rather than
+        // by position: `reservecurrencies` is not in the definition's order,
+        // and reading it positionally would price each reserve as its
+        // neighbour.
+        let live: std::collections::BTreeMap<String, &serde_json::Value> = found
+            .definition
+            .get("bestcurrencystate")
+            .or_else(|| found.definition.get("lastconfirmedcurrencystate"))
+            .and_then(|state| state.get("reservecurrencies"))
+            .and_then(|v| v.as_array())
+            .map(|list| {
+                list.iter()
+                    .filter_map(|leg| {
+                        leg.get("currencyid")
+                            .and_then(serde_json::Value::as_str)
+                            .map(|id| (id.to_string(), leg))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // So the amounts line up rather than stepping with the name lengths.
+        let widest = list
+            .iter()
+            .filter_map(|id| names.and_then(|map| map.get(id)))
+            .filter_map(serde_json::Value::as_str)
+            .map(|name| {
+                unicode_width::UnicodeWidthStr::width(
+                    fmt::untrusted(name, NAME_BUDGET, glyphs.ellipsis).as_str(),
+                )
+            })
+            .max()
+            .unwrap_or(0);
+
+        for (index, id) in list.iter().enumerate() {
+            let named = names
+                .and_then(|map| map.get(id))
+                .and_then(serde_json::Value::as_str);
+            let leg = live.get(id);
+
+            // The live weight when there is one: a basket's ratios drift from
+            // the definition as people convert, and the definition's figure is
+            // then the target rather than the truth.
+            let share = leg
+                .and_then(|leg| leg.get("weight"))
+                .map(coins_to_sat)
+                .or_else(|| weights.get(index).copied())
+                .filter(|scaled| *scaled != 0)
+                .map(weight_percent)
+                .unwrap_or_default();
+
+            let mut row = Text::of(share, palette.value);
+            if let Some(name) = named {
+                let shown = fmt::untrusted(name, NAME_BUDGET, glyphs.ellipsis);
+                let pad = " ".repeat(
+                    widest.saturating_sub(unicode_width::UnicodeWidthStr::width(shown.as_str())),
+                );
+                row = row
+                    .push("  ", palette.muted)
+                    .push(shown, palette.accent)
+                    .push(pad, palette.muted);
+            }
+            if let Some(leg) = leg {
+                let held = leg.get("reserves").map_or(0, coins_to_sat);
+                row = row.push(
+                    format!("  holds {}", fmt::amount(Amount::from_sat(held))),
+                    palette.muted,
+                );
+                // What one unit of the basket costs in this reserve — the
+                // number anyone asking "what is it worth" wants, and the one
+                // the panel had no answer for.
+                let price = leg.get("priceinreserve").map_or(0, coins_to_sat);
+                if price != 0 {
+                    row = row.push(
+                        format!(
+                            "  ·  1 {} = {}",
+                            fmt::untrusted(&found.name, NAME_BUDGET, glyphs.ellipsis),
+                            fmt::amount(Amount::from_sat(price))
+                        ),
+                        palette.value,
+                    );
+                }
+            } else {
+                row = row
+                    .push("  ", palette.muted)
+                    .push(fmt::address(id, glyphs.ellipsis), palette.muted);
+            }
+            panel = panel.row("", row);
+        }
+    }
+
+    // The sub-identity policy: what registering a name under this currency
+    // costs, how deep referrals pay, and whether one is required at all. It is
+    // the whole point of a currency defined to govern registrations, and the
+    // launch panel already shows it — leaving it off `show` meant the one
+    // command for "what is this" could not answer the question it was made for.
+    let fee = definition_coins(found, "idregistrationfees");
+    let levels = found
+        .definition
+        .get("idreferrallevels")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let import = definition_coins(found, "idimportfees");
+    if fee != 0 || levels != 0 || import != 0 {
+        panel = panel.section("SUB-IDENTITIES");
+        if fee != 0 {
+            panel = panel.row(
+                "registration",
+                Text::of(fmt::amount(Amount::from_sat(fee)), palette.value),
+            );
+        }
+        if levels != 0 {
+            panel = panel.row(
+                "referrals",
+                Text::of(
+                    fmt::plural(levels as usize, "level", "levels"),
+                    palette.value,
+                )
+                .push("  ", palette.muted)
+                .push(
+                    if found.options & option::ID_REFERRALREQUIRED != 0 {
+                        "and one is mandatory"
+                    } else {
+                        "optional"
+                    },
+                    palette.muted,
+                ),
+            );
+        }
+        if import != 0 {
+            panel = panel.row(
+                "import",
+                Text::of(fmt::amount(Amount::from_sat(import)), palette.value),
+            );
+        }
     }
 
     // Preallocations come from the raw definition: they are the supply that
@@ -512,16 +989,17 @@ fn panel(ui: &Ui, node: &crate::node::Node, found: &CurrencySummary) -> Panel {
     {
         if !list.is_empty() {
             panel = panel.section("PREALLOCATED");
-            let mut total = 0f64;
+            let mut total = 0u64;
             for entry in list {
                 let Some(map) = entry.as_object() else {
                     continue;
                 };
                 for (recipient, amount) in map {
-                    total += amount.as_f64().unwrap_or(0.0);
+                    let sats = coins_to_sat(amount);
+                    total += sats;
                     panel = panel.row(
                         "",
-                        Text::of(format!("{amount}"), palette.value)
+                        Text::of(fmt::amount(Amount::from_sat(sats)), palette.value)
                             .space()
                             // The currency being defined, not the chain's own.
                             // A preallocation of this token labelled VRSCTEST
@@ -536,7 +1014,10 @@ fn panel(ui: &Ui, node: &crate::node::Node, found: &CurrencySummary) -> Panel {
                 }
             }
             panel = panel.note(Text::of(
-                format!("{total} in total at launch"),
+                format!(
+                    "{} in total at launch",
+                    fmt::amount(Amount::from_sat(total))
+                ),
                 palette.muted,
             ));
         }
@@ -653,21 +1134,39 @@ pub fn launch(
     // preallocations**, and `initial_supply` is read only for a fractional
     // currency. Setting that field on a token produces one with no supply.
     // A basket is the other way round, and takes the field directly.
-    if let Some(amount) = supply.filter(|_| !fractional) {
+    // Needed by both the `--supply` sugar and `--nft`, so read once.
+    // Before anything reads the identity, since with --register there may not
+    // be one yet. A no-op when it already exists, so a re-run costs one lookup.
+    if args.register {
+        super::id::ensure_exists(
+            ui,
+            settings,
+            globals,
+            &node,
+            &args.name,
+            args.from.as_deref(),
+            args.register_timeout,
+        )?;
+    }
+
+    let defining = {
         ui.sdk(format!("node.identity({:?})", args.name));
         let record = node
             .identity(&args.name)
             .map_err(|source| flow("reading the defining identity", FlowError::Rpc(source)))?;
         ui.sdk_result(record.identity_address.clone());
-        let holder: Address =
-            record
-                .identity_address
-                .parse()
-                .map_err(|_| CurrencyError::NotFound {
-                    name: args.name.clone(),
-                })?;
+        record
+            .identity_address
+            .parse::<Address>()
+            .map_err(|_| CurrencyError::NotFound {
+                name: args.name.clone(),
+            })?
+            .hash()
+    };
+
+    if let Some(amount) = supply.filter(|_| !fractional) {
         preallocations.push(verus_sdk::currency::Preallocation {
-            recipient: holder.hash(),
+            recipient: defining,
             amount,
         });
     }
@@ -683,6 +1182,28 @@ pub fn launch(
         definition.conversions = per_reserve(&args.conversion, &names, "conversion")?;
         definition.min_preconversion = per_reserve(&args.min_preconvert, &names, "min-preconvert")?;
         definition.max_preconversion = per_reserve(&args.max_preconvert, &names, "max-preconvert")?;
+
+        // A basket that names --max-preconvert for some reserves and not others
+        // cannot launch, and this is the last moment anyone can say so: after
+        // the definition is on chain nothing about it can be changed.
+        //
+        // A cap of zero is not "no limit", it is "nothing accepted" — consensus
+        // refunds any contribution over the cap, and a missing entry is a zero
+        // rather than an absence once the vector exists at all. Meanwhile a
+        // fractional basket refunds the *whole launch* unless every one of its
+        // reserves receives something. So one unnamed reserve here is a launch
+        // that is already lost, 200 VRSCTEST included, and it fails silently
+        // hours later at the start block rather than now.
+        //
+        // Naming none of them is fine and common: an empty vector is never
+        // consulted, so every reserve is uncapped.
+        if let Some(starved) = capped_at_zero(&definition.max_preconversion) {
+            return Err(CurrencyError::ReserveCappedAtZero {
+                reserve: names[starved].to_string(),
+                what: "max-preconvert",
+            }
+            .into());
+        }
 
         let contributions = per_reserve(&args.contribute, &names, "contribute")?;
         if !contributions.is_empty() {
@@ -738,6 +1259,25 @@ pub fn launch(
         // whoever holds the token controls the identity, and the revocation
         // and recovery authorities stop deciding.
         definition.options |= option::NFT_TOKEN;
+
+        // One satoshi, which is the whole of what makes it non-fungible.
+        definition.preallocations = vec![verus_sdk::currency::Preallocation {
+            recipient: defining,
+            amount: Amount::from_sat(1),
+        }];
+
+        // An NFT is a *currency-mapped* token, not a bare one: it carries the
+        // parent in `currencies` while leaving FRACTIONAL clear. Every NFT on
+        // VRSCTEST looks like this, and without it consensus refuses the whole
+        // transaction as `bad-txns-failed-precheck` — a precheck naming neither
+        // the field nor what it wanted.
+        //
+        // The per-reserve vectors go alongside at the same length, since
+        // `serialize_definition` takes zero or one entry per currency.
+        definition.currencies = vec![parent];
+        definition.conversions = vec![Amount::ZERO];
+        definition.max_preconversion = vec![Amount::ZERO];
+        definition = definition.with_contributions(vec![Amount::ZERO]);
     }
     if args.id_restricted {
         definition.options |= option::ID_RESTRICTED;
@@ -755,14 +1295,33 @@ pub fn launch(
         definition.proof_protocol = 2;
     }
 
+    // An NFT does not cost what a currency costs. The parent's
+    // `currencyregistrationfee` — 200 native, which is what the flow reads when
+    // nothing is pinned — is the price of a token or a basket; an NFT is
+    // charged the parent's `idimportfees` instead, 0.02 on VRSCTEST. Paying the
+    // wrong one builds a definition consensus refuses as
+    // `bad-txns-failed-precheck`, naming neither the fee nor the amount.
+    let pinned_fee = if args.nft {
+        let parent_name = Address::new(AddressKind::Identity, parent.to_bytes()).to_string();
+        ui.sdk(format!("node.currency({parent_name:?}).id_import_fee"));
+        let fee = node
+            .currency(&parent_name)
+            .map_err(|source| flow("reading the parent's fee policy", FlowError::Rpc(source)))?
+            .id_import_fee;
+        ui.sdk_result(fmt::amount(fee));
+        Some(fee)
+    } else {
+        None
+    };
+
     let secret = keystore::passphrase(&format!("passphrase for `{}`", envelope.label), false)?;
     let key = envelope.unlock(&secret)?;
 
     ui.sdk(format!(
-        "verus_sdk::network::prepare_launch(&node, &[&key], {:?}, &definition, None)",
-        args.name
+        "verus_sdk::network::prepare_launch(&node, &[&key], {:?}, &definition, {:?})",
+        args.name, pinned_fee
     ));
-    let unsent = prepare_launch(&node, &[&key], &args.name, &definition, None)
+    let unsent = prepare_launch(&node, &[&key], &args.name, &definition, pinned_fee)
         .map_err(|source| flow("building the launch", source))?;
     ui.sdk_result(format!(
         "Unsent<Launched> {{ txid: {}, fee: {} }}",
@@ -800,7 +1359,7 @@ pub fn launch(
         ui.sdk("unsent.broadcast(&node)");
         let done = unsent
             .broadcast(&node)
-            .map_err(|source| flow("broadcasting the launch", source))?;
+            .map_err(|source| nft_aware(args.nft, "broadcasting the launch", source))?;
         emit(&serde_json::json!({
             "identity": args.name,
             "currency_id": Address::new(AddressKind::Identity, done.currency_id).to_string(),
@@ -826,7 +1385,7 @@ pub fn launch(
     ui.sdk("unsent.broadcast(&node)");
     let done = unsent
         .broadcast(&node)
-        .map_err(|source| flow("broadcasting the launch", source))?;
+        .map_err(|source| nft_aware(args.nft, "broadcasting the launch", source))?;
     ui.sdk_result(format!("Launched {{ txid: {} }}", done.txid));
 
     ui.blank();
@@ -1126,9 +1685,1327 @@ fn emit(value: &serde_json::Value) {
     );
 }
 
+/// `pecu currency mint`.
+///
+/// # Why minting is a property of the identity, not of the token
+///
+/// A centralized currency is one whose `proofprotocol` is 2 — `CHAINID` — and
+/// that single number is the whole permission system. Consensus accepts new
+/// supply only from a transaction that **spends an output the controlling
+/// identity holds**, and the controlling identity is the currency: same
+/// i-address. So a mint is not "call mint on the token", it is "prove you are
+/// the identity by spending its coins".
+///
+/// That has a consequence worth stating before a user meets it as a rejection:
+/// **the identity pays, not the signing key.** A wallet with a well-funded key
+/// and an empty identity cannot mint. `pecu send --to <name@>` is the fix, and
+/// the error below says so rather than reporting an empty balance.
+pub fn mint(
+    ui: &Ui,
+    settings: &Settings,
+    globals: &Globals,
+    args: &CurrencyMintArgs,
+) -> miette::Result<()> {
+    if !settings.profile.allow_spend {
+        return Err(CurrencyError::SpendingDisabled {
+            profile: settings.profile.name.clone(),
+        }
+        .into());
+    }
+
+    // Parsed before a node is asked or a passphrase prompted: a typo'd amount
+    // should not cost a round trip, and it certainly should not cost a
+    // passphrase.
+    let amount = Amount::from_coins_str(&args.amount).map_err(|_| CurrencyError::BadAmount {
+        value: args.amount.clone(),
+    })?;
+    if amount == Amount::ZERO {
+        return Err(CurrencyError::MintsNothing.into());
+    }
+    let fee = Amount::from_coins_str(&args.fee).map_err(|_| CurrencyError::BadAmount {
+        value: args.fee.clone(),
+    })?;
+
+    // The SDK refuses a non-R recipient, and it is right to: the destination is
+    // written as a bare key hash, so an i-address would silently pay the
+    // R-address with the same hash — an address nobody holds the key to. Caught
+    // here so the message can name the flag rather than the field.
+    // A VerusID name is the likeliest wrong answer here, and it does not parse
+    // as an address at all — so it has to be recognised as a name rather than
+    // falling through to "that is not an address", which is true but unhelpful.
+    let looks_like_an_identity = args.to.ends_with('@') || args.to.contains('.');
+    let wrong_kind = CurrencyError::MintNeedsTransparentRecipient {
+        value: args.to.clone(),
+    };
+    match args.to.parse::<Address>() {
+        Ok(recipient) if recipient.kind() == AddressKind::PubKeyHash => {}
+        Ok(_) => return Err(wrong_kind.into()),
+        Err(_) if looks_like_an_identity => return Err(wrong_kind.into()),
+        Err(_) => {
+            return Err(CurrencyError::NotAnAddress {
+                value: args.to.clone(),
+            }
+            .into())
+        }
+    }
+
+    let node = node::connect(&settings.profile)?;
+    let looked_up = args.currency.strip_suffix('@').unwrap_or(&args.currency);
+    ui.sdk(format!("node.currency_definition({looked_up:?})"));
+    let found = node
+        .currency_definition(looked_up)
+        .map_err(|_| CurrencyError::NotFound {
+            name: args.currency.clone(),
+        })?;
+    ui.sdk_result(format!(
+        "CurrencySummary {{ {}, proof_protocol: {} }}",
+        found.currency_id, found.proof_protocol
+    ));
+
+    // Both refusals are local and permanent — no key, no node round, no
+    // "try again". A decentralized token's supply is fixed by its definition
+    // and there is no authority that could add to it.
+    if found.options & option::FRACTIONAL != 0 {
+        return Err(CurrencyError::CannotMintABasket {
+            name: found.name.clone(),
+        }
+        .into());
+    }
+    if found.proof_protocol != 2 {
+        return Err(CurrencyError::NotCentralized {
+            name: found.name.clone(),
+        }
+        .into());
+    }
+
+    let store = Keystore::new(&settings.paths);
+    let envelope = choose_key(&store, args.from.as_deref())?;
+    let secret = keystore::passphrase(&format!("passphrase for `{}`", envelope.label), false)?;
+    let key = envelope.unlock(&secret)?;
+
+    // The i-address, not the name: `identity_held` parses this as an address to
+    // build the pay-to-identity script it looks for, and a `name@` does not
+    // parse.
+    ui.sdk(format!(
+        "verus_sdk::network::prepare_mint(&node, &key, {:?}, {}, {:?}, {})",
+        found.currency_id,
+        amount.to_sat(),
+        args.to,
+        fee.to_sat()
+    ));
+    let unsent = prepare_mint(&node, &key, &found.currency_id, amount, &args.to, fee)
+        .map_err(|source| mint_flow(&found.name, source))?;
+    ui.sdk_result(format!("Unsent<Sent> {{ txid: {} }}", unsent.txid));
+
+    let review = mint_panel(
+        ui,
+        &found,
+        amount,
+        &args.to,
+        &envelope,
+        fee,
+        &unsent.txid,
+        globals.dry_run,
+    );
+
+    if ui.is_json() {
+        let document = serde_json::json!({
+            "currency": found.name,
+            "currency_id": found.currency_id,
+            "amount": amount.to_sat(),
+            "to": args.to,
+            "fee": fee.to_sat(),
+            "txid": unsent.txid,
+            "broadcast": false,
+        });
+        if globals.dry_run {
+            emit(&document);
+            return Ok(());
+        }
+        if !globals.yes {
+            return Err(CurrencyError::NeedsYes.into());
+        }
+        ui.sdk("unsent.broadcast(&node)");
+        let done = unsent
+            .broadcast(&node)
+            .map_err(|source| mint_flow(&found.name, source))?;
+        emit(&serde_json::json!({
+            "currency": found.name,
+            "currency_id": found.currency_id,
+            "amount": amount.to_sat(),
+            "to": args.to,
+            "fee": done.fee.to_sat(),
+            "txid": done.txid,
+            "broadcast": true,
+        }));
+        return Ok(());
+    }
+
+    ui.panel(&review);
+    if globals.dry_run {
+        ui.blank();
+        ui.note("nothing was sent. Drop --dry-run to mint it");
+        ui.explain_panel();
+        return Ok(());
+    }
+    if !globals.yes {
+        confirm(ui)?;
+    }
+
+    ui.sdk("unsent.broadcast(&node)");
+    let done = unsent
+        .broadcast(&node)
+        .map_err(|source| mint_flow(&found.name, source))?;
+    ui.blank();
+    ui.ok(format!("minted — txid {}", done.txid));
+    ui.note(format!("https://testex.verus.io/tx/{}", done.txid));
+    ui.explain_panel();
+    Ok(())
+}
+
+/// The prechecks `prepare_mint` makes are the chain's, and every one of them
+/// has a specific thing the user should do next. Sending any of them to
+/// `pecu doctor` would be wrong twice: the node is fine, and no retry helps.
+fn mint_flow(name: &str, source: FlowError) -> CurrencyError {
+    use verus_sdk::verus_tx::TxError;
+    let advice = match &source {
+        // The commonest failure by far, and the least guessable: the signing
+        // key's balance is irrelevant, because a mint is authorised by what the
+        // *identity* spends.
+        FlowError::NotReady(message) if message.contains("no spendable outputs") => format!(
+            "a mint is paid for by the identity, not by the signing key — consensus accepts new \
+             supply only from a transaction that spends what the identity holds. Send it some \
+             native coins first: `pecu send --to {name}@ --amount 1`"
+        ),
+        FlowError::Tx(TxError::NotAPrimaryAddress { .. }) => format!(
+            "the signing key must be one of {name}@'s primary addresses — `pecu id show {name}@` \
+             lists them, and --from picks which stored key signs"
+        ),
+        FlowError::Tx(TxError::AlreadyRevoked) => format!(
+            "{name}@ is revoked, and a revoked identity mints nothing. Recover it first — \
+             `pecu id recover {name}@`"
+        ),
+        FlowError::Tx(TxError::NotEnoughSigners { required, .. }) => format!(
+            "{name}@ needs {required} signatures and this signs with one. Multi-signature \
+             minting is not wired up here yet"
+        ),
+        FlowError::NoSuchIdentity(_) => format!(
+            "a currency is controlled by the identity that defined it, and nothing on this chain \
+             is called {name}@"
+        ),
+        _ => "run `pecu doctor`, or point somewhere else with --node".to_string(),
+    };
+    CurrencyError::Flow {
+        what: "minting",
+        advice,
+        source: Box::new(source),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mint_panel(
+    ui: &Ui,
+    found: &CurrencySummary,
+    amount: Amount,
+    to: &str,
+    envelope: &Envelope,
+    fee: Amount,
+    txid: &str,
+    dry_run: bool,
+) -> Panel {
+    let palette = ui.theme.palette;
+    let glyphs = ui.theme.glyphs;
+
+    Panel::new(if dry_run { "WOULD MINT" } else { "MINT" })
+        .row(
+            "currency",
+            Text::of(
+                fmt::untrusted(&found.fully_qualified_name, NAME_BUDGET, glyphs.ellipsis),
+                palette.accent,
+            ),
+        )
+        .row("currency id", Text::of(&found.currency_id, palette.value))
+        .row(
+            "amount",
+            Text::of(fmt::amount(amount), palette.accent)
+                .push("  new supply, created by this", palette.muted),
+        )
+        .row("to", Text::of(to, palette.value))
+        // Named separately from the signer because they are different things
+        // and the difference is the one that trips people: the identity's coins
+        // pay, the key merely proves it may.
+        .row(
+            "paid by",
+            Text::of(
+                fmt::untrusted(&found.name, NAME_BUDGET, glyphs.ellipsis),
+                palette.value,
+            )
+            .push("  the identity's own coins, not the key's", palette.muted),
+        )
+        .row(
+            "signed by",
+            Text::of(&envelope.label, palette.value)
+                .push("  ", palette.muted)
+                .push(
+                    fmt::address(&envelope.address, glyphs.ellipsis),
+                    palette.muted,
+                ),
+        )
+        .row("fee", Text::of(fmt::amount(fee), palette.value))
+        .row("txid", Text::of(txid, palette.muted))
+        .note(Text::of(
+            "this currency is centralized — its supply is whatever its identity decides, and \
+             every holder is trusting that",
+            palette.muted,
+        ))
+}
+
+/// `pecu currency preconvert`.
+///
+/// # Buying something that does not exist yet
+///
+/// A preconversion is not a purchase at a price. A launching currency has no
+/// reserves, so there is nothing to price against: what you receive is decided
+/// **at launch**, from the final ratio of everyone's contributions together.
+/// Convert twice with identical arguments a day apart and the two can pay out
+/// differently, because other people contributed in between.
+///
+/// Two consequences the panel has to state rather than imply:
+///
+/// * **There is no estimate, and no slippage floor.** The SDK refuses a
+///   `min_expected` here by name, because a floor could only be checked against
+///   a number nobody produced. Anything this printed as "you will receive"
+///   would be invented.
+/// * **A failed launch refunds you.** If the currency misses its
+///   `min_preconversion` by its start block, every contribution goes back —
+///   which is what makes contributing early safe, and why the refund address
+///   matters more here than anywhere else.
+///
+/// Preconvert and convert are not interchangeable at any height: before the
+/// start block a plain conversion is refused for want of reserves, and after it
+/// a preconversion is refused in turn.
+pub fn preconvert(
+    ui: &Ui,
+    settings: &Settings,
+    globals: &Globals,
+    args: &CurrencyPreconvertArgs,
+) -> miette::Result<()> {
+    if !settings.profile.allow_spend {
+        return Err(CurrencyError::SpendingDisabled {
+            profile: settings.profile.name.clone(),
+        }
+        .into());
+    }
+
+    let amount = Amount::from_coins_str(&args.amount).map_err(|_| CurrencyError::BadAmount {
+        value: args.amount.clone(),
+    })?;
+    if amount == Amount::ZERO {
+        return Err(CurrencyError::ConvertsNothing.into());
+    }
+    let fee = Amount::from_coins_str(&args.fee).map_err(|_| CurrencyError::BadAmount {
+        value: args.fee.clone(),
+    })?;
+
+    let store = Keystore::new(&settings.paths);
+    let envelope = choose_key(&store, args.from.as_deref())?;
+
+    // Defaults to the paying key, which is what somebody buying for themselves
+    // wants. Checked whether given or defaulted: the SDK writes the recipient
+    // as a bare key hash, so an identity would pay the R-form of the same bytes.
+    let recipient = args.to.clone().unwrap_or_else(|| envelope.address.clone());
+    let looks_like_an_identity = recipient.ends_with('@') || recipient.contains('.');
+    let wrong_kind = CurrencyError::ConvertNeedsTransparentRecipient {
+        value: recipient.clone(),
+    };
+    match recipient.parse::<Address>() {
+        Ok(parsed) if parsed.kind() == AddressKind::PubKeyHash => {}
+        Ok(_) => return Err(wrong_kind.into()),
+        Err(_) if looks_like_an_identity => return Err(wrong_kind.into()),
+        Err(_) => {
+            return Err(CurrencyError::NotAnAddress {
+                value: recipient.clone(),
+            }
+            .into())
+        }
+    }
+
+    let node = node::connect(&settings.profile)?;
+    let target = read_currency(ui, &node, &args.currency)?;
+    ui.sdk_result(format!(
+        "CurrencySummary {{ {}, start_block: {} }}",
+        target.currency_id, target.start_block
+    ));
+
+    // The rule that decides which of the two commands is even legal, so it is
+    // worth answering locally with the block number rather than letting the
+    // chain refuse anonymously.
+    ui.sdk("node.block_count()");
+    let tip = node
+        .block_count()
+        .map_err(|source| flow("reading the tip", FlowError::Rpc(source)))?;
+    ui.sdk_result(tip.to_string());
+    if u64::from(target.start_block) <= u64::from(tip) {
+        return Err(CurrencyError::AlreadyLaunched {
+            name: target.name.clone(),
+            start_block: target.start_block,
+            tip,
+        }
+        .into());
+    }
+
+    // What is being spent, and whether it is even one of this currency's
+    // reserves. Consensus refunds a preconversion in a currency the target does
+    // not hold, which costs a round trip and a wait to discover.
+    let spend = match &args.spend {
+        Some(name) => name.clone(),
+        None => settings.profile.currency.clone(),
+    };
+    let source_id = resolve_reserve(ui, &node, &spend)?;
+    let reserves: Vec<String> = target
+        .definition
+        .get("currencies")
+        .and_then(|v| v.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let source_text = Address::new(AddressKind::Identity, source_id.to_bytes()).to_string();
+    if !reserves.is_empty() && !reserves.contains(&source_text) {
+        return Err(CurrencyError::NotOneOfItsReserves {
+            spend: spend.clone(),
+            name: target.name.clone(),
+            reserves: reserves.len(),
+        }
+        .into());
+    }
+
+    // A cap of zero on this reserve means every satoshi sent here comes back.
+    // Consensus refunds rather than refuses, so without this the money leaves,
+    // sits until the import, and returns — with nothing said in between.
+    let caps: Vec<u64> = target
+        .definition
+        .get("maxpreconversion")
+        .and_then(|v| v.as_array())
+        .map(|list| list.iter().map(coins_to_sat).collect())
+        .unwrap_or_default();
+    if reserve_accepts_nothing(&reserves, &caps, &source_text) {
+        return Err(CurrencyError::ReserveAcceptsNothing {
+            spend: spend.clone(),
+            name: target.name.clone(),
+        }
+        .into());
+    }
+
+    // Over the cap is refunded **whole**, not trimmed. Send 100 against a cap
+    // of 50 and the leg ends with nothing in it — and a fractional basket
+    // refunds the entire launch unless every reserve receives something, so one
+    // oversized contribution loses everyone's.
+    //
+    // Best effort by nature: the cap is on the cumulative total, and another
+    // contribution already in flight is invisible here. Catching the case where
+    // the arithmetic is plainly wrong is still worth far more than it costs.
+    let already = reserve_holds(&target, &source_text);
+    if let Some(room) = cap_room(&reserves, &caps, &source_text, already) {
+        if amount.to_sat() > room {
+            let cap = caps[reserves
+                .iter()
+                .position(|id| *id == source_text)
+                .unwrap_or(0)];
+            return Err(CurrencyError::OverThePreconvertCap {
+                spend: spend.clone(),
+                name: target.name.clone(),
+                cap: fmt::amount(Amount::from_sat(cap)),
+                already: fmt::amount(Amount::from_sat(already)),
+                room: fmt::amount(Amount::from_sat(room)),
+            }
+            .into());
+        }
+    }
+
+    let secret = keystore::passphrase(&format!("passphrase for `{}`", envelope.label), false)?;
+    let key = envelope.unlock(&secret)?;
+
+    // Empty when spending the chain's own currency; otherwise every output
+    // carrying the token, since each is spent whole and the surplus returns as
+    // change. A token left out is a token destroyed.
+    let token_funding = if source_id == native_currency_id(&node, ui)? {
+        Vec::new()
+    } else {
+        ui.sdk(format!(
+            "verus_sdk::network::spendable(&node, {:?})",
+            envelope.address
+        ));
+        let funding = spendable(&node, &envelope.address)
+            .map_err(|source| flow("reading the address's outputs", source))?;
+        let held = super::send::carrying(&funding.other, source_id);
+        if held.is_empty() {
+            return Err(CurrencyError::NoTokenToSpend {
+                spend: spend.clone(),
+                address: envelope.address.clone(),
+            }
+            .into());
+        }
+        ui.sdk_result(format!("{} output(s) carrying {}", held.len(), spend));
+        held
+    };
+
+    ui.sdk(format!(
+        "verus_sdk::network::prepare_conversion(&node, &key, {source_text:?}, {}, \
+         ConversionKind::Preconvert {{ fractional: {} }}, {recipient:?}, {}, None, &funding)",
+        amount.to_sat(),
+        target.currency_id,
+        fee.to_sat()
+    ));
+    let unsent = prepare_conversion(
+        &node,
+        &key,
+        // The i-address, not the name the user typed: `currency_of` parses this
+        // as an address, so `VRSCTEST` reaches it as a failed base58 decode
+        // rather than as the chain's own currency.
+        &source_text,
+        amount,
+        // `None` for the floor, and not by omission: a pre-launch currency has
+        // no market, so the SDK refuses a `min_expected` here rather than check
+        // one against a fabricated estimate.
+        ConversionKind::Preconvert {
+            fractional: CurrencyId::from_bytes(
+                target
+                    .currency_id
+                    .parse::<Address>()
+                    .map_err(|_| CurrencyError::NotFound {
+                        name: args.currency.clone(),
+                    })?
+                    .hash(),
+            ),
+        },
+        &recipient,
+        fee,
+        None,
+        &token_funding,
+    )
+    .map_err(|source| convert_flow(&target.name, source))?;
+    ui.sdk_result(format!("Unsent<Sent> {{ txid: {} }}", unsent.txid));
+
+    let review = preconvert_panel(
+        ui,
+        &target,
+        &spend,
+        &source_text,
+        amount,
+        &recipient,
+        &envelope,
+        fee,
+        &unsent.txid,
+        tip,
+        globals.dry_run,
+    );
+
+    if ui.is_json() {
+        let document = serde_json::json!({
+            "currency": target.name,
+            "currency_id": target.currency_id,
+            "spend": spend,
+            "amount": amount.to_sat(),
+            "to": recipient,
+            "fee": fee.to_sat(),
+            "start_block": target.start_block,
+            "txid": unsent.txid,
+            "broadcast": false,
+        });
+        if globals.dry_run {
+            emit(&document);
+            return Ok(());
+        }
+        if !globals.yes {
+            return Err(CurrencyError::NeedsYes.into());
+        }
+        ui.sdk("unsent.broadcast(&node)");
+        let done = unsent
+            .broadcast(&node)
+            .map_err(|source| convert_flow(&target.name, source))?;
+        emit(&serde_json::json!({
+            "currency": target.name,
+            "currency_id": target.currency_id,
+            "spend": spend,
+            "amount": amount.to_sat(),
+            "to": recipient,
+            "fee": done.fee.to_sat(),
+            "start_block": target.start_block,
+            "txid": done.txid,
+            "broadcast": true,
+        }));
+        return Ok(());
+    }
+
+    ui.panel(&review);
+    if globals.dry_run {
+        ui.blank();
+        ui.note("nothing was sent. Drop --dry-run to preconvert");
+        ui.explain_panel();
+        return Ok(());
+    }
+    if !globals.yes {
+        confirm(ui)?;
+    }
+
+    ui.sdk("unsent.broadcast(&node)");
+    let done = unsent
+        .broadcast(&node)
+        .map_err(|source| convert_flow(&target.name, source))?;
+    ui.blank();
+    ui.ok(format!("preconverted — txid {}", done.txid));
+    ui.note(format!(
+        "what this pays out is settled at block {}",
+        fmt::height(target.start_block.into())
+    ));
+    ui.note(format!("https://testex.verus.io/tx/{}", done.txid));
+    ui.explain_panel();
+    Ok(())
+}
+
+/// The chain's own currency id, for deciding whether a source needs token
+/// funding at all.
+fn native_currency_id(node: &crate::node::Node, ui: &Ui) -> Result<CurrencyId, miette::Report> {
+    ui.sdk("node.chain_info().chain_id");
+    let info = node
+        .chain_info()
+        .map_err(|source| flow("reading the chain id", FlowError::Rpc(source)))?;
+    let address: Address = info.chain_id.parse().map_err(|_| CurrencyError::NotFound {
+        name: info.chain_id.clone(),
+    })?;
+    Ok(CurrencyId::from_bytes(address.hash()))
+}
+
+fn convert_flow(name: &str, source: FlowError) -> CurrencyError {
+    use verus_sdk::verus_tx::TxError;
+    let advice = match &source {
+        FlowError::Tx(TxError::InsufficientFunds { .. }) | FlowError::InsufficientFunds { .. } => {
+            "the amount, the reserve transfer fee and the miner fee all come from the signing \
+             key — `pecu wallet balance --key <label>` shows what it holds"
+                .to_string()
+        }
+        // The floor is a convert-only concept, and this is the one refusal here
+        // that a caller can act on directly.
+        FlowError::NotReady(message) if message.starts_with("the node expects") => {
+            "the node's estimate is below --min-out, so nothing was signed. A basket's price \
+             moves with every conversion that lands, so this can change on its own — lower the \
+             floor to accept the current price, or try again later"
+                .to_string()
+        }
+        FlowError::NotReady(message) if message.contains("floor") => {
+            "a preconversion has no price to check a floor against; this is a bug in pecu if you \
+             see it, since it never sets one"
+                .to_string()
+        }
+        _ => format!(
+            "what {name} pays out is decided by the chain, not here, so there is nothing to \
+             retry into a better answer. `pecu doctor` if the node itself looks wrong"
+        ),
+    };
+    CurrencyError::Flow {
+        what: "preconverting",
+        advice,
+        source: Box::new(source),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn preconvert_panel(
+    ui: &Ui,
+    target: &CurrencySummary,
+    spend: &str,
+    source_id: &str,
+    amount: Amount,
+    recipient: &str,
+    envelope: &Envelope,
+    fee: Amount,
+    txid: &str,
+    tip: u32,
+    dry_run: bool,
+) -> Panel {
+    let palette = ui.theme.palette;
+    let glyphs = ui.theme.glyphs;
+
+    let mut panel = Panel::new(if dry_run {
+        "WOULD PRECONVERT"
+    } else {
+        "PRECONVERT"
+    })
+    .row(
+        "into",
+        Text::of(
+            fmt::untrusted(&target.fully_qualified_name, NAME_BUDGET, glyphs.ellipsis),
+            palette.accent,
+        ),
+    )
+    .row("currency id", Text::of(&target.currency_id, palette.value))
+    .row(
+        "spending",
+        Text::of(fmt::amount(amount), palette.accent)
+            .push("  ", palette.muted)
+            .push(
+                fmt::untrusted(spend, NAME_BUDGET, glyphs.ellipsis),
+                palette.muted,
+            ),
+    )
+    // No "you will receive" row, deliberately. There is no estimate to put in
+    // it, and inventing one is worse than leaving the question open.
+    .row(
+        "you receive",
+        Text::of("settled at launch", palette.warn).push(
+            "  from the final ratio of every contribution",
+            palette.muted,
+        ),
+    )
+    .row("to", Text::of(recipient, palette.value))
+    .row(
+        "launches",
+        Text::of(
+            format!("block {}", fmt::height(target.start_block.into())),
+            palette.value,
+        )
+        .push(
+            format!(
+                "  {} to go",
+                fmt::plural(
+                    u64::from(target.start_block).saturating_sub(u64::from(tip)) as usize,
+                    "block",
+                    "blocks"
+                )
+            ),
+            palette.muted,
+        ),
+    )
+    .row(
+        "signed by",
+        Text::of(&envelope.label, palette.value)
+            .push("  ", palette.muted)
+            .push(
+                fmt::address(&envelope.address, glyphs.ellipsis),
+                palette.muted,
+            ),
+    )
+    .row("fee", Text::of(fmt::amount(fee), palette.value))
+    .row("txid", Text::of(txid, palette.muted));
+
+    // Which legs are already funded, and which are not. A fractional basket
+    // refunds the *entire* launch unless every reserve receives something, so a
+    // reserve sitting at zero is the difference between this contribution
+    // working and coming back — and it is invisible unless something says so.
+    let state = target
+        .definition
+        .get("bestcurrencystate")
+        .or_else(|| target.definition.get("lastconfirmedcurrencystate"));
+    if let (Some(reserves), Some(legs)) = (
+        target_currencies(target),
+        state
+            .and_then(|s| s.get("currencies"))
+            .and_then(|c| c.as_object()),
+    ) {
+        let names = target.definition.get("currencynames");
+        let mut empty = Vec::new();
+        panel = panel.section("RESERVES SO FAR");
+        for id in &reserves {
+            let held = legs
+                .get(id)
+                .and_then(|leg| leg.get("reservein"))
+                .map_or(0, coins_to_sat);
+            let label = names
+                .and_then(|map| map.get(id))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(id);
+            if held == 0 {
+                empty.push(fmt::untrusted(label, NAME_BUDGET, glyphs.ellipsis));
+            }
+            panel = panel.row(
+                "",
+                Text::of(
+                    fmt::amount(Amount::from_sat(held)),
+                    if held == 0 {
+                        palette.warn
+                    } else {
+                        palette.value
+                    },
+                )
+                .push("  ", palette.muted)
+                .push(
+                    fmt::untrusted(label, NAME_BUDGET, glyphs.ellipsis),
+                    palette.muted,
+                ),
+            );
+        }
+        // Excludes the reserve this transaction funds: it is about to stop
+        // being empty, and warning about it would be noise.
+        let still_empty: Vec<_> = empty
+            .iter()
+            .filter(|label| label.as_str() != spend)
+            .cloned()
+            .collect();
+        if !still_empty.is_empty() {
+            panel = panel.note(Text::of(
+                format!(
+                    "nothing has gone into {} yet, and a basket refunds the whole launch unless                      every reserve receives something before its start block",
+                    still_empty.join(", ")
+                ),
+                palette.warn,
+            ));
+        }
+    }
+
+    // The floor the launch has to clear, and the ceiling past which a
+    // contribution comes back. Both are per reserve and both change what this
+    // transaction is worth, so they belong in front of the confirmation.
+    //
+    // For **this** reserve, not summed across all of them: the limits are
+    // enforced per reserve, so a total was a number consensus never compares
+    // anything against and read as headroom that does not exist.
+    let index = target_currencies(target)
+        .and_then(|ids| ids.iter().position(|id| id == source_id).map(|i| (ids, i)));
+    if let Some((_, index)) = index {
+        for (field, label) in [
+            ("minpreconversion", "this leg needs"),
+            ("maxpreconversion", "this leg accepts"),
+        ] {
+            let value = target
+                .definition
+                .get(field)
+                .and_then(|v| v.as_array())
+                .and_then(|list| list.get(index))
+                .map_or(0, coins_to_sat);
+            if value != 0 {
+                panel = panel.row(
+                    label,
+                    Text::of(fmt::amount(Amount::from_sat(value)), palette.value)
+                        .push(format!("  of {spend}"), palette.muted),
+                );
+            }
+        }
+    }
+
+    panel
+        .note(Text::of(
+            "if the launch misses its minimum, every contribution is refunded — including this \
+             one, to the paying key",
+            palette.muted,
+        ))
+        .note(Text::of(
+            "over the maximum is refunded too, rather than refused, so this can come back even \
+             if the launch succeeds",
+            palette.muted,
+        ))
+}
+
+/// `pecu currency convert`.
+///
+/// # Three shapes, one call
+///
+/// After a basket launches, value moves three ways and consensus writes all of
+/// them as the same `CReserveTransfer`, differing only in which currency each
+/// slot names:
+///
+/// * a reserve **into** the basket — `--spend VRSCTEST mybasket@`
+/// * the basket back **into** a reserve — `--spend mybasket@ VRSCTEST`
+/// * one reserve **through** the basket into another — `--via mybasket@`
+///
+/// Which one is meant is inferable from the definitions rather than something a
+/// caller should have to name, so it is inferred and then stated on the panel.
+/// Guessing silently would be worse than asking; saying which guess was made is
+/// better than both.
+///
+/// # Unlike a preconversion, this has a price
+///
+/// A launched basket has reserves, so the node can estimate. That is what makes
+/// `--min-out` meaningful here and impossible before launch — and the floor is
+/// checked **before signing and never again**: the chain does not enforce it, so
+/// if the price moves after broadcast the conversion still happens.
+pub fn convert(
+    ui: &Ui,
+    settings: &Settings,
+    globals: &Globals,
+    args: &CurrencyConvertArgs,
+) -> miette::Result<()> {
+    if !settings.profile.allow_spend {
+        return Err(CurrencyError::SpendingDisabled {
+            profile: settings.profile.name.clone(),
+        }
+        .into());
+    }
+
+    let amount = Amount::from_coins_str(&args.amount).map_err(|_| CurrencyError::BadAmount {
+        value: args.amount.clone(),
+    })?;
+    if amount == Amount::ZERO {
+        return Err(CurrencyError::ConvertsNothing.into());
+    }
+    let fee = Amount::from_coins_str(&args.fee).map_err(|_| CurrencyError::BadAmount {
+        value: args.fee.clone(),
+    })?;
+    let min_out = match &args.min_out {
+        None => None,
+        Some(value) => {
+            Some(
+                Amount::from_coins_str(value).map_err(|_| CurrencyError::BadAmount {
+                    value: value.clone(),
+                })?,
+            )
+        }
+    };
+
+    let store = Keystore::new(&settings.paths);
+    let envelope = choose_key(&store, args.from.as_deref())?;
+    let recipient = args.to.clone().unwrap_or_else(|| envelope.address.clone());
+    check_transparent(&recipient)?;
+
+    let node = node::connect(&settings.profile)?;
+    let target = read_currency(ui, &node, &args.currency)?;
+    let spend = match &args.spend {
+        Some(name) => name.clone(),
+        None => settings.profile.currency.clone(),
+    };
+    let source = read_currency(ui, &node, &spend)?;
+
+    // Which of the three shapes this is, and which currency is the basket doing
+    // the work — they are not the same for all three, and every check below is
+    // about the basket rather than about what the caller happened to name.
+    let (kind, basket) = match &args.via {
+        Some(via) => {
+            let routed = read_currency(ui, &node, via)?;
+            let kind = ConversionKind::ReserveToReserve {
+                via: currency_id_of(&routed)?,
+                target: currency_id_of(&target)?,
+            };
+            (kind, routed)
+        }
+        None if target.options & option::FRACTIONAL != 0 => (
+            ConversionKind::IntoFractional {
+                fractional: currency_id_of(&target)?,
+            },
+            target.clone(),
+        ),
+        None if source.options & option::FRACTIONAL != 0 => (
+            ConversionKind::IntoReserve {
+                reserve: currency_id_of(&target)?,
+            },
+            source.clone(),
+        ),
+        None => {
+            return Err(CurrencyError::NeitherIsABasket {
+                spend: source.name.clone(),
+                into: target.name.clone(),
+            }
+            .into())
+        }
+    };
+
+    // A basket that has not launched cannot be converted through — there are no
+    // reserves to price against, and consensus refuses. The mirror of the check
+    // `preconvert` makes, and the reason the two commands are never both valid.
+    ui.sdk("node.block_count()");
+    let tip = node
+        .block_count()
+        .map_err(|source| flow("reading the tip", FlowError::Rpc(source)))?;
+    ui.sdk_result(tip.to_string());
+    if u64::from(basket.start_block) > u64::from(tip) {
+        return Err(CurrencyError::NotLaunchedYet {
+            name: basket.name.clone(),
+            start_block: basket.start_block,
+            tip,
+        }
+        .into());
+    }
+
+    // A basket whose launch refunded holds nothing and never will. Its reserves
+    // read as a live definition, so without this the only signal is an estimate
+    // of zero — or a transfer that goes out and comes back.
+    if launch_refunded(&basket) {
+        return Err(CurrencyError::LaunchRefunded {
+            name: basket.name.clone(),
+        }
+        .into());
+    }
+
+    let secret = keystore::passphrase(&format!("passphrase for `{}`", envelope.label), false)?;
+    let key = envelope.unlock(&secret)?;
+
+    let source_id = currency_id_of(&source)?;
+    let source_text = Address::new(AddressKind::Identity, source_id.to_bytes()).to_string();
+    let native = native_currency_id(&node, ui)?;
+    let token_funding = if source_id == native {
+        Vec::new()
+    } else {
+        ui.sdk(format!(
+            "verus_sdk::network::spendable(&node, {:?})",
+            envelope.address
+        ));
+        let funding = spendable(&node, &envelope.address)
+            .map_err(|source| flow("reading the address's outputs", source))?;
+        let held = super::send::carrying(&funding.other, source_id);
+        if held.is_empty() {
+            return Err(CurrencyError::NoTokenToSpend {
+                spend: spend.clone(),
+                address: envelope.address.clone(),
+            }
+            .into());
+        }
+        ui.sdk_result(format!("{} output(s) carrying {}", held.len(), spend));
+        held
+    };
+
+    // Priced before it is built, so the panel can show what the node expects
+    // rather than only what is being spent. `prepare_conversion` plans again
+    // internally and checks the floor there; this is the same read, and the
+    // number a user is actually deciding on.
+    ui.sdk(format!(
+        "verus_sdk::network::plan_conversion(&node, {source_text:?}, {}, {kind:?}, ...)",
+        amount.to_sat()
+    ));
+    let plan = plan_conversion(
+        &node,
+        &source_text,
+        amount,
+        kind.clone(),
+        &recipient,
+        envelope
+            .address
+            .parse::<Address>()
+            .map_err(|_| CurrencyError::NotAnAddress {
+                value: envelope.address.clone(),
+            })?,
+        fee,
+        min_out,
+    )
+    .map_err(|source| convert_flow(&basket.name, source))?;
+    ui.sdk_result(format!("estimated_out {}", plan.estimated_out.to_sat()));
+
+    ui.sdk("verus_sdk::network::prepare_conversion(&node, &key, ...)");
+    let unsent = prepare_conversion(
+        &node,
+        &key,
+        &source_text,
+        amount,
+        kind,
+        &recipient,
+        fee,
+        min_out,
+        &token_funding,
+    )
+    .map_err(|source| convert_flow(&basket.name, source))?;
+    ui.sdk_result(format!("Unsent<Sent> {{ txid: {} }}", unsent.txid));
+
+    let review = convert_panel(
+        ui,
+        &ConvertReview {
+            target: &target,
+            source: &source,
+            basket: &basket,
+            routed: args.via.is_some(),
+            amount,
+            estimated_out: plan.estimated_out,
+            min_out,
+            recipient: &recipient,
+            envelope: &envelope,
+            fee,
+            txid: &unsent.txid,
+        },
+        globals.dry_run,
+    );
+
+    if ui.is_json() {
+        let document = serde_json::json!({
+            "into": target.name,
+            "into_id": target.currency_id,
+            "spend": source.name,
+            "via": args.via.as_ref().map(|_| basket.name.clone()),
+            "amount": amount.to_sat(),
+            "estimated_out": plan.estimated_out.to_sat(),
+            "min_out": min_out.map(Amount::to_sat),
+            "to": recipient,
+            "fee": fee.to_sat(),
+            "txid": unsent.txid,
+            "broadcast": false,
+        });
+        if globals.dry_run {
+            emit(&document);
+            return Ok(());
+        }
+        if !globals.yes {
+            return Err(CurrencyError::NeedsYes.into());
+        }
+        ui.sdk("unsent.broadcast(&node)");
+        let done = unsent
+            .broadcast(&node)
+            .map_err(|source| convert_flow(&basket.name, source))?;
+        emit(&serde_json::json!({
+            "into": target.name,
+            "into_id": target.currency_id,
+            "spend": source.name,
+            "via": args.via.as_ref().map(|_| basket.name.clone()),
+            "amount": amount.to_sat(),
+            "estimated_out": plan.estimated_out.to_sat(),
+            "min_out": min_out.map(Amount::to_sat),
+            "to": recipient,
+            "fee": done.fee.to_sat(),
+            "txid": done.txid,
+            "broadcast": true,
+        }));
+        return Ok(());
+    }
+
+    ui.panel(&review);
+    if globals.dry_run {
+        ui.blank();
+        ui.note("nothing was sent. Drop --dry-run to convert");
+        ui.explain_panel();
+        return Ok(());
+    }
+    if !globals.yes {
+        confirm(ui)?;
+    }
+
+    ui.sdk("unsent.broadcast(&node)");
+    let done = unsent
+        .broadcast(&node)
+        .map_err(|source| convert_flow(&basket.name, source))?;
+    ui.blank();
+    ui.ok(format!("converted — txid {}", done.txid));
+    ui.note(format!("https://testex.verus.io/tx/{}", done.txid));
+    ui.explain_panel();
+    Ok(())
+}
+
+/// Everything the convert panel renders, so the function does not take ten
+/// positional arguments that are easy to transpose.
+struct ConvertReview<'a> {
+    target: &'a CurrencySummary,
+    source: &'a CurrencySummary,
+    basket: &'a CurrencySummary,
+    routed: bool,
+    amount: Amount,
+    estimated_out: Amount,
+    min_out: Option<Amount>,
+    recipient: &'a str,
+    envelope: &'a Envelope,
+    fee: Amount,
+    txid: &'a str,
+}
+
+fn convert_panel(ui: &Ui, r: &ConvertReview, dry_run: bool) -> Panel {
+    let palette = ui.theme.palette;
+    let glyphs = ui.theme.glyphs;
+    let show = |name: &str| fmt::untrusted(name, NAME_BUDGET, glyphs.ellipsis);
+
+    let mut panel = Panel::new(if dry_run { "WOULD CONVERT" } else { "CONVERT" })
+        .row(
+            "spending",
+            Text::of(fmt::amount(r.amount), palette.accent)
+                .push("  ", palette.muted)
+                .push(show(&r.source.name), palette.muted),
+        )
+        .row(
+            "into",
+            Text::of(show(&r.target.name), palette.accent)
+                .push("  ", palette.muted)
+                .push(&r.target.currency_id, palette.muted),
+        );
+
+    if r.routed {
+        panel = panel.row(
+            "through",
+            Text::of(show(&r.basket.name), palette.value).push(
+                "  one reserve into another, priced by the basket",
+                palette.muted,
+            ),
+        );
+    }
+
+    panel = panel.row(
+        "you receive",
+        // The node's estimate, and it is only that: the price moves with every
+        // conversion that lands before this one.
+        Text::of(fmt::amount(r.estimated_out), palette.value)
+            .push("  estimated, not guaranteed", palette.muted),
+    );
+    if let Some(floor) = r.min_out {
+        panel = panel.row(
+            "at least",
+            Text::of(fmt::amount(floor), palette.value)
+                .push("  checked now, not by the chain", palette.muted),
+        );
+    }
+
+    panel
+        .row("to", Text::of(r.recipient, palette.value))
+        .row(
+            "signed by",
+            Text::of(&r.envelope.label, palette.value)
+                .push("  ", palette.muted)
+                .push(
+                    fmt::address(&r.envelope.address, glyphs.ellipsis),
+                    palette.muted,
+                ),
+        )
+        .row("fee", Text::of(fmt::amount(r.fee), palette.value))
+        .row("txid", Text::of(r.txid, palette.muted))
+        .note(Text::of(
+            "the price is whatever the basket's reserves make it when this lands, which is not \
+             necessarily what is shown above — --min-out refuses to sign below a floor, but no \
+             floor survives broadcast",
+            palette.muted,
+        ))
+}
+
+/// Whether a basket's launch refunded, leaving a definition that reads live and
+/// holds nothing.
+fn launch_refunded(found: &CurrencySummary) -> bool {
+    const FLAG_REFUNDING: u64 = 4;
+    found
+        .definition
+        .get("bestcurrencystate")
+        .or_else(|| found.definition.get("lastconfirmedcurrencystate"))
+        .and_then(|state| state.get("flags"))
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|flags| flags & FLAG_REFUNDING != 0)
+}
+
+fn currency_id_of(found: &CurrencySummary) -> Result<CurrencyId, CurrencyError> {
+    found
+        .currency_id
+        .parse::<Address>()
+        .map(|address| CurrencyId::from_bytes(address.hash()))
+        .map_err(|_| CurrencyError::NotFound {
+            name: found.currency_id.clone(),
+        })
+}
+
+fn read_currency(
+    ui: &Ui,
+    node: &crate::node::Node,
+    name: &str,
+) -> Result<CurrencySummary, CurrencyError> {
+    let looked_up = name.strip_suffix('@').unwrap_or(name);
+    ui.sdk(format!("node.currency_definition({looked_up:?})"));
+    match node.currency_definition(looked_up) {
+        Ok(found) => {
+            ui.sdk_result(found.currency_id.clone());
+            Ok(found)
+        }
+        // "Nothing on this chain is called that" is false, and misleading, when
+        // an identity of that name exists and simply has not defined a currency
+        // yet — which is the ordinary state of every identity, and exactly the
+        // moment somebody reaches for `currency launch`. Costs one request, on
+        // the failure path only.
+        Err(_) if node.identity(name).is_ok() => Err(CurrencyError::NotACurrencyYet {
+            name: name.trim_end_matches('@').to_string(),
+        }),
+        Err(_) => Err(CurrencyError::NotFound {
+            name: name.to_string(),
+        }),
+    }
+}
+
+/// The recipient rule shared by every conversion: a bare key hash on the wire,
+/// so an identity would pay the R-form of the same bytes.
+fn check_transparent(recipient: &str) -> Result<(), CurrencyError> {
+    let looks_like_an_identity = recipient.ends_with('@') || recipient.contains('.');
+    let wrong_kind = CurrencyError::ConvertNeedsTransparentRecipient {
+        value: recipient.to_string(),
+    };
+    match recipient.parse::<Address>() {
+        Ok(parsed) if parsed.kind() == AddressKind::PubKeyHash => Ok(()),
+        Ok(_) => Err(wrong_kind),
+        Err(_) if looks_like_an_identity => Err(wrong_kind),
+        Err(_) => Err(CurrencyError::NotAnAddress {
+            value: recipient.to_string(),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The trap that cost a second launch: 100 sent against a cap of 50 is
+    /// refunded **whole**, so the leg ends with nothing — and a basket refunds
+    /// the entire launch unless every reserve receives something.
+    #[test]
+    fn room_is_what_is_left_under_the_cap_not_the_cap() {
+        let reserves = vec!["iAAA".to_string(), "iBBB".to_string()];
+        // 50-satoshi cap, nothing in yet: room is 50, so 100 is refused.
+        assert_eq!(cap_room(&reserves, &[1000, 50], "iBBB", 0), Some(50));
+        // 30 already in leaves 20, even though the cap is still 50.
+        assert_eq!(cap_room(&reserves, &[1000, 50], "iBBB", 30), Some(20));
+    }
+
+    /// Already at or over the cap leaves no room, and must not underflow.
+    #[test]
+    fn a_full_reserve_has_no_room_left() {
+        let reserves = vec!["iAAA".to_string()];
+        assert_eq!(cap_room(&reserves, &[50], "iAAA", 50), Some(0));
+        assert_eq!(cap_room(&reserves, &[50], "iAAA", 90), Some(0));
+    }
+
+    /// No cap vector means uncapped; a zero cap is a different refusal handled
+    /// before this is reached. Neither is a room of zero.
+    #[test]
+    fn an_uncapped_reserve_has_no_ceiling_to_check() {
+        let reserves = vec!["iAAA".to_string()];
+        assert_eq!(cap_room(&reserves, &[], "iAAA", 0), None);
+        assert_eq!(cap_room(&reserves, &[0], "iAAA", 0), None);
+    }
+
+    /// A live weight is a computed ratio and arrives with six decimals; a
+    /// weight a caller typed must come back exactly as typed.
+    #[test]
+    fn a_live_weight_rounds_to_nearest_and_a_typed_one_survives() {
+        assert_eq!(weight_percent(33_333_334), "33.33%");
+        assert_eq!(weight_percent(33_333_333), "33.33%");
+        assert_eq!(weight_percent(62_500_000), "62.5%");
+        assert_eq!(weight_percent(50_000_000), "50%");
+        assert_eq!(weight_percent(100_000_000), "100%");
+        assert_eq!(weight_percent(5_000_000), "5%");
+    }
+
+    /// The rule that cost a real launch: `--max-preconvert VRSCTEST:1000` on a
+    /// two-reserve basket caps the other reserve at zero, nothing can be paid
+    /// into it, and a fractional basket refunds the whole launch unless every
+    /// reserve receives something.
+    #[test]
+    fn a_partly_named_cap_starves_the_reserves_nobody_named() {
+        let caps = vec![Amount::from_sat(100_000_000_000), Amount::ZERO];
+        assert_eq!(capped_at_zero(&caps), Some(1));
+    }
+
+    /// Naming none of them is the safe case and must stay allowed: an empty
+    /// vector is never consulted, so every reserve is uncapped.
+    #[test]
+    fn naming_no_caps_at_all_is_not_a_starved_reserve() {
+        assert_eq!(capped_at_zero(&[]), None);
+    }
+
+    #[test]
+    fn every_reserve_named_is_fine() {
+        let caps = vec![Amount::from_sat(1), Amount::from_sat(2)];
+        assert_eq!(capped_at_zero(&caps), None);
+    }
+
+    /// Asked from the paying side, once the definition is already on chain.
+    #[test]
+    fn a_reserve_capped_at_zero_accepts_nothing() {
+        let reserves = vec!["iAAA".to_string(), "iBBB".to_string()];
+        assert!(reserve_accepts_nothing(&reserves, &[1000, 0], "iBBB"));
+        assert!(!reserve_accepts_nothing(&reserves, &[1000, 0], "iAAA"));
+    }
+
+    /// No cap vector means no cap, not a cap of zero. Getting this backwards
+    /// would refuse every preconversion into an uncapped basket.
+    #[test]
+    fn an_absent_cap_vector_accepts_everything() {
+        let reserves = vec!["iAAA".to_string()];
+        assert!(!reserve_accepts_nothing(&reserves, &[], "iAAA"));
+    }
 
     #[test]
     fn the_option_bitfield_reads_as_words() {

@@ -400,6 +400,16 @@ pub struct IdRegisterArgs {
     /// A referrer, which reduces the fee
     #[arg(long, value_name = "NAME@")]
     pub referral: Option<String>,
+    /// Discard a saved reservation and claim the name from scratch
+    #[arg(long)]
+    pub restart: bool,
+    /// Stop after each step instead of waiting for the commitment to confirm
+    #[arg(long)]
+    pub no_wait: bool,
+
+    /// How long to wait for the commitment, in minutes
+    #[arg(long, value_name = "MINUTES", default_value_t = 20)]
+    pub timeout: u64,
 }
 
 #[derive(Debug, Subcommand)]
@@ -548,6 +558,97 @@ pub enum CurrencyCommand {
     /// Boxed because a full basket definition carries far more than a name, and
     /// an enum is as large as its largest variant.
     Launch(Box<CurrencyLaunchArgs>),
+    /// Create new supply of a centralized currency you control
+    Mint(CurrencyMintArgs),
+    /// Buy into a currency before it launches, at the launch price
+    Preconvert(CurrencyPreconvertArgs),
+    /// Convert between a basket and its reserves, or between two of its reserves
+    Convert(CurrencyConvertArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CurrencyConvertArgs {
+    /// What you want out: a name like `mybasket@`, or an i-address
+    #[arg(value_name = "NAME@|i-ADDRESS")]
+    pub currency: String,
+
+    /// How much to spend
+    #[arg(long, value_name = "COINS")]
+    pub amount: String,
+
+    /// What to spend. Defaults to the chain's own currency
+    #[arg(long, value_name = "NAME@|i-ADDRESS")]
+    pub spend: Option<String>,
+
+    /// The basket to route through, when converting one reserve into another
+    #[arg(long, value_name = "NAME@|i-ADDRESS")]
+    pub via: Option<String>,
+
+    /// Which stored key signs and pays
+    #[arg(short = 'f', long, value_name = "LABEL")]
+    pub from: Option<String>,
+
+    /// Who receives it. Defaults to the paying key
+    #[arg(long, value_name = "R-ADDRESS")]
+    pub to: Option<String>,
+
+    /// Refuse if the node's estimate is below this
+    #[arg(long, value_name = "COINS")]
+    pub min_out: Option<String>,
+
+    /// The reserve transfer fee, in native coins
+    #[arg(long, value_name = "COINS", default_value = "0.0002")]
+    pub fee: String,
+}
+
+#[derive(Debug, Args)]
+pub struct CurrencyPreconvertArgs {
+    /// The launching currency to buy: a name like `mybasket@`, or an i-address
+    #[arg(value_name = "NAME@|i-ADDRESS")]
+    pub currency: String,
+
+    /// How much to spend
+    #[arg(long, value_name = "COINS")]
+    pub amount: String,
+
+    /// What to spend. Defaults to the chain's own currency
+    #[arg(long, value_name = "NAME@|i-ADDRESS")]
+    pub spend: Option<String>,
+
+    /// Which stored key signs and pays
+    #[arg(short = 'f', long, value_name = "LABEL")]
+    pub from: Option<String>,
+
+    /// Who receives the new currency at launch. Defaults to the paying key
+    #[arg(long, value_name = "R-ADDRESS")]
+    pub to: Option<String>,
+
+    /// The reserve transfer fee, in native coins
+    #[arg(long, value_name = "COINS", default_value = "0.0002")]
+    pub fee: String,
+}
+
+#[derive(Debug, Args)]
+pub struct CurrencyMintArgs {
+    /// The currency to mint: a name like `mytoken@`, or an i-address
+    #[arg(value_name = "NAME@|i-ADDRESS")]
+    pub currency: String,
+
+    /// Who receives the new supply — a transparent R-address
+    #[arg(long, value_name = "R-ADDRESS")]
+    pub to: String,
+
+    /// How much new supply to create
+    #[arg(long, value_name = "COINS")]
+    pub amount: String,
+
+    /// Which stored key signs. Must be one of the defining identity's primaries
+    #[arg(short = 'f', long, value_name = "LABEL")]
+    pub from: Option<String>,
+
+    /// The reserve transfer fee, in native coins
+    #[arg(long, value_name = "COINS", default_value = "0.0002")]
+    pub fee: String,
 }
 
 /// Launching a token.
@@ -633,8 +734,11 @@ pub struct CurrencyLaunchArgs {
     #[arg(long, requires = "id_referral_levels")]
     pub id_referral_required: bool,
 
-    /// An NFT. Also hands control of the defining identity to the token
-    #[arg(long, conflicts_with = "reserve")]
+    /// An NFT: exactly one indivisible unit, held by the defining identity.
+    ///
+    /// Sets the supply itself — one satoshi, which is what makes it
+    /// non-fungible — so it cannot be combined with --supply
+    #[arg(long, conflicts_with_all = ["reserve", "supply", "preallocate", "mintable"])]
     pub nft: bool,
 
     /// Only identities may hold it
@@ -660,4 +764,11 @@ pub struct CurrencyLaunchArgs {
     /// How many blocks ahead to start, when --start-block is not given
     #[arg(long, value_name = "BLOCKS", default_value_t = 20)]
     pub start_in: u32,
+    /// Register the defining identity first if it does not exist yet
+    #[arg(long)]
+    pub register: bool,
+
+    /// How long to wait for that registration, in minutes
+    #[arg(long, value_name = "MINUTES", default_value_t = 20)]
+    pub register_timeout: u64,
 }

@@ -65,6 +65,13 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
                 CurrencyCommand::Launch(args) => {
                     currency::launch(&ui, &settings, &cli.globals, args)
                 }
+                CurrencyCommand::Mint(args) => currency::mint(&ui, &settings, &cli.globals, args),
+                CurrencyCommand::Preconvert(args) => {
+                    currency::preconvert(&ui, &settings, &cli.globals, args)
+                }
+                CurrencyCommand::Convert(args) => {
+                    currency::convert(&ui, &settings, &cli.globals, args)
+                }
             }
         }
 

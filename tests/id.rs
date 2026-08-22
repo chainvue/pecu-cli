@@ -108,7 +108,7 @@ fn a_saved_registration_is_picked_up_rather_than_started_again() {
     // It reached the *poll*, not the prepare: a fresh start would have failed
     // asking for a passphrase or checking whether the name is taken.
     assert!(
-        stderr.contains("checking the commitment"),
+        stderr.contains("waiting for the commitment") || stderr.contains("checking the commitment"),
         "did not resume the saved registration:\n{stderr}"
     );
 }
@@ -143,7 +143,7 @@ fn the_saved_registration_is_matched_case_insensitively() {
         .args(["id", "register", "Alice@", "--node", DEAD_NODE])
         .assert()
         .failure()
-        .stderr(contains("checking the commitment"));
+        .stderr(contains("the commitment"));
 }
 
 #[test]
@@ -508,7 +508,10 @@ fn resuming_a_registration_uses_the_key_it_was_told_to() {
         !stderr.contains("no obvious one"),
         "resuming ignored --from, so a paid commitment could not be claimed:\n{stderr}"
     );
-    assert!(stderr.contains("checking the commitment"), "{stderr}");
+    assert!(
+        stderr.contains("waiting for the commitment") || stderr.contains("checking the commitment"),
+        "{stderr}"
+    );
 }
 
 #[test]
@@ -558,3 +561,88 @@ fn a_taken_name_is_refused_before_a_passphrase_is_asked_for() {
 /// a fixture that fails to deserialise would make these tests pass for the wrong
 /// reason, by taking the corrupt-file path.
 const SAVED_REGISTRATION: &str = include_str!("../fixtures/pending-registration.json");
+
+/// A commitment carries the expiry height it was signed at, so one that never
+/// confirms becomes permanently unbroadcastable — and the saved file is still
+/// enough to wedge every later attempt at the name. `--restart` is the only way
+/// out, so it must discard the reservation even when what follows fails.
+///
+/// Offline: the node is dead, so registration cannot get past its first read.
+/// The reservation still has to be gone, because deleting it is the point.
+#[test]
+fn restart_discards_a_saved_reservation_it_cannot_use() {
+    let home = home();
+    generate(&home, "demo");
+
+    let pending = home.path().join("pending");
+    std::fs::create_dir_all(&pending).expect("a pending dir");
+    let reservation = pending.join("alice.json");
+    std::fs::write(&reservation, "{\"not\": \"resumable\"}").expect("a saved reservation");
+
+    pecu(&home)
+        .args(["id", "register", "alice", "--restart", "--node", DEAD_NODE])
+        .assert()
+        .failure();
+
+    assert!(
+        !reservation.exists(),
+        "--restart must discard the reservation even though the run that followed failed"
+    );
+}
+
+/// Without it, the same unusable file is picked up again forever.
+#[test]
+fn a_saved_reservation_is_resumed_rather_than_replaced_by_default() {
+    let home = home();
+    generate(&home, "demo");
+
+    let pending = home.path().join("pending");
+    std::fs::create_dir_all(&pending).expect("a pending dir");
+    let reservation = pending.join("alice.json");
+    std::fs::write(&reservation, "{\"not\": \"resumable\"}").expect("a saved reservation");
+
+    pecu(&home)
+        .args(["id", "register", "alice", "--node", DEAD_NODE])
+        .assert()
+        .failure();
+
+    assert!(
+        reservation.exists(),
+        "a reservation holds the salt and is never deleted without --restart"
+    );
+}
+
+/// Waiting is the default now, so `--no-wait` has to keep the old behaviour:
+/// report the state and stop, leaving the reservation for a later run.
+#[test]
+fn no_wait_reports_the_state_and_stops() {
+    let home = home();
+    generate(&home, "demo");
+    let pending = home.path().join("pending");
+    std::fs::create_dir_all(&pending).expect("a pending dir");
+    std::fs::write(pending.join("alice.json"), "{\"not\": \"resumable\"}").expect("a reservation");
+
+    // The dead node means this cannot get far, but --no-wait must not sleep on
+    // the way to finding that out.
+    let start = std::time::Instant::now();
+    pecu(&home)
+        .args(["id", "register", "alice", "--no-wait", "--node", DEAD_NODE])
+        .assert()
+        .failure();
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(20),
+        "--no-wait must not poll"
+    );
+}
+
+#[test]
+fn the_wait_timeout_is_configurable() {
+    let home = home();
+    generate(&home, "demo");
+    pecu(&home)
+        .args(["id", "register", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--timeout"))
+        .stdout(predicate::str::contains("--no-wait"));
+}

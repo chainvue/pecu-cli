@@ -498,7 +498,10 @@ fn build_token(
 }
 
 /// The reserve outputs holding `currency`.
-fn carrying(others: &[verus_sdk::network::AddressUtxo], currency: CurrencyId) -> Vec<Utxo> {
+pub(crate) fn carrying(
+    others: &[verus_sdk::network::AddressUtxo],
+    currency: CurrencyId,
+) -> Vec<Utxo> {
     others
         .iter()
         .filter(|held| {
@@ -710,9 +713,25 @@ fn currency_address(id: CurrencyId) -> String {
 }
 
 fn flow(what: &'static str, source: FlowError) -> SendError {
+    use verus_sdk::verus_tx::TxError;
+    // A VerusID recipient is the one case here that is not the node's fault, and
+    // it is a likely thing to try: `--to name@` works for native coins, so the
+    // same command with `--currency` reads as though it should. It does not, and
+    // sending the reader to `pecu doctor` for a node that is answering perfectly
+    // wastes their time on the wrong question.
+    let advice = if matches!(&source, FlowError::Tx(TxError::UnsupportedRecipient)) {
+        "a token payment can only name an R-address. Native coins can be sent to a \
+         VerusID — `pecu send --to <name@>` without --currency — but the SDK writes a token \
+         recipient as a plain key hash, so there is no way to address an identity's own token \
+         holdings yet. Paying one of its primary addresses instead is not the same thing: those \
+         coins belong to whoever holds that key, not to the identity"
+            .to_string()
+    } else {
+        "run `pecu doctor`, or point somewhere else with --node".to_string()
+    };
     SendError::Flow {
         what,
-        advice: "run `pecu doctor`, or point somewhere else with --node".to_string(),
+        advice,
         source: Box::new(source),
     }
 }

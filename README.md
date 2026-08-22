@@ -71,7 +71,7 @@ before blaming the command — `cargo run` is usually what you are measuring.
 | `pecu id show\|register` | Read an identity; register one (two-phase, resumable) | ✅ done |
 | `pecu id update\|revoke\|recover\|unlock` | The rest of the lifecycle, including timelocks | ✅ done |
 | `pecu id login\|publish\|read` | Sign-in with VerusID, and VDXF data | M8 |
-| `pecu currency show\|launch` | Read a currency definition; launch a token, NFT or fractional basket | ✅ done |
+| `pecu currency show\|launch\|mint\|preconvert\|convert` | Read a currency definition; launch a token or fractional basket; mint new supply of a centralized one; buy into a launching currency; convert through a launched one | ✅ done |
 | `pecu completions <shell>` | Shell completion script | ✅ done |
 
 ### `pecu doctor`
@@ -535,6 +535,31 @@ is broadcast**, and re-running the same command picks it up:
   ▸ run the same command again in a minute
 ```
 
+**One command runs both phases.** `pecu id register alice` broadcasts the
+commitment, waits for it to confirm, then reveals and pays — polling every 30
+seconds up to `--timeout` minutes (20 by default). `--no-wait` gives the old
+one-step-at-a-time behaviour, which is what a script wants.
+
+Interrupting the wait costs nothing. The reservation is written to disk
+**before** the commitment is broadcast, so Ctrl-C, a timeout, or a closed laptop
+all leave a registration the same command picks up later. The waiting is a
+convenience on top of that, not a replacement for it.
+
+```
+  ok step 1 of 2 — commitment bb0a644e…
+  ▸ waiting for it to confirm. Interrupting is safe — the file above survives
+  waiting — in the mempool, 30s elapsed
+  waiting — in the mempool, 60s elapsed
+  ok broadcast — txid a290c464…
+```
+
+**A commitment carries the expiry height it was built at**, so one that never
+confirms eventually stops being broadcastable — the signed bytes are refused
+before they reach the mempool, and re-anchoring cannot move an expiry that is
+already inside the signature. The saved reservation is then worth nothing but is
+still enough to wedge every later attempt at that name, so `--restart` discards
+it and claims the name again. Nothing was spent on the dead one.
+
 **A referral makes you pay less, not more.** Each referrer receives
 `fee / (levels + 2)` and your outlay is `fee * (levels + 1) / (levels + 2)`;
 whatever the payouts do not consume is burned. On VRSCTEST — 100 coins, 3
@@ -733,6 +758,25 @@ not what a recovery is for. The panel says so either way.
 pecu currency show TST@
 pecu currency launch mytoken@ --from mykey --supply 1000000
 pecu currency launch mytoken@ --from mykey --mintable --preallocate iAlice…:500
+pecu currency mint mytoken@ --to RComfCn4w…N9Hm --amount 1000
+```
+
+**`--register` creates the defining identity if it is missing.** A currency is
+defined by an identity, so launching on a name that does not exist yet takes two
+registrations' worth of waiting and 300 VRSCTEST. `--register` does the whole
+thing in one command: register, wait for the commitment, reveal, wait to be
+mined, then launch.
+
+It is opt-in and stays that way. A misspelled name is a plausible mistake and
+registration burns 100 VRSCTEST — creating `pecubaskt1@` because somebody typed
+their basket's name wrong would be an expensive convenience. Without the flag a
+missing identity is refused, and the refusal names the flag:
+
+```
+× reading the defining identity failed
+ help: a currency is defined by an identity, and that name is not on this
+       chain yet. Add --register to create it first, for 100 VRSCTEST on top
+       of the launch fee, or register it separately with `pecu id register`
 ```
 
 **A currency is something an identity becomes.** There is no separate object:
@@ -814,7 +858,8 @@ reserve, and all of it is keyed by the reserve's *name*:
 pecu currency launch mybasket@ --from key --supply 100 \
   --reserve VRSCTEST:60 --reserve TST:40 \
   --contribute VRSCTEST:10 --contribute TST:5 \
-  --min-preconvert VRSCTEST:1 --max-preconvert VRSCTEST:1000 \
+  --min-preconvert VRSCTEST:1 --min-preconvert TST:1 \
+  --max-preconvert VRSCTEST:1000 --max-preconvert TST:1000 \
   --prelaunch-discount 5 --prelaunch-carveout 10 \
   --id-registration-fee 25 --id-referral-levels 2 --id-import-fee 0.02
 ```
@@ -839,6 +884,32 @@ order is accepted, and prices the basket against the wrong currencies. Naming
 the reserve removes the possibility instead of checking for it, and a reserve
 you say nothing about gets zero rather than somebody else's number.
 
+**For `--max-preconvert`, name every reserve or name none.** This one is a trap
+worth spelling out, because it cost a real launch. A cap of zero is *"nothing
+accepted"*, not *"no limit"* — consensus refunds anything over the cap
+(`GetRefundTransfer`, not a rejection), and once the vector exists at all a
+reserve nobody named is a zero rather than an absence. Meanwhile a fractional
+basket refunds the **entire launch** unless every one of its reserves receives a
+contribution (`notarization.cpp:1474`). So capping one reserve of two silently
+guarantees the launch fails — hours later, at the start block, with the 200
+VRSCTEST gone.
+
+Naming none is safe and common: an empty vector is never consulted, so every
+reserve stays uncapped. `pecu` refuses the half-named case at launch, which is
+the last moment anything can be changed:
+
+```
+× --max-preconvert names some reserves but not `dude-test-centralized`,
+│ which caps it at zero
+ help: a cap of zero means nothing is accepted into that reserve, not that it
+       is unlimited — and a fractional basket refunds the entire launch unless
+       every reserve receives a contribution…
+```
+
+`preconvert` refuses the same thing from the paying side, and its panel lists
+what each reserve holds so far — an empty leg is the difference between a
+contribution working and coming back.
+
 `--id-referral-levels` sets the referral option bit on its own: consensus pays
 referrals only when the bit says to, so a level count without it publishes a
 policy that never applies.
@@ -851,7 +922,212 @@ cross-chain, and `gateway_converter_issuance`, which belongs to the gateway case
 the SDK refuses outright.
 
 It costs `currencyregistrationfee`, 200 VRSCTEST at the time of writing, read
-from the parent's chain policy rather than assumed.
+from the parent's chain policy rather than assumed — except for an NFT, which is
+charged the parent's `idimportfees` instead, 0.02. Consensus picks between the
+two on the tokenized-control bit, so `--nft` pins the fee rather than taking the
+one the flow would read.
+
+#### `pecu currency mint`
+
+```sh
+pecu currency mint mytoken@ --to RComfCn4wHHsGR8vWBAU7T1r3tHHyxN9Hm --amount 1000
+```
+
+Only for a currency launched `--mintable`. `proofprotocol = 2` is the whole
+permission system, and it is decided once, at launch.
+
+**The identity pays, not the signing key.** This is the part that catches
+people, so it is on the panel in its own row. Consensus accepts new supply only
+from a transaction that *spends an output the controlling identity holds* — the
+controlling identity being the currency itself, same i-address. A wallet with a
+well-funded key and an empty identity cannot mint, and the refusal says so:
+
+```
+× minting failed
+╰─▶ i49TaUGBXA4ZHbybQe3tw1r58BhCW361SC holds no spendable outputs; a mint is
+    paid for by the identity — send() it some coins first
+ help: a mint is paid for by the identity, not by the signing key — consensus
+       accepts new supply only from a transaction that spends what the
+       identity holds. Send it some native coins first: `pecu send --to
+       pecurefcur1@ --amount 1`
+```
+
+```
+┌─ MINT ──────────────────────────────────────────────────────────────────┐
+│ currency      pecuref9                                                  │
+│ currency id   iKh6DBXjPVU72BBD4sq5qbdFFeQGVcYokg                        │
+│ amount        1000.00000000  new supply, created by this                │
+│ to            RComfCn4wHHsGR8vWBAU7T1r3tHHyxN9Hm                        │
+│ paid by       pecuref9  the identity's own coins, not the key's         │
+│ signed by     faucet  RComfCn4w…N9Hm                                    │
+│ fee           0.00020000                                                │
+└─────────────────────────────────────────────────────────────────────────┘
+  ▸ this currency is centralized — its supply is whatever its identity
+    decides, and every holder is trusting that
+```
+
+**The recipient must be a transparent R-address**, and that is an SDK limit
+rather than a protocol one. Consensus treats `DEST_ID` as a first-class reserve
+transfer destination — `sendcurrency` pays identities routinely — but the SDK's
+`build_conversion` writes every recipient as `Destination::PubKeyHash`,
+discarding the address kind. An i-address run through that would pay the
+R-address sharing its hash, which nobody holds a key to, so the flow refuses
+instead. Filed as
+[chainvue/verus-rust-sdk#115](https://github.com/chainvue/verus-rust-sdk/issues/115).
+
+The same limit means **a token cannot be paid to a VerusID at all** — `pecu send
+--to <name@> --currency <token>` is refused for the same reason, while the same
+command *without* `--currency` sends native coins to an identity fine. So an
+identity can hold native coins but not tokens, which is awkward exactly where it
+matters most: the issuing identity is the natural place for a centralized
+currency's treasury, and it is the one destination a mint cannot name.
+
+There is no workaround that means the same thing, and the error text says so.
+Minting to one of the identity's primary addresses puts the tokens with whoever
+holds that key — a different owner with different authority, not the identity's
+own holdings.
+
+The two refusals that are not about permissions are worth keeping distinct. A
+**decentralized** currency has no authority that could add to it, which is the
+property its holders can verify — not a lock to be worked around. A **fractional
+basket** has no issuer at all: its supply grows when reserves convert in and
+shrinks when they convert out.
+
+#### `pecu currency preconvert`
+
+```sh
+pecu currency preconvert mybasket@ --amount 10 --from mykey
+pecu currency preconvert mybasket@ --amount 10 --spend TST --from mykey
+```
+
+Buys into a currency **before it launches**, at the launch price. `--spend`
+defaults to the chain's own currency and must name one of the target's reserves;
+`--to` defaults to the paying key.
+
+**There is no estimate, and the panel does not pretend otherwise.** A launching
+currency has no reserves, so there is nothing to price against — what a
+contribution pays out is settled at the start block, from the final ratio of
+everyone's contributions together. Two identical commands a day apart can pay
+out differently because other people contributed in between. The SDK refuses a
+slippage floor here by name for the same reason, so the command never offers
+one; a floor could only be checked against a number nobody produced.
+
+```
+┌─ PRECONVERT ─────────────────────────────────────────────────────────────┐
+│ into          pecubask1                                                  │
+│ currency id   iBw8P4kY…                                                  │
+│ spending      5.00000000  VRSCTEST                                       │
+│ you receive   settled at launch  from the final ratio of every           │
+│               contribution                                               │
+│ to            RComfCn4wHHsGR8vWBAU7T1r3tHHyxN9Hm                         │
+│ launches      block 1,179,161  153 blocks to go                          │
+│ fee           0.00020000                                                 │
+└──────────────────────────────────────────────────────────────────────────┘
+  ▸ if the launch misses its minimum, every contribution is refunded —
+    including this one, to the paying key
+  ▸ over the maximum is refunded too, rather than refused, so this can come
+    back even if the launch succeeds
+```
+
+**Preconvert and convert are never both valid.** Before the start block a plain
+conversion is refused for want of reserves; after it a preconversion is refused
+in turn. Which one applies is decided entirely by the height, so this refuses
+locally and names the block rather than letting the chain answer:
+
+```
+× `pecudepth2` launched at block 1178834, and the tip is 1179008
+ help: a preconversion buys at the launch price and is only accepted before
+       the start block. Afterwards the currency has reserves and an ordinary
+       conversion is the thing that works — the two are never both valid
+```
+
+**Two ways a contribution comes back**, both worth knowing before sending one.
+A launch that misses its `min_preconversion` refunds *everyone*. And a
+contribution that pushes a reserve past its `max_preconversion` is **refunded
+rather than refused** — consensus calls `GetRefundTransfer` rather than
+rejecting the transaction, so it can come back even when the launch succeeds.
+The panel shows both figures when the definition sets them.
+
+Paying in a currency the target is not backed by is also refunded rather than
+refused, so that one is checked here against the definition's reserve list — a
+mistake that would otherwise cost a wait rather than an error.
+
+#### `pecu currency convert`
+
+Once a basket has launched, value moves three ways — and consensus writes all
+three as the same `CReserveTransfer`, differing only in which currency each slot
+names:
+
+```sh
+pecu currency convert mybasket@ --amount 10                      # a reserve into the basket
+pecu currency convert VRSCTEST  --amount 10 --spend mybasket@    # the basket back into a reserve
+pecu currency convert SPORTS    --amount 1  --via bankroll       # one reserve into another
+```
+
+Which shape you mean is inferable from the definitions, so it is inferred rather
+than asked for — and then **stated on the panel**, because guessing silently
+would be worse than asking, and saying which guess was made is better than both.
+
+```
+┌─ WOULD CONVERT ──────────────────────────────────────────────────────────┐
+│ spending      1.00000000  VRSCTEST                                       │
+│ into          SPORTS  iGhBps9rmbN7U544dZY7nx2rfg26QTh1zY                 │
+│ through       bankroll  one reserve into another, priced by the basket   │
+│ you receive   15897.04750000  estimated, not guaranteed                  │
+│ at least      15000.00000000  checked now, not by the chain              │
+│ fee           0.00020000                                                 │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+**Unlike a preconversion, this has a price** — a launched basket has reserves,
+so the node can estimate. That is what makes `--min-out` meaningful here and
+impossible before launch. The floor is checked **before signing and never
+again**: the chain does not enforce it, so if the price moves after broadcast
+the conversion still happens at whatever the reserves make it.
+
+Three refusals worth having, all local:
+
+* **Not launched yet** — points at `preconvert`, which is the thing that works
+  before the start block. The exact mirror of `preconvert`'s own check; the two
+  are never both valid.
+* **Launch refunded** — a basket whose launch failed still reads as a live
+  currency definition but holds nothing and never will. Without this the only
+  signal is an estimate of zero.
+* **Neither side is a basket** — names the three shapes rather than reporting
+  that the chain refused.
+
+Launched on VRSCTEST rather than argued about, each on its own identity because
+a slot is one-shot:
+
+| combination | identity | transaction |
+|---|---|---|
+| decentralized token, fixed supply | `pecudepth3@` | `2fecffbb…` |
+| centralized token, `proofprotocol` 2 | `pecuref9@` | `8764a045…` |
+| fractional basket, seeded contributions, min/max preconvert, 5% discount, 10% carveout | `pecudepth2@` | `0b08811f…` |
+| centralized, governs sub-identity registration: 25 fee, 3 referral levels, mandatory | `pecurefcur1@` | `3205c03f…` |
+| NFT | `pecunft1@` | refused — see below |
+| **mint** — 1,000 new supply on a centralized token | `pecuref9@` | `e8c9d409…` |
+| **preconvert** — 5 VRSCTEST into a pre-launch basket | `pecubask1@` | `0bb8a7ae…` |
+| **convert** — 1 VRSCTEST into a live basket, `--min-out` floor honoured | `triccrypto2` | `68c8363c…` |
+
+**`--nft` is built but consensus refuses it, and that is upstream.** An NFT is a
+*currency-mapped* token: `options 2080`, one satoshi of supply preallocated to
+the defining identity, and — non-obviously — `currencies = [parent]` despite not
+being fractional, because consensus requires `maxPreconvert.size() == 1` and the
+per-reserve vectors are indexed by the reserve list. `pecu` builds all of that,
+and the transaction decodes field-for-field identical to a working on-chain NFT
+across all seven outputs.
+
+It is still refused, by one missing destination. An identity with tokenized
+control carries a *second* destination on its recovery condition — the key hash
+of the `EVAL_IDENTITY_RECOVER` contract pubkey, a constant — and the SDK's
+identity output script does not emit it, so consensus derives a different script.
+That is inside the transaction builder and cannot be reached from a caller, so
+the flag stops at a diagnostic that says so rather than at
+`bad-txns-failed-precheck`. Filed as
+[chainvue/verus-rust-sdk#111](https://github.com/chainvue/verus-rust-sdk/issues/111).
+Nothing is spent by the attempt: the fee is not paid and the identity's one
+currency slot is untouched.
 
 ### `--explain`
 
@@ -1044,6 +1320,42 @@ Commands describe *what* a block contains; the renderer decides how it looks.
 - **Money is integer satoshis end to end.** No floats, anywhere.
 - **The SDK dependency is pinned by commit.** It is pre-1.0 and not on crates.io, so
   "latest `main`" would not be a reproducible build. `pecu --version` prints the rev.
+
+## TODO
+
+### Blocked upstream
+
+Each of these is built or designed here and refused by the SDK, not by the
+chain. All of them fail with a named diagnostic that says so — none of them
+reaches the user as a bare node error, and none of them spends anything on the
+way to failing. When an issue lands, the work here is to delete the guard and
+prove it on chain.
+
+| | tracked | what pecu does today |
+|---|---|---|
+| **Mint / preconvert / convert to a VerusID** — consensus treats `DEST_ID` as a first-class transfer destination; `build_conversion` writes every recipient as `PubKeyHash` and drops the kind | [#115](https://github.com/chainvue/verus-rust-sdk/issues/115) | refuses, and says paying a primary address is *not* the same thing |
+| **Token send to a VerusID** — same root cause, so an identity can hold native coins but not tokens | [#115](https://github.com/chainvue/verus-rust-sdk/issues/115) | refuses with the native-vs-token asymmetry spelled out |
+| **NFT launch** — the identity output omits the tokenized-control recovery destination, so consensus derives a different script | [#111](https://github.com/chainvue/verus-rust-sdk/issues/111) | `--nft` builds the correct definition, then reports the SDK gap |
+| **NFT launch fee** — charged `currencyregistrationfee` (200) instead of `idimportfees` (0.02) | [#112](https://github.com/chainvue/verus-rust-sdk/issues/112) | pins the right fee itself |
+| **NFT definition shape** — `NFT_TOKEN` on a `token()` cannot express a valid one | [#113](https://github.com/chainvue/verus-rust-sdk/issues/113) | sets all five fields by hand |
+| **Expired commitment** — indistinguishable from a dropped one, and `Pending` carries no expiry | [#114](https://github.com/chainvue/verus-rust-sdk/issues/114) | string-matches `expiring-soon` and offers `--restart` |
+| **Two payments in one block** — `spendable` never consults the mempool, so the second build reuses the coin the first just spent and rebuilds it byte for byte | [#118](https://github.com/chainvue/verus-rust-sdk/issues/118) | nothing yet; one payment per block |
+
+### Built but unproven
+
+Paths that exist and have never been exercised against the chain. They are not
+claimed as working:
+
+* **`pecu key --history` on a key with more than one revision.** The single
+  revision case is covered; nothing has rotated yet.
+* **Multi-signature identities.** `send`, `mint` and the whole lifecycle sign
+  with one key and refuse an m-of-n identity by name. The air-gap trio is the
+  natural home for this, once it learns identity inputs.
+
+### Parked
+
+* **`feat/m8-login-vdxf`** — `id login` and VDXF publish/read, deliberately kept
+  off `main`. Well behind now; needs a rebase before it is worth looking at.
 
 ## Not in scope (yet)
 

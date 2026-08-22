@@ -514,3 +514,42 @@ fn json_output_is_a_single_document() {
         documents.len()
     );
 }
+
+/// `--to <name@>` works for native coins, so the same command with `--currency`
+/// reads as though it should work too. It does not, and the refusal has to
+/// explain the difference rather than blame the node — an earlier version sent
+/// the reader to `pecu doctor` for a node that was answering perfectly.
+#[test]
+#[ignore = "talks to api.verustest.net"]
+fn a_token_payment_to_a_verusid_explains_itself_rather_than_blaming_the_node() {
+    let Ok(funded) = std::env::var("PECU_FUNDED_HOME") else {
+        eprintln!("PECU_FUNDED_HOME is not set — skipping");
+        return;
+    };
+    let assertion = Command::cargo_bin("pecu")
+        .expect("built")
+        .env("PECU_HOME", &funded)
+        .args([
+            "send",
+            "--to",
+            "pecunft1@",
+            "--amount",
+            "1",
+            "--currency",
+            "pecuref9@",
+            "--from",
+            "faucet",
+            "--dry-run",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assertion.get_output().stderr).to_string();
+    assert!(
+        !stderr.contains("pecu doctor"),
+        "the node is fine; this is a builder limit:\n{stderr}"
+    );
+    // Short phrases: miette wraps the help text.
+    for expected in ["only name an R-address", "not the same thing"] {
+        assert!(stderr.contains(expected), "missing {expected}:\n{stderr}");
+    }
+}

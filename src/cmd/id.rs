@@ -21,7 +21,7 @@ use thiserror::Error;
 use verus_sdk::money::Amount;
 use verus_sdk::network::{
     prepare_registration, AwaitingCommitment, ChainReader, CommitmentStatus, FlowError, Pending,
-    RegistrationOptions,
+    RegistrationOptions, WaitPolicy,
 };
 use verus_sdk::verus_keys::{Address, AddressKind};
 use verus_sdk::verus_tx::{Timelock, FLAG_LOCKED};
@@ -100,12 +100,26 @@ pub enum IdError {
     )]
     Reorged { detail: String },
 
-    #[error("the node has never seen the commitment for `{name}`")]
+    #[error("the saved commitment for `{name}` can no longer be broadcast")]
     #[diagnostic(
-        code(pecu::commitment_gone),
-        help("it may not have propagated, or it may have been dropped. The saved registration is still at {}", path.display())
+        code(pecu::commitment_stale),
+        help("its inputs have been spent by something else, so these bytes can never land — which happens when two spends are started before either confirms, because coin selection does not see the mempool and picks the same coins twice. Nothing was spent on this one: run the same command with --restart to discard it and claim the name again. The file, if you want it, is at {}", path.display())
     )]
-    CommitmentGone { name: String, path: PathBuf },
+    CommitmentStale { name: String, path: PathBuf },
+
+    #[error("`{name}` was registered but is not on chain after {minutes} minutes")]
+    #[diagnostic(
+        code(pecu::not_mined_in_time),
+        help("the registration was broadcast and nothing is lost — it is waiting to be mined. `pecu id show {name}@` will find it once it is, and the launch can be run again then")
+    )]
+    NotMinedInTime { name: String, minutes: u64 },
+
+    #[error("the saved commitment for `{name}` has expired")]
+    #[diagnostic(
+        code(pecu::commitment_expired),
+        help("a commitment carries the expiry height it was built at, and the chain has passed it. Re-broadcasting the same bytes can never work — they are refused before they reach the mempool. Nothing was spent: run the same command with --restart to discard the reservation and claim the name again")
+    )]
+    CommitmentExpired { name: String },
 
     #[error("cancelled")]
     #[diagnostic(code(pecu::cancelled), help("nothing was broadcast"))]
@@ -390,6 +404,21 @@ fn register_inner(
     let path = pending_path(settings, &name);
     let node = node::connect(&settings.profile)?;
 
+    // A reservation that can no longer be broadcast is worth nothing, but the
+    // file alone is enough to wedge every later attempt at the same name. This
+    // is the only way out, so it discards rather than repairs.
+    if args.restart {
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|source| IdError::PendingIo {
+                action: "delete",
+                path: path.clone(),
+                source,
+            })?;
+            ui.note(format!("discarded the saved reservation for `{name}`"));
+        }
+        return begin(ui, settings, globals, &node, args, &name, &path);
+    }
+
     match load_pending(&path)? {
         Some(pending) => resume(ui, settings, globals, &node, args, pending, &path),
         None => begin(ui, settings, globals, &node, args, &name, &path),
@@ -573,12 +602,99 @@ fn begin(
                 palette.warn,
             ))
             .note(Text::of(
-                "run the same command again once the commitment confirms — a block or so",
+                if args.no_wait {
+                    "run the same command again once the commitment confirms — a block or so"
+                } else {
+                    "waiting for it to confirm. Interrupting is safe — the file above survives \
+                     and the same command picks up where this left off"
+                },
                 palette.muted,
             )),
     );
-    Ok(())
+    if args.no_wait {
+        return Ok(());
+    }
+    // Straight into step two rather than asking the caller to run it again. The
+    // file is already on disk, so a Ctrl-C here costs nothing but the wait.
+    resume(ui, settings, globals, node, args, pending, path)
 }
+
+/// Register `name` if the chain does not have it yet, and wait until it does.
+///
+/// For `currency launch --register`, where the identity is a prerequisite
+/// rather than the point. Returns without doing anything if the name already
+/// exists, so it is safe to call on a re-run — and a registration interrupted
+/// half way is picked up by the same saved-reservation path everything else
+/// uses.
+///
+/// Deliberately not reachable without an explicit flag. Registration burns 100
+/// VRSCTEST and a typo'd name is a plausible mistake; creating `pecubaskt1@`
+/// because somebody misspelled their own basket would be an expensive
+/// convenience.
+pub fn ensure_exists(
+    ui: &Ui,
+    settings: &Settings,
+    globals: &Globals,
+    node: &Node,
+    name: &str,
+    from: Option<&str>,
+    timeout: u64,
+) -> miette::Result<()> {
+    let bare = bare_name(name)?;
+    if node.identity(name).is_ok() {
+        return Ok(());
+    }
+    ui.note(format!(
+        "{bare}@ does not exist yet — registering it first, for 100 VRSCTEST"
+    ));
+    ui.blank();
+
+    let args = IdRegisterArgs {
+        name: bare.clone(),
+        from: from.map(str::to_string),
+        primary: Vec::new(),
+        min_sigs: None,
+        referral: None,
+        restart: false,
+        no_wait: false,
+        timeout,
+    };
+    register(ui, settings, globals, &args)?;
+
+    // Step two is broadcast, not mined. The launch that follows reads the
+    // identity off the chain, so waiting for the transaction is not enough —
+    // it has to be *there*.
+    ui.blank();
+    ui.note("waiting for the registration to be mined");
+    let polls = (timeout * 60) / POLL_SECONDS;
+    for attempt in 0..polls.max(1) {
+        if node.identity(name).is_ok() {
+            ui.ok(format!("{bare}@ is on chain"));
+            ui.blank();
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_secs(POLL_SECONDS));
+        if !ui.is_json() {
+            eprintln!(
+                "  waiting — not mined yet, {}s elapsed",
+                (attempt + 1) * POLL_SECONDS
+            );
+        }
+    }
+    Err(IdError::NotMinedInTime {
+        name: bare,
+        minutes: timeout,
+    }
+    .into())
+}
+
+/// Seconds between polls while waiting for the commitment.
+///
+/// `Pending::poll` costs up to four requests, so this is a request every few
+/// seconds against a public endpoint nobody here pays for. The SDK floors the
+/// interval at five seconds for the same reason; thirty is polite and still
+/// well inside a block time.
+const POLL_SECONDS: u64 = 30;
 
 /// Step two: wait for the confirmation, then reveal and pay.
 fn resume(
@@ -587,16 +703,51 @@ fn resume(
     globals: &Globals,
     node: &Node,
     args: &IdRegisterArgs,
-    pending: Pending<AwaitingCommitment>,
+    mut pending: Pending<AwaitingCommitment>,
     path: &PathBuf,
 ) -> miette::Result<()> {
     let palette = ui.theme.palette;
     let name = pending.name().to_string();
 
-    ui.sdk("pending.poll(&node)");
-    let status = pending
-        .poll(node)
-        .map_err(|source| flow("checking the commitment", source))?;
+    // One poll when the caller wants a snapshot; otherwise the SDK's own loop,
+    // which floors the interval so a public node is not hammered. Either way a
+    // single `CommitmentStatus` comes out and everything below is unchanged.
+    let status = if args.no_wait {
+        ui.sdk("pending.poll(&node)");
+        pending
+            .poll(node)
+            .map_err(|source| flow("checking the commitment", source))?
+    } else {
+        let interval = std::time::Duration::from_secs(POLL_SECONDS);
+        let max_polls = u32::try_from((args.timeout * 60) / POLL_SECONDS)
+            .unwrap_or(u32::MAX)
+            .max(1);
+        ui.sdk(format!(
+            "pending.wait_blocking(&node, &WaitPolicy {{ interval: {POLL_SECONDS}s, max_polls: {max_polls} }})"
+        ));
+        // The callback outlives this borrow of `ui`, so it prints for itself
+        // rather than capturing the renderer. One line per poll, on stderr, so
+        // a caller piping stdout still gets clean output.
+        let quiet = ui.is_json();
+        let policy = WaitPolicy {
+            interval,
+            max_polls,
+            progress: Box::new(move |attempt, confirmations| {
+                if quiet {
+                    return;
+                }
+                let elapsed = u64::from(attempt + 1) * POLL_SECONDS;
+                if confirmations == 0 {
+                    eprintln!("  waiting — in the mempool, {elapsed}s elapsed");
+                } else {
+                    eprintln!("  waiting — {confirmations} confirmation(s), {elapsed}s elapsed");
+                }
+            }),
+        };
+        pending
+            .wait_blocking(node, &policy)
+            .map_err(|source| flow("waiting for the commitment", source))?
+    };
 
     let ready = match status {
         CommitmentStatus::Waiting { confirmations } => {
@@ -629,7 +780,15 @@ fn resume(
                         ),
                     )
                     .note(Text::of(
-                        "run the same command again in a minute",
+                        if args.no_wait {
+                            "run the same command again in a minute".to_string()
+                        } else {
+                            format!(
+                                "still unconfirmed after {} minutes. Nothing is lost — the saved \
+                                 registration is intact and the same command carries on",
+                                args.timeout
+                            )
+                        },
                         palette.muted,
                     )),
             );
@@ -640,12 +799,75 @@ fn resume(
             *ready
         }
         CommitmentStatus::Reorged { detail } => return Err(IdError::Reorged { detail }.into()),
+        // The documented remedy, not a dead end: "the salt is still good, so
+        // the commitment can be re-broadcast". Reporting this and stopping left
+        // a registration that could only be abandoned — and it happens for the
+        // ordinary reason that a broadcast did not land.
+        //
+        // Re-broadcasting the same bytes is safe either way. If it merely never
+        // propagated the node already has it and the txid is unchanged; if it
+        // was dropped this is exactly the retry. `anchor` re-reads the chain
+        // position first, so the reorg check afterwards compares against where
+        // the chain is now rather than where it was.
         CommitmentStatus::CommitmentGone => {
-            return Err(IdError::CommitmentGone {
-                name,
-                path: path.clone(),
+            ui.sdk("pending.anchor(&node)");
+            let unsent = pending
+                .anchor(node)
+                .map_err(|source| flow("re-anchoring the commitment", source))?;
+            ui.sdk_result(format!("re-broadcasting {}", unsent.txid));
+
+            // The reason the node gives is kept rather than flattened back into
+            // "it has never seen it": that is the state we came from, and it is
+            // what a retry already failed to fix.
+            unsent.broadcast(node).map_err(|source| -> miette::Report {
+                // Inputs that no longer exist mean these bytes can never land,
+                // however often they are retried. Distinct from "the node has
+                // not seen it", which is what we came from and what a retry
+                // does fix.
+                if matches!(
+                    &source,
+                    FlowError::Rpc(verus_sdk::network::RpcError::Node { code: -26, message })
+                        if message.contains("inputs-missing") || message.contains("inputs-spent")
+                ) {
+                    return IdError::CommitmentStale {
+                        name: name.clone(),
+                        path: path.clone(),
+                    }
+                    .into();
+                }
+                // The expiry is baked into the signed bytes, so re-anchoring
+                // cannot move it. A dead reservation that costs nothing to
+                // abandon, but only if the user is told to abandon it.
+                if matches!(
+                    &source,
+                    FlowError::Rpc(verus_sdk::network::RpcError::Node { code: -26, message })
+                        if message.contains("expiring-soon") || message.contains("tx-expired")
+                ) {
+                    return IdError::CommitmentExpired { name: name.clone() }.into();
+                }
+                flow("re-broadcasting the commitment", source).into()
+            })?;
+            save_pending(path, &pending)?;
+
+            if !args.no_wait && !ui.is_json() {
+                ui.note("re-broadcast — waiting for it to confirm");
+                return resume(ui, settings, globals, node, args, pending, path);
             }
-            .into())
+            if ui.is_json() {
+                emit(&serde_json::json!({
+                    "kind": "recommitted",
+                    "name": name,
+                    "commitment_txid": pending.commitment_txid,
+                    "next": "run the same command again once it confirms",
+                }));
+                return Ok(());
+            }
+            ui.ok(format!(
+                "the node had not seen the commitment — re-broadcast {}",
+                pending.commitment_txid
+            ));
+            ui.note("run the same command again once it confirms");
+            return Ok(());
         }
     };
 
