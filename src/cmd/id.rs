@@ -408,7 +408,18 @@ fn register_inner(
     // file alone is enough to wedge every later attempt at the same name. This
     // is the only way out, so it discards rather than repairs.
     if args.restart {
-        if path.exists() {
+        // A dry run that deletes this has already done the one irreversible
+        // thing in the command. The salt is not on the chain, not on the node
+        // and not anywhere else, so discarding it loses the name and the
+        // commitment fee both — which is precisely what --dry-run promises not
+        // to do, however explicit --restart is about wanting it gone.
+        if globals.dry_run {
+            if path.exists() {
+                ui.note(format!(
+                    "--dry-run — the saved reservation for `{name}` would be discarded"
+                ));
+            }
+        } else if path.exists() {
             std::fs::remove_file(&path).map_err(|source| IdError::PendingIo {
                 action: "delete",
                 path: path.clone(),
@@ -709,6 +720,42 @@ fn resume(
     let palette = ui.theme.palette;
     let name = pending.name().to_string();
 
+    // Above the poll rather than beside the `complete` it guards. Step two is
+    // the transaction that burns the hundred coins, and `CommitmentGone` below
+    // re-broadcasts the commitment and rewrites the saved file — so a gate any
+    // further down would let a dry run both spend and write on the path that
+    // was already the least expected to. Nothing here asks the chain anything:
+    // the fee, the referral chain and the txid all survive on disk.
+    //
+    // Safe to state the fee before the poll: the SDK records `registration_fee`
+    // at prepare and carries it through the transition rather than re-reading
+    // it, so this is the number the confirmation below would show.
+    if globals.dry_run {
+        if ui.is_json() {
+            emit(&serde_json::json!({
+                "kind": "estimate",
+                "name": name,
+                "registration_fee": pending.registration_fee.to_sat(),
+                "commitment_txid": pending.commitment_txid,
+                "primary_addresses": pending.primary_addresses,
+                "min_sigs": pending.min_sigs,
+                "broadcast": false,
+            }));
+        } else {
+            ui.panel(
+                &Panel::new("STEP 2 OF 2")
+                    .row("name", Text::of(format!("{name}@"), palette.accent))
+                    .row("fee", fee_row(ui, &pending, &settings.profile.currency)),
+            );
+            ui.blank();
+            ui.note(
+                "nothing was broadcast and the saved registration is untouched. The commitment \
+                 was not polled either — drop --dry-run to check it and claim the name",
+            );
+        }
+        return Ok(());
+    }
+
     // One poll when the caller wants a snapshot; otherwise the SDK's own loop,
     // which floors the interval so a public node is not hammered. Either way a
     // single `CommitmentStatus` comes out and everything below is unchanged.
@@ -881,7 +928,12 @@ fn resume(
     let secret = keystore::passphrase(&format!("passphrase for `{}`", envelope.label), false)?;
     let key = envelope.unlock(&secret)?;
 
-    if !ui.is_json() && !globals.yes {
+    // `--json` is output, not consent — the same rule `begin` follows two
+    // hundred lines up, and this is the half that actually burns the hundred.
+    if !globals.yes {
+        if ui.is_json() {
+            return Err(IdError::NeedsYes.into());
+        }
         ui.panel(
             &Panel::new("STEP 2 OF 2")
                 .row("name", Text::of(format!("{name}@"), palette.accent))
