@@ -19,6 +19,27 @@ const CHAIN_IDENTITY: &str = "VRSCTEST@";
 /// Registered by this project on 2026-08-05 to verify the two-phase flow.
 const OURS: &str = "pecucli7@";
 
+/// miette hard-wraps to the terminal width, and where the wrap lands depends on
+/// how long the temp directory's path is — which differs between a macOS
+/// `/var/folders/…` run and a Linux `/tmp/…` one. A phrase that sits on one line
+/// on the machine the test was written on straddles two on the machine that runs
+/// it next, and the assertion fails for a reason that has nothing to do with the
+/// behaviour under test. Flattening first makes a multi-word assertion mean what
+/// it says instead of testing the wrap.
+///
+/// The `\u{2502}` is dropped as well as the whitespace: miette does not merely
+/// break the line, it prefixes every continuation with a gutter, so a wrapped
+/// sentence reads `this version \u{2502} understands` and collapsing spaces alone
+/// still leaves the glyph sitting inside the phrase being matched.
+///
+/// The same helper, for the same reason, exists in `tests/currency.rs`.
+fn flat(text: &str) -> String {
+    text.replace('\u{2502}', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn home() -> TempDir {
     tempfile::tempdir().expect("a temp dir")
 }
@@ -122,11 +143,15 @@ fn a_corrupt_saved_registration_is_not_silently_started_over() {
     std::fs::write(pending.join("alice.json"), "{ not json").expect("writable");
 
     // Starting over here would broadcast a second commitment and pay twice.
-    pecu(&home)
+    let assertion = pecu(&home)
         .args(["id", "register", "alice", "--node", DEAD_NODE])
         .assert()
-        .failure()
-        .stderr(contains("not a registration this version understands"));
+        .failure();
+    let stderr = flat(&String::from_utf8_lossy(&assertion.get_output().stderr));
+    assert!(
+        stderr.contains("is not a registration this version understands"),
+        "did not refuse the corrupt saved registration:\n{stderr}"
+    );
 }
 
 #[test]
