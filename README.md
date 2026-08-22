@@ -583,6 +583,22 @@ already inside the signature. The saved reservation is then worth nothing but is
 still enough to wedge every later attempt at that name, so `--restart` discards
 it and claims the name again. Nothing was spent on the dead one.
 
+**A bad `--primary` or `--min-sigs` is refused before the commitment.** Both are
+first checked where the SDK builds *step two*, which runs only after the
+commitment has confirmed — so an i-address in `--primary`, or a `--min-sigs`
+above the number of primaries, used to cost a commitment and up to `--timeout`
+minutes of polling before anything said so, and left a reservation escapable
+only with `--restart`. Neither needs a node or a key, so both are refused before
+the passphrase prompt. Primary addresses are transparent R-addresses: a
+registration writes its primary condition as bare key hashes, so a VerusID
+cannot be one — delegating control to another identity is what the revocation
+and recovery authorities are for. A reservation already on disk that names an
+impossible threshold says so before the poll, and points at `--restart`, rather
+than failing at the reveal with advice about the node. Both refusals sit above
+the `--dry-run` gate as well as the poll: pricing step two of a registration
+that can never reach it would be a lie, so a dry run errors rather than
+printing an estimate.
+
 **A referral makes you pay less, not more.** Each referrer receives
 `fee / (levels + 2)` and your outlay is `fee * (levels + 1) / (levels + 2)`;
 whatever the payouts do not consume is burned. On VRSCTEST — 100 coins, 3
@@ -634,7 +650,9 @@ called money burned when part of it is a payment to somebody.
 **`--dry-run` costs nothing and writes nothing.** It prepares the registration,
 prints what it would cost, and stops before both the commitment and the saved
 file — a saved registration whose commitment was never broadcast would send the
-next run to poll for a transaction nobody made.
+next run to poll for a transaction nobody made. A `--primary` or `--min-sigs`
+the reveal could never accept is the exception: it is refused above that gate,
+so there is no estimate to print and the run exits non-zero.
 
 **`--json` will not register without `--yes`.** Same rule as `pecu send`, and
 this one burns a hundred coins rather than moving them.
@@ -643,10 +661,11 @@ this one burns a hundred coins rather than moving them.
 answers to the same two flags: `--dry-run` prints what finishing would cost,
 straight off the file, and stops without polling, broadcasting, or touching the
 reservation — including under `--restart`, which reports what it would discard
-rather than discarding it. `--json` still refuses to reveal the name and burn the
-hundred without `--yes`. The one thing `--json` may do unconsented is *read*:
-`--no-wait --json` reports whether the commitment has confirmed, which spends
-nothing.
+rather than discarding it. Saved controls the reveal could never accept are the
+same exception: refused above the gate rather than priced. `--json` still
+refuses to reveal the name and burn the hundred without `--yes`. The one thing
+`--json` may do unconsented is *read*: `--no-wait --json` reports whether the
+commitment has confirmed, which spends nothing.
 
 The SDK makes the ordering hard to get wrong: `complete` exists only on
 `Pending<ReadyToRegister>`, and the only way to hold one is a `poll` that saw the
