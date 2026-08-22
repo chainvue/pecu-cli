@@ -156,8 +156,19 @@ fn deceptive(character: char) -> bool {
 /// text and nothing more — the currency **id** is the part that identifies
 /// anything, and it is always shown alongside.
 pub fn untrusted(text: &str, max: usize, ellipsis: &str) -> String {
-    let cleaned: String = text
-        .chars()
+    fit(neutralise(text).trim(), max, ellipsis)
+}
+
+/// Replace everything that cannot be allowed onto a terminal, one character for
+/// one character.
+///
+/// The 1:1 map is the point and not an implementation detail: `fit`'s budget,
+/// every `NAME_BUDGET`, and the column widths `cmd::currency` measures over the
+/// result all count characters, and deleting rather than replacing would
+/// desynchronise all three — as well as hiding from the reader that anything
+/// was taken out.
+fn neutralise(text: &str) -> String {
+    text.chars()
         .map(|character| {
             if character.is_control() || character == '\u{7f}' || deceptive(character) {
                 '·'
@@ -165,18 +176,45 @@ pub fn untrusted(text: &str, max: usize, ellipsis: &str) -> String {
                 character
             }
         })
-        .collect();
-    fit(cleaned.trim(), max, ellipsis)
+        .collect()
+}
+
+/// The width of a Verus address, and it is not a rounded-up guess. All three
+/// kinds carry a one-byte version (`0x3c`, `0x66`, `0x55`), so base58check runs
+/// over 25 bytes, and every value those version bytes admit falls inside
+/// [58^33, 58^34) — an i-address is *exactly* 34 characters, never 33 and never
+/// 35. So this budget cannot elide the middle of an honest one, and is not one
+/// character short of the thing it budgets for.
+const ID_BUDGET: usize = 34;
+
+/// An identifier the node handed over — a currency's i-address, an identity's.
+///
+/// Printed in full, but not on trust. The name beside it is filtered because a
+/// registrant chose it; this is filtered because a *node* chose it, and nothing
+/// between the socket and the frame checks its shape. A well-formed address is
+/// under budget and contains nothing the filter maps, so it comes back
+/// untouched; a string longer than an address is not one, whatever field it
+/// arrived in.
+pub fn id(text: &str, ellipsis: &str) -> String {
+    fit(neutralise(text).trim(), ID_BUDGET, ellipsis)
 }
 
 /// An address, shortened the way a wallet UI shortens one.
+///
+/// Neutralised first: the callers that reach here with a node's string do so on
+/// the path where parsing it as an `Address` already failed — `wallet history`
+/// falls back to this for a `net_currencies` key it could not parse — and
+/// `elide` keeps the first nine characters verbatim, which is room for an
+/// escape run. Base58 contains nothing the filter maps, so an honest address is
+/// unchanged, character for character.
 pub fn address(text: &str, ellipsis: &str) -> String {
-    elide(text, 9, 4, ellipsis)
+    elide(neutralise(text).trim(), 9, 4, ellipsis)
 }
 
-/// A 64-character hex hash, shortened.
+/// A 64-character hex hash, shortened. Neutralised first, for the same reason
+/// [`address`] is.
 pub fn hash(text: &str, ellipsis: &str) -> String {
-    elide(text, 10, 6, ellipsis)
+    elide(neutralise(text).trim(), 10, 6, ellipsis)
 }
 
 /// A rough elapsed time: `42s`, `7m 12s`, `3h 04m`, `2d 11h`.
@@ -414,6 +452,55 @@ mod tests {
         assert_eq!(untrusted("Ünïcødé.vRSC", 40, "…"), "Ünïcødé.vRSC");
         assert_eq!(untrusted("桥.vETH", 40, "…"), "桥.vETH");
         assert_eq!(untrusted("bridge-eth.vrsc", 40, "…"), "bridge-eth.vrsc");
+    }
+
+    #[test]
+    fn an_id_the_node_supplied_cannot_repaint_the_terminal() {
+        // The i-address rows are the node's word, not a registrant's, and
+        // nothing between the socket and the frame checks their shape.
+        let hostile = "i\u{1b}[31mK2k8\nYH1\u{202e}jfR\u{200b}7";
+        let safe = id(hostile, "…");
+        assert!(!safe.contains('\u{1b}'), "escape survived: {safe:?}");
+        assert!(!safe.contains('\n'), "newline survived: {safe:?}");
+        assert!(!safe.contains('\u{202e}'), "override survived: {safe:?}");
+        assert!(!safe.contains('\u{200b}'), "zero width survived: {safe:?}");
+        // Replaced rather than dropped, so the reader can see something was
+        // taken out instead of the string quietly getting shorter.
+        assert!(safe.contains('·'), "nothing marked as removed: {safe:?}");
+    }
+
+    #[test]
+    fn an_honest_i_address_prints_in_full_and_unchanged() {
+        // The polarity case, and the budget guard: an i-address is exactly 34
+        // characters, so `ID_BUDGET` must not be one short of the thing it
+        // budgets for — with either ellipsis, since the marker is counted
+        // against the budget.
+        let honest = "iK2k8YH1jfR7RLmEZ3zac2Mkx5rxSgbMqg";
+        assert_eq!(honest.chars().count(), ID_BUDGET);
+        assert_eq!(id(honest, "…"), honest);
+        assert_eq!(id(honest, "..."), honest);
+    }
+
+    #[test]
+    fn a_shortened_address_cannot_carry_an_escape_out_of_a_node() {
+        // `wallet history` falls back to this for a `net_currencies` key it
+        // could not parse as an `Address` — the parse having failed *is* the
+        // hostile case — and `elide` keeps the first nine characters verbatim,
+        // which is room for the whole escape.
+        let safe = address("\u{1b}[31mRQr2cUkF46n7y8WRzDkd1iV9gHusSSQuzX", "…");
+        assert!(!safe.contains('\u{1b}'), "escape survived: {safe:?}");
+        // And the honest case still shortens to exactly what it did before.
+        assert_eq!(address("RXyz9k2mPqrstuv7Qa4", "…"), "RXyz9k2mP…7Qa4");
+    }
+
+    #[test]
+    fn a_shortened_hash_cannot_carry_an_escape_out_of_a_node() {
+        let safe = hash(&format!("\u{1b}[31m{}", "a".repeat(64)), "…");
+        assert!(!safe.contains('\u{1b}'), "escape survived: {safe:?}");
+        // The 64-character hex a node reports, elided to exactly what it
+        // elides to today.
+        let txid = "df69640e4cfafe7cbe9cabd3c790ed3c556f7ee340e5f10ce73dd1b590f0556d";
+        assert_eq!(hash(txid, "…"), "df69640e4c…f0556d");
     }
 
     #[test]

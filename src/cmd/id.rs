@@ -20,8 +20,8 @@ use miette::Diagnostic;
 use thiserror::Error;
 use verus_sdk::money::Amount;
 use verus_sdk::network::{
-    prepare_registration, AwaitingCommitment, ChainReader, CommitmentStatus, FlowError, Pending,
-    RegistrationOptions, WaitPolicy,
+    prepare_registration, AwaitingCommitment, ChainReader, CommitmentStatus, FlowError,
+    IdentityRecord, Pending, RegistrationOptions, WaitPolicy,
 };
 use verus_sdk::verus_keys::{Address, AddressKind};
 use verus_sdk::verus_tx::{Timelock, FLAG_LOCKED};
@@ -264,6 +264,24 @@ pub fn show(ui: &Ui, settings: &Settings, name: &str) -> miette::Result<()> {
         return Ok(());
     }
 
+    ui.panel(&panel(ui, &record, mined, timelock, tip));
+    ui.explain_panel();
+    Ok(())
+}
+
+/// The IDENTITY panel, built away from the node so a test can render it.
+///
+/// `show` does the reading; everything here is a function of what came back.
+/// Split out because four strings on this panel are the node's — the i-address,
+/// the status, the primary addresses and the two authorities — and a display
+/// filter nothing exercises is a filter that stops working.
+fn panel(
+    ui: &Ui,
+    record: &IdentityRecord,
+    mined: Option<i64>,
+    timelock: Timelock,
+    tip: Option<u32>,
+) -> Panel {
     let palette = ui.theme.palette;
     let glyphs = ui.theme.glyphs;
     let identity = &record.identity;
@@ -275,7 +293,11 @@ pub fn show(ui: &Ui, settings: &Settings, name: &str) -> miette::Result<()> {
     } else {
         Text::of(glyphs.ok, palette.ok)
             .space()
-            .push(&record.status, palette.value)
+            // A word out of the node's JSON, not one this program chose.
+            .push(
+                fmt::untrusted(&record.status, NAME_BUDGET, glyphs.ellipsis),
+                palette.value,
+            )
     };
 
     let mut panel = Panel::new("IDENTITY")
@@ -286,9 +308,15 @@ pub fn show(ui: &Ui, settings: &Settings, name: &str) -> miette::Result<()> {
                 palette.accent,
             ),
         )
+        // An i-address, and the node is the only thing saying so. This is the
+        // row a reader is told to compare against, so it gets the same filter
+        // the name above it gets.
         .row(
             "i-address",
-            Text::of(&record.identity_address, palette.value),
+            Text::of(
+                fmt::id(&record.identity_address, glyphs.ellipsis),
+                palette.value,
+            ),
         )
         .row("status", status)
         // Not "registered". `getidentity` reports the block and txid of the
@@ -336,7 +364,8 @@ pub fn show(ui: &Ui, settings: &Settings, name: &str) -> miette::Result<()> {
         panel = panel.line(
             Text::of(glyphs.bullet, palette.muted)
                 .space()
-                .push(address, palette.value),
+                // Straight out of `primaryaddresses`, which is arbitrary JSON.
+                .push(fmt::id(address, glyphs.ellipsis), palette.value),
         );
     }
     let mut self_held = false;
@@ -349,7 +378,11 @@ pub fn show(ui: &Ui, settings: &Settings, name: &str) -> miette::Result<()> {
         ("recovery", "recoveryauthority"),
     ] {
         if let Some(authority) = identity.get(field).and_then(|v| v.as_str()) {
-            let mut row = Text::of(authority, palette.value);
+            let mut row = Text::of(fmt::id(authority, glyphs.ellipsis), palette.value);
+            // Compared raw, on purpose. `(itself)` is a fact about what the
+            // node holds, not about what is printed, and two different
+            // authorities that collapse to the same run of `·` would read as
+            // one identity on the panel whose whole job is who controls this.
             if authority == record.identity_address {
                 row = row.push("  (itself)", palette.warn);
                 self_held = true;
@@ -402,9 +435,7 @@ pub fn show(ui: &Ui, settings: &Settings, name: &str) -> miette::Result<()> {
         ));
     }
 
-    ui.panel(&panel);
-    ui.explain_panel();
-    Ok(())
+    panel
 }
 
 // ── register ────────────────────────────────────────────────────────────────
@@ -1584,8 +1615,93 @@ fn emit(value: &serde_json::Value) {
 
 #[cfg(test)]
 mod tests {
+    use unicode_width::UnicodeWidthStr;
+
     use super::*;
+    use crate::cli::Theme as ThemeFlag;
     use crate::config::Paths;
+
+    /// A real i-address and a real R-address, so the polarity test runs against
+    /// the shapes a well-behaved daemon actually returns.
+    const HONEST_IDENTITY: &str = "i7r29bDQfrwjkTxjv4bcYD6B1ZV7WZ4kGo";
+    const HONEST_PRIMARY: &str = "RComfCn4wHHsGR8vWBAU7T1r3tHHyxN9Hm";
+
+    /// Everything a node could put in one of these fields that a frame cannot
+    /// survive: an escape run, an embedded row, and a delete.
+    const HOSTILE: &str = "i\u{1b}[31m\nSPENDABLE  999.00000000\u{7f}";
+
+    fn record(
+        identity_address: &str,
+        status: &str,
+        primary: &str,
+        authority: &str,
+    ) -> IdentityRecord {
+        IdentityRecord {
+            fully_qualified_name: "alice@".into(),
+            identity_address: identity_address.to_string(),
+            status: status.to_string(),
+            outpoint: (verus_sdk::money::Txid::from_internal([0u8; 32]), 0),
+            block_height: 1_176_650,
+            identity: serde_json::json!({
+                "minimumsignatures": 1,
+                "primaryaddresses": [primary],
+                "revocationauthority": authority,
+                "recoveryauthority": authority,
+            }),
+        }
+    }
+
+    /// The panel as `id show` renders it, with the escapes stripped so the
+    /// assertions can read one row at a time.
+    fn rendered(record: &IdentityRecord) -> String {
+        let ui = Ui::new(ThemeFlag::Phosphor, false, false);
+        crate::ui::text::strip_ansi(
+            &panel(&ui, record, None, Timelock::None, None).render(&ui.theme),
+        )
+    }
+
+    /// Four strings on this panel are the node's, and none of them was filtered
+    /// before this. A daemon that answers with an escape run must not reach the
+    /// terminal, and must not be able to forge a row inside the box.
+    #[test]
+    fn a_hostile_identity_record_cannot_break_the_identity_frame() {
+        let out = rendered(&record(HOSTILE, HOSTILE, HOSTILE, HOSTILE));
+        assert!(!out.contains('\u{1b}'), "escape survived:\n{out}");
+        assert!(!out.contains('\u{7f}'), "delete survived:\n{out}");
+        let widths: Vec<usize> = out
+            .lines()
+            .filter(|line| line.starts_with(['┌', '│', '├', '└']))
+            .map(UnicodeWidthStr::width)
+            .collect();
+        assert!(!widths.is_empty(), "nothing was framed:\n{out}");
+        assert!(
+            widths.windows(2).all(|pair| pair[0] == pair[1]),
+            "ragged frame {widths:?}:\n{out}"
+        );
+    }
+
+    /// The polarity, and the one thing the filter could quietly break: the
+    /// `(itself)` marker is decided by comparing the *raw* strings, so it has to
+    /// survive a filter going in front of the printed one.
+    #[test]
+    fn an_honest_identity_still_prints_its_addresses_whole_and_still_says_itself() {
+        let out = rendered(&record(
+            HONEST_IDENTITY,
+            "active",
+            HONEST_PRIMARY,
+            HONEST_IDENTITY,
+        ));
+        assert!(out.contains(HONEST_IDENTITY), "the i-address moved:\n{out}");
+        assert!(
+            out.contains(HONEST_PRIMARY),
+            "a primary address moved:\n{out}"
+        );
+        assert!(out.contains("active"), "the status moved:\n{out}");
+        assert!(
+            out.contains("(itself)"),
+            "an authority that is the identity stopped saying so:\n{out}"
+        );
+    }
 
     /// A `Settings` rooted at a temporary directory, returned with the guard so
     /// the directory outlives the files the test writes into it.

@@ -255,7 +255,11 @@ satoshi.
   characters and of the invisible and direction-changing ones that let two
   different names print identically, folded onto one line and capped before
   printing — and the currency **id** is always shown next to the name, because
-  the id is the part that identifies anything.
+  the id is the part that identifies anything. On the `TOKENS` rows that id is
+  re-encoded from the currency id the SDK parsed rather than reprinted from the
+  node's text, and shortened to fit the column. `wallet history` has no such
+  luxury: it falls back to the node's own key for a currency it has no name for,
+  and that string is filtered the same way the name is.
 - **Addresses are parsed before the node sees them.** A typo'd address comes back
   from a node as an empty balance, which reads as "no funds" — the one wrong
   answer a wallet must never give.
@@ -547,6 +551,15 @@ That is a default, not a life sentence: an identity update can repoint either
 authority at another VerusID. `RegistrationOptions` has no field to set them at
 registration, so this build cannot offer the choice up front, but it says what
 the default means before you pay.
+
+**Every string on that panel is the node's word**, the i-addresses included —
+the `i-address` row, the `status`, the primary addresses and the two
+authorities all arrive as JSON, and nothing between the socket and the frame
+checks their shape. So they all go through the same filter a registrant's name
+goes through: the address rows budgeted at an address's exact width — an
+i-address is exactly 34 characters, so a well-formed one prints whole — and the
+`status` word on the same name budget the `name` row uses. An answer that is
+neither cannot repaint the row you were told to compare against.
 
 #### Registration is two transactions
 
@@ -880,6 +893,17 @@ and an enum, they are what the currency *is*, and neither is inferable from the
 name. `options: 32` on a panel tells a reader nothing they can act on; `token`
 does. The raw values are still in `--json` alongside the decoded ones.
 
+**The `currency id` row is the node's word too**, and it is the row the rest of
+the panel is meant to be checked against — so it goes through the same filter
+the name above it does, budgeted at an address's exact width. An i-address is
+exactly 34 characters, so a well-formed one prints whole; an answer longer than
+that is not an address, whatever field it arrived in, and cannot forge a row
+inside the box. The `currency id` on `MINT` and `PRECONVERT` and the `into` row
+on `CONVERT` are filtered the same way, because each of those panels precedes a
+spend. The launch panels are a different case: their id is re-encoded from the
+currency id the launch itself produced, not reprinted from anything a node
+said.
+
 **`--supply` becomes a preallocation to the defining identity**, and has to. A
 token's supply is the **sum of its preallocations** — `initial_supply` is read
 only for a fractional currency, so setting it on a token produces one with no
@@ -1124,7 +1148,7 @@ one; a floor could only be checked against a number nobody produced.
 ```
 ┌─ PRECONVERT ─────────────────────────────────────────────────────────────┐
 │ into          pecubask1                                                  │
-│ currency id   iBw8P4kY…                                                  │
+│ currency id   i9dpvtcsH6FRD4UmNVur75cLXj7rUx9iD1                         │
 │ spending      5.00000000  VRSCTEST                                       │
 │ you receive   settled at launch  from the final ratio of every           │
 │               contribution                                               │

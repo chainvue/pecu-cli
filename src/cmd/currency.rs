@@ -841,7 +841,13 @@ fn panel(ui: &Ui, node: &crate::node::Node, found: &CurrencySummary) -> Panel {
                 palette.accent,
             ),
         )
-        .row("currency id", Text::of(&found.currency_id, palette.value));
+        // An i-address, and the node is the only thing saying so. This is the
+        // row a reader is told to compare against, so it gets the same filter
+        // the name above it gets.
+        .row(
+            "currency id",
+            Text::of(fmt::id(&found.currency_id, glyphs.ellipsis), palette.value),
+        );
 
     if let Some(parent) = &found.parent {
         panel = panel.row(
@@ -2049,7 +2055,12 @@ fn mint_panel(
                 palette.accent,
             ),
         )
-        .row("currency id", Text::of(&found.currency_id, palette.value))
+        // The node's word for what is about to be minted; filtered like the
+        // name above it, for the reason `panel` gives in full.
+        .row(
+            "currency id",
+            Text::of(fmt::id(&found.currency_id, glyphs.ellipsis), palette.value),
+        )
         .row(
             "amount",
             Text::of(fmt::amount(amount), palette.accent)
@@ -2466,7 +2477,12 @@ fn preconvert_panel(
             palette.accent,
         ),
     )
-    .row("currency id", Text::of(&target.currency_id, palette.value))
+    // The node's word for what is being bought into; filtered like the name
+    // above it, for the reason `panel` gives in full.
+    .row(
+        "currency id",
+        Text::of(fmt::id(&target.currency_id, glyphs.ellipsis), palette.value),
+    )
     .row(
         "spending",
         Text::of(fmt::amount(amount), palette.accent)
@@ -2933,7 +2949,12 @@ fn convert_panel(ui: &Ui, r: &ConvertReview, dry_run: bool) -> Panel {
             "into",
             Text::of(show(&r.target.name), palette.accent)
                 .push("  ", palette.muted)
-                .push(&r.target.currency_id, palette.muted),
+                // Filtered like the name it sits beside, and for the same
+                // reason: this row precedes a spend.
+                .push(
+                    fmt::id(&r.target.currency_id, glyphs.ellipsis),
+                    palette.muted,
+                ),
         );
 
     if r.routed {
@@ -3050,7 +3071,160 @@ fn check_transparent(recipient: &str) -> Result<(), CurrencyError> {
 
 #[cfg(test)]
 mod tests {
+    use unicode_width::UnicodeWidthStr;
+
     use super::*;
+    use crate::cli::Theme as ThemeFlag;
+    use crate::keystore::{Cipher, Kdf, ENVELOPE_VERSION};
+
+    /// A real i-address, so the polarity test is run against the shape a
+    /// well-behaved daemon actually returns.
+    const HONEST_ID: &str = "iK2k8YH1jfR7RLmEZ3zac2Mkx5rxSgbMqg";
+
+    /// Everything a node could put in a `currency_id` that a frame cannot
+    /// survive: an escape run, an embedded row, a delete, a direction override,
+    /// and more characters than any address has.
+    fn hostile_id() -> String {
+        format!(
+            "i\u{1b}[31m\nSPENDABLE  999.00000000\u{7f}\u{202e}{}",
+            "n".repeat(80)
+        )
+    }
+
+    fn envelope() -> Envelope {
+        Envelope {
+            version: ENVELOPE_VERSION,
+            label: "paper".into(),
+            address: "RJ7gsKDjUjPS8XZzENqmQMmWJRLuTnw5hp".into(),
+            compressed: true,
+            created: 0,
+            kdf: Kdf {
+                algorithm: "argon2id".into(),
+                salt: String::new(),
+                memory_kib: 1,
+                iterations: 1,
+                parallelism: 1,
+            },
+            cipher: Cipher {
+                algorithm: "chacha20poly1305".into(),
+                nonce: String::new(),
+            },
+            ciphertext: String::new(),
+        }
+    }
+
+    fn summary(currency_id: &str) -> CurrencySummary {
+        CurrencySummary {
+            currency_id: currency_id.to_string(),
+            name: "Kaiju".into(),
+            fully_qualified_name: "Kaiju".into(),
+            parent: Some("VRSCTEST".into()),
+            system_id: HONEST_ID.into(),
+            start_block: 1_178_000,
+            end_block: 0,
+            options: option::TOKEN,
+            proof_protocol: 1,
+            definition: serde_json::json!({}),
+        }
+    }
+
+    /// The three panels that print a node-supplied currency id and need no
+    /// node to build. `currency show`'s own panel is not among them: it asks
+    /// the node for the tip, so it cannot be rendered offline.
+    fn panels_printing_an_id(currency_id: &str) -> Vec<String> {
+        let ui = Ui::new(ThemeFlag::Phosphor, false, false);
+        let found = summary(currency_id);
+        let envelope = envelope();
+        let mint = mint_panel(
+            &ui,
+            &found,
+            Amount::from_sat(100_000_000),
+            "RJ7gsKDjUjPS8XZzENqmQMmWJRLuTnw5hp",
+            &envelope,
+            Amount::from_sat(10_000),
+            "2aada7",
+            true,
+        );
+        let preconvert = preconvert_panel(
+            &ui,
+            &found,
+            "VRSCTEST",
+            HONEST_ID,
+            Amount::from_sat(100_000_000),
+            "RJ7gsKDjUjPS8XZzENqmQMmWJRLuTnw5hp",
+            &envelope,
+            Amount::from_sat(10_000),
+            "2aada7",
+            1_177_000,
+            true,
+        );
+        let convert = convert_panel(
+            &ui,
+            &ConvertReview {
+                target: &found,
+                source: &found,
+                basket: &found,
+                routed: false,
+                amount: Amount::from_sat(100_000_000),
+                estimated_out: Amount::from_sat(99_000_000),
+                min_out: None,
+                recipient: "RJ7gsKDjUjPS8XZzENqmQMmWJRLuTnw5hp",
+                envelope: &envelope,
+                fee: Amount::from_sat(10_000),
+                txid: "2aada7",
+            },
+            true,
+        );
+        [mint, preconvert, convert]
+            .iter()
+            .map(|panel| panel.render(&ui.theme))
+            .collect()
+    }
+
+    /// Every panel here precedes a spend, and the id row is the one a reader is
+    /// told to compare against. A node that answers with an escape run must not
+    /// reach the terminal, and must not be able to forge a row inside the box.
+    #[test]
+    fn a_hostile_currency_id_cannot_break_a_panel_that_precedes_a_spend() {
+        for rendered in panels_printing_an_id(&hostile_id()) {
+            let stripped = crate::ui::text::strip_ansi(&rendered);
+            assert!(!stripped.contains('\u{1b}'), "escape survived:\n{stripped}");
+            assert!(!stripped.contains('\u{7f}'), "delete survived:\n{stripped}");
+            assert!(
+                !stripped.contains('\u{202e}'),
+                "override survived:\n{stripped}"
+            );
+            let widths: Vec<usize> = stripped
+                .lines()
+                .filter(|line| line.starts_with(['┌', '│', '├', '└']))
+                .map(UnicodeWidthStr::width)
+                .collect();
+            assert!(!widths.is_empty(), "nothing was framed:\n{stripped}");
+            assert!(
+                widths.windows(2).all(|pair| pair[0] == pair[1]),
+                "ragged frame {widths:?}:\n{stripped}"
+            );
+        }
+    }
+
+    /// The polarity, and the guard on the budget: an i-address is exactly 34
+    /// characters, so a filter sized one short would eat the middle of a
+    /// genuine one on a panel that precedes a broadcast.
+    #[test]
+    fn an_ordinary_currency_id_survives_every_panel_that_prints_one() {
+        for rendered in panels_printing_an_id(HONEST_ID) {
+            let stripped = crate::ui::text::strip_ansi(&rendered);
+            assert!(
+                stripped.contains(HONEST_ID),
+                "the id did not print whole:\n{stripped}"
+            );
+            // Scoped to the rows carrying it: `signed by` legitimately elides
+            // the signing address, and always has.
+            for line in stripped.lines().filter(|line| line.contains(HONEST_ID)) {
+                assert!(!line.contains('…'), "the id row was elided:\n{stripped}");
+            }
+        }
+    }
 
     /// Both call sites need a node to reach, so this is asked of the helper
     /// directly: the figures are the node's, and `coins_to_sat` saturates an
