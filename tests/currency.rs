@@ -1342,6 +1342,25 @@ fn a_missing_identity_names_the_register_flag_rather_than_the_node() {
     assert!(!stderr.contains("pecu doctor"), "{stderr}");
 }
 
+/// The refusal costs nothing to hit but twenty minutes to discover the hard
+/// way, so it is on the flag rather than only in the error.
+#[test]
+fn launch_help_says_a_dry_run_will_not_register() {
+    let home = home();
+    generate(&home, "demo");
+    let assertion = pecu(&home)
+        .args(["currency", "launch", "--help"])
+        .assert()
+        .success();
+    // clap wraps this help to the terminal width, and it honours COLUMNS even
+    // when stdout is captured — at 80 columns the wrap lands between "dry" and
+    // "run". Flatten first so the phrase means what it says.
+    let stdout = flat(&String::from_utf8_lossy(&assertion.get_output().stdout));
+    assert!(stdout.contains("--register"), "{stdout}");
+    assert!(stdout.contains("dry run"), "{stdout}");
+    assert!(stdout.contains("stops there"), "{stdout}");
+}
+
 #[test]
 fn launch_advertises_the_register_flag() {
     let home = home();

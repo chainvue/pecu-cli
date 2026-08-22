@@ -782,7 +782,20 @@ pecu currency mint mytoken@ --to RComfCn4w…N9Hm --amount 1000
 defined by an identity, so launching on a name that does not exist yet takes two
 registrations' worth of waiting and 300 VRSCTEST. `--register` does the whole
 thing in one command: register, wait for the commitment, reveal, wait to be
-mined, then launch.
+mined, then launch. `--register-timeout` bounds each of those two waits
+separately, so a slow chain can take up to twice it.
+
+**It stops rather than waiting for a registration it did not send.** Two cases
+end the command early instead of polling. A dry run stops: registering burns 100
+VRSCTEST, so `--dry-run` will not do it, and with no identity on chain there is
+nothing for the launch to be defined by and nothing to price a preview against —
+`pecu id register <name> --dry-run` prices the registration on its own, and the
+launch preview works once the identity exists. And a registration that does not
+finish inside the one run stops too — `--json` stops at the commitment, and the
+commitment may not confirm inside `--register-timeout` — because past that point
+there is no reveal on its way to a block to wait for. Nothing is lost either
+way: the reservation is on disk before anything is broadcast, and the same
+command carries on from it.
 
 It is opt-in and stays that way. A misspelled name is a plausible mistake and
 registration burns 100 VRSCTEST — creating `pecubaskt1@` because somebody typed
