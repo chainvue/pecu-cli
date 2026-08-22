@@ -138,6 +138,10 @@ fn render(ui: &Ui, settings: &Settings, report: &Result<NodeReport, NodeError>) 
             "reply cap",
             Text::of(format!("{} MiB", profile.max_response_mb), palette.value),
         )
+        .row(
+            "timeout",
+            Text::of(format!("{} s", profile.timeout_secs), palette.value),
+        )
         .section("BUILD")
         .row("pecu", Text::of(env!("CARGO_PKG_VERSION"), palette.value))
         .row("verus-sdk", Text::of(&sdk_rev!()[..7], palette.value))
@@ -242,6 +246,7 @@ fn emit_json(settings: &Settings, report: &Result<NodeReport, NodeError>) {
             "currency": profile.currency,
             "allow_spend": profile.allow_spend,
             "max_response_mb": profile.max_response_mb,
+            "timeout_secs": profile.timeout_secs,
         },
         "paths": {
             "root": paths.root(),

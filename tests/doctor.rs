@@ -50,6 +50,14 @@ fn an_unreachable_node_still_reports_the_local_half_then_fails() {
         "no diagnostic:\n{stderr}"
     );
     assert!(stderr.contains("--node"), "no advice:\n{stderr}");
+    // A single token, because miette wraps the help text and anything longer is
+    // at the mercy of where the line breaks. A transport failure can be a slow
+    // node rather than a missing one, and the setting that fixes that has to be
+    // named or the reader goes looking for a network problem they do not have.
+    assert!(
+        stderr.contains("timeout_secs"),
+        "no timeout advice:\n{stderr}"
+    );
 }
 
 #[test]
@@ -67,6 +75,51 @@ fn json_is_emitted_even_when_the_node_is_down() {
     assert_eq!(document["paths"]["config_exists"], false);
     assert_eq!(document["build"]["features"][0], "network");
     assert!(document["node"]["error"].is_string());
+}
+
+#[test]
+fn the_timeout_a_profile_sets_is_reported() {
+    let home = home();
+    write_config(&home, "[profiles.testnet]\ntimeout_secs = 45\n");
+    let assertion = pecu(&home)
+        .args(["doctor", "--node", DEAD_NODE, "--json"])
+        .assert()
+        .failure();
+    let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+    let document: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+
+    // The whole file -> merge -> report path: "my setting is being ignored" is
+    // the question doctor exists to answer, and it can only answer it for a
+    // setting it prints.
+    assert_eq!(document["profile"]["timeout_secs"], 45);
+}
+
+#[test]
+fn a_node_that_never_answers_gives_up_at_the_profiles_timeout() {
+    let home = home();
+    // Bound but never accepted: the kernel completes the handshake into the
+    // accept queue, so the request connects and then waits for a status line
+    // that never comes. That is the shape of the failure this setting is for —
+    // a node that is reachable and simply does not answer in time.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("a bound address").port();
+    write_config(
+        &home,
+        &format!("[profiles.testnet]\nnode = \"http://127.0.0.1:{port}\"\ntimeout_secs = 1\n"),
+    );
+
+    let started = std::time::Instant::now();
+    pecu(&home).arg("doctor").assert().failure();
+    let elapsed = started.elapsed();
+
+    // `HttpTransport` exposes no way to read its timeout back, so the clock is
+    // the only proof that `connect` hands the profile's value to it. Loose
+    // enough not to be a wall-clock race, tight enough that the old hardcoded
+    // 20 seconds fails here.
+    assert!(
+        elapsed < std::time::Duration::from_secs(15),
+        "gave up after {elapsed:?}, so the profile's timeout was not used"
+    );
 }
 
 #[test]

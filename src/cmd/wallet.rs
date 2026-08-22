@@ -85,7 +85,8 @@ impl WalletError {
             ),
             FlowError::Rpc(RpcError::Transport(_)) => {
                 "the node could not be reached — check your connection, or point somewhere else \
-                 with --node"
+                 with --node. If it is reachable but merely slow, raise `timeout_secs` under \
+                 this profile in config.toml."
                     .to_string()
             }
             FlowError::Key(_) => {

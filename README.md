@@ -315,6 +315,11 @@ A long-lived mining address can have a UTXO set far past the SDK's 8 MiB reply
 ceiling. That is a memory bound against a hostile node, not a bug; raise it for a
 profile with `max_response_mb` and the error says so.
 
+The same address on a busy node can take longer than the 20-second RPC timeout to
+answer at all — the node does reply, just not in time, and past the ceiling the
+read fails outright rather than slowly. Raise `timeout_secs` for the profile, and
+the error says so.
+
 ### `pecu send`
 
 ```sh
@@ -1384,6 +1389,13 @@ allow_spend = true
 # node, not a performance knob. 8 MiB covers any ordinary wallet; a long-lived
 # mining address can need far more.
 max_response_mb = 8
+
+# How long to wait for a single RPC reply, in seconds. Short by default so a
+# wrong URL fails while you are still looking at the terminal; a busy public node
+# can take longer than that to answer `getaddressutxos`, and past the ceiling the
+# read fails outright rather than slowly. Nothing to do with `id register
+# --timeout`, which is in minutes and bounds a wait for confirmations.
+timeout_secs = 20
 ```
 
 A profile that appears only in the file inherits testnet's defaults for whatever
