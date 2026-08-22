@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    name: fmt, clippy, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins 1.95.0 with rustfmt and clippy, and rustup
+      # honours it. Nothing here picks a channel, so the file stays the one
+      # place the toolchain is decided.
+      - name: Show toolchain
+        run: |
+          rustup show active-toolchain
+          cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # The SDK is a git dependency pinned by rev, so the checkout is worth
+          # caching across runs — it dominates a cold build.
+          cache-on-failure: true
+
+      - name: Formatting
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features
+
+      # The network and funded-key tests are #[ignore]d and stay that way here:
+      # they spend real VRSCTEST and talk to a public node this project does not
+      # pay for. CI covers the offline suite only, which is the whole of what
+      # can be asserted without a wallet.
+      - name: Tests
+        run: cargo test --all-features
+
+      - name: Build
+        run: cargo build --release
