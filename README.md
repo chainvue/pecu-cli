@@ -252,9 +252,10 @@ satoshi.
   other down with it, and `--json` says `"known": false` rather than an empty list.
 - **Currency names are untrusted.** They come from the node and Verus permits
   more in a name than it looks like it does, so they are stripped of control
-  characters, folded onto one line and capped before printing — and the currency
-  **id** is always shown next to the name, because the id is the part that
-  identifies anything.
+  characters and of the invisible and direction-changing ones that let two
+  different names print identically, folded onto one line and capped before
+  printing — and the currency **id** is always shown next to the name, because
+  the id is the part that identifies anything.
 - **Addresses are parsed before the node sees them.** A typo'd address comes back
   from a node as an empty balance, which reads as "no funds" — the one wrong
   answer a wallet must never give.
@@ -369,9 +370,11 @@ either.
 
 **The `to` row carries two names**: the one you typed and the one the node says
 it resolved to. The node's half is untrusted display text like any other name —
-stripped of control characters, folded onto one line and capped before it goes
-inside the frame — and the pair is budgeted together, so an ordinary
-sub-identity still prints in full rather than losing its middle to an ellipsis.
+stripped of control characters and of the invisible and direction-changing ones
+that let two different names print identically, folded onto one line and capped
+before it goes inside the frame — and the pair is budgeted together, so an
+ordinary sub-identity still prints in full rather than losing its middle to an
+ellipsis.
 
 **Paying out of a VerusID's own funds** is the other half of the `HELD BY ID`
 row in `wallet balance`. Money flows *into* an identity with an ordinary
