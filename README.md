@@ -13,8 +13,8 @@ sends, air-gapped signing, transaction decoding, the VerusID lifecycle and
 currency operations — from one binary.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/media/demo-dark.svg">
-  <img alt="pecu generating a key, decoding a transaction and reading an identity" src="docs/media/demo-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/doctor-dark.svg">
+  <img alt="pecu doctor reporting profile, node, build and chain tip" src="docs/media/doctor-light.svg">
 </picture>
 
 ## No full node
@@ -63,46 +63,37 @@ Full reference: **[docs/commands.md](docs/commands.md)** ·
 
 ## Read an identity
 
-```
-$ pecu id show VRSCTEST@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/id-dark.svg">
+  <img alt="pecu id show VRSCTEST@, listing authorities and timelock state" src="docs/media/id-light.svg">
+</picture>
 
-IDENTITY
-  name          VRSCTEST@
-  i-address     iJhCezBExJHvtyH3fGhNnt2NhU4Ztkf2yq
-  status        ok active
-  last change   block 1,186,412   2026-08-12 02:08 UTC  (10d 20h ago)
-
-CONTROL
-  signatures    1-of-1
-  - RXKs5Gz8kRqpA52M25AW5FzP3aCNq46yMh
-  revocation    iJhCezBExJHvtyH3fGhNnt2NhU4Ztkf2yq  (itself)
-  recovery      iJhCezBExJHvtyH3fGhNnt2NhU4Ztkf2yq  (itself)
-
-  - this identity cannot be revoked: it is its own recovery authority, and
-    consensus refuses a revocation nobody could undo
-```
-
-That last line is the point of the tool. An identity that is its own recovery
+The last line is the point of the tool. An identity that is its own recovery
 authority is unrevokable, and nothing in the raw RPC reply says so.
 
 ## Decode a transaction
 
-Offline. Takes hex on the command line, from a file, or on stdin.
+Give it a txid and it fetches; give it hex or `-` and it never touches the
+network. This is a real currency launch on VRSCTEST — seven outputs, of which
+one *holds a VerusID* and one holds reserves:
 
-```
-$ pecu tx explain "$(cat fixtures/coinbase.hex)"
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/tx-dark.svg">
+  <img alt="pecu tx explain decoding a real VRSCTEST currency launch" src="docs/media/tx-light.svg">
+</picture>
 
-TRANSACTION
-  txid     7f291acf765bf375baae43337c5b27fd123800e5486782ea00f0ff90603cd894
-  expiry   ! never — this transaction stays minable forever
+Output `#2` is the reason this command exists: an undecodable CryptoCondition
+that **may hold currency**, called out rather than shown as an empty `0.00000000`.
 
-OUTPUTS
-  4 outputs — 3.00010000 in native satoshis
-  #0 3.00010000
-       -> R9UJQch4pJLAo649s5yQh5hp2tXZij9oQG  pays a bare public key, 33 bytes — a mined coinbase
-  #1 0.00000000
-       a CryptoCondition this SDK does not decode (eval 4) — it cannot hold currency
-```
+## Check a balance
+
+Spendable, withheld, in-conditions and every token on the address, separated —
+because a balance that adds them up is a balance you cannot spend from.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/wallet-dark.svg">
+  <img alt="pecu wallet balance separating spendable, withheld and token balances" src="docs/media/wallet-light.svg">
+</picture>
 
 ## Register a VerusID
 
