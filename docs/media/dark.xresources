@@ -1,0 +1,28 @@
+background: #0d1117
+foreground: #c9d1d9
+cursorColor: #58a6ff
+colorBD: #f0f6fc
+color0: #484f58
+color1: #ff7b72
+color2: #3fb950
+color3: #d29922
+color4: #58a6ff
+color5: #bc8cff
+color6: #39c5cf
+color7: #b1bac4
+color8: #6e7681
+color9: #ffa198
+color10: #56d364
+color11: #e3b341
+color12: #79c0ff
+color13: #d2a8ff
+color14: #56d4dd
+color15: #f0f6fc
+
+! Regenerate both variants after re-recording:
+!   asciinema convert --output-format asciicast-v2 demo.cast demo-v2.cast
+!   svg-term --in demo-v2.cast --out demo-<variant>.svg --window \
+!            --width 78 --height 44 --term xresources --profile <variant>.xresources
+!
+! Note: svg-term only honours --profile when the path is outside the repo.
+! Generate into a temp directory and copy the SVG back.
