@@ -12,7 +12,10 @@
 sends, air-gapped signing, transaction decoding, the VerusID lifecycle and
 currency operations — from one binary.
 
-![pecu generating a key, decoding a transaction and reading an identity](docs/media/demo.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/demo-dark.svg">
+  <img alt="pecu generating a key, decoding a transaction and reading an identity" src="docs/media/demo-light.svg">
+</picture>
 
 ## No full node
 
