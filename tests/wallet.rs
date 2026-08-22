@@ -188,6 +188,33 @@ fn an_unreachable_node_is_not_reported_as_no_such_identity() {
 }
 
 #[test]
+fn an_unreachable_node_names_the_timeout_setting_as_well_as_the_node_flag() {
+    let home = home();
+    // An R-address rather than `VRSCTEST@`, so this goes straight to reading the
+    // outputs — the path that reproduced the bug, where a node that is up but
+    // slow was reported as a node that could not be reached at all. Fixing only
+    // `node.rs` leaves this arm saying the same misleading thing.
+    let assertion = pecu(&home)
+        .args([
+            "wallet",
+            "balance",
+            "--address",
+            "RCvP2M7HjvGLHMf47qopqxsNGBmM97Q4n3",
+            "--node",
+            DEAD_NODE,
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assertion.get_output().stderr).into_owned();
+
+    // Short phrases only: miette wraps the help text, so anything longer than a
+    // few words is at the mercy of where the line breaks.
+    assert!(stderr.contains("reading the outputs"), "{stderr}");
+    assert!(stderr.contains("timeout_secs"), "{stderr}");
+    assert!(stderr.contains("--node"), "{stderr}");
+}
+
+#[test]
 fn address_and_key_cannot_both_be_given() {
     let home = home();
     generate(&home, "one");

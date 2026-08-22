@@ -25,6 +25,11 @@ pub const DEFAULT_PROFILE: &str = "testnet";
 /// profile. See [`Profile::max_response_mb`].
 pub const DEFAULT_MAX_RESPONSE_MB: u64 = 8;
 
+/// Long enough for a public node under load, short enough that a wrong URL
+/// fails while you are still looking at the terminal. See
+/// [`Profile::timeout_secs`].
+pub const DEFAULT_TIMEOUT_SECS: u64 = 20;
+
 #[derive(Debug, Error, Diagnostic)]
 pub enum ConfigError {
     #[error("cannot work out where to put pecu's files")]
@@ -149,6 +154,8 @@ pub struct ProfileFile {
     pub allow_spend: Option<bool>,
     /// Ceiling on a single RPC reply, in MiB.
     pub max_response_mb: Option<u64>,
+    /// How long to wait for a single RPC reply, in seconds.
+    pub timeout_secs: Option<u64>,
 }
 
 /// A profile with every field decided.
@@ -169,6 +176,18 @@ pub struct Profile {
     /// long-lived mining address can have a UTXO set an order of magnitude
     /// larger than that, and raising this is the deliberate way to read one.
     pub max_response_mb: u64,
+    /// How long to wait for a single RPC reply, in seconds.
+    ///
+    /// 20 seconds is the working default, and is enough for anything a node
+    /// answers promptly. It is not enough for every node: measured against
+    /// `api.verustest.net`, `getaddressutxos` for an ordinary address has
+    /// answered at 23 seconds, and past the ceiling the read fails outright
+    /// rather than slowly — so a slow-but-working node needs a way to say so.
+    ///
+    /// `0` does not mean "wait forever". It is floored to one second when the
+    /// file is read, because a zero duration is already expired by the time the
+    /// request starts and would fail every call instantly.
+    pub timeout_secs: u64,
 }
 
 impl Profile {
@@ -181,6 +200,7 @@ impl Profile {
                 currency: "VRSCTEST".into(),
                 allow_spend: true,
                 max_response_mb: DEFAULT_MAX_RESPONSE_MB,
+                timeout_secs: DEFAULT_TIMEOUT_SECS,
             }),
             "mainnet" => Some(Self {
                 name: name.into(),
@@ -189,6 +209,7 @@ impl Profile {
                 currency: "VRSC".into(),
                 allow_spend: false,
                 max_response_mb: DEFAULT_MAX_RESPONSE_MB,
+                timeout_secs: DEFAULT_TIMEOUT_SECS,
             }),
             _ => None,
         }
@@ -291,6 +312,15 @@ impl Settings {
             if let Some(cap) = overrides.max_response_mb {
                 profile.max_response_mb = cap;
             }
+            // Floored rather than taken literally: the deadline is computed once
+            // at request start, and a zero duration is already expired, so every
+            // call would fail instantly with `timed out reading response` — the
+            // same words a genuinely slow node produces. A setting that makes
+            // the tool look broken is worse than one that quietly refuses to be
+            // zero.
+            if let Some(seconds) = overrides.timeout_secs {
+                profile.timeout_secs = seconds.max(1);
+            }
         }
 
         // The flag wins over everything, including a profile that named a node.
@@ -345,6 +375,28 @@ mod tests {
         assert_eq!(settings.profile.node, "https://api.verustest.net");
         assert_eq!(settings.profile.currency, "VRSCTEST");
         assert!(settings.profile.allow_spend);
+        assert_eq!(settings.profile.timeout_secs, DEFAULT_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn a_profile_can_give_a_slow_node_longer() {
+        let settings =
+            settings(Some("[profiles.testnet]\ntimeout_secs = 60\n"), None, None).unwrap();
+        assert_eq!(settings.profile.timeout_secs, 60);
+        // The setting it sits beside in the merge is still the built-in one.
+        assert_eq!(settings.profile.max_response_mb, DEFAULT_MAX_RESPONSE_MB);
+    }
+
+    /// Zero is not "wait forever": the deadline is computed once at request
+    /// start, and a duration of zero is already in the past by then, so every
+    /// call would fail immediately with the same `timed out reading response`
+    /// a genuinely slow node produces. The floor is why that cannot happen,
+    /// and it is not visible from the assertion.
+    #[test]
+    fn a_zero_timeout_is_floored_because_zero_would_fail_every_call_instantly() {
+        let settings =
+            settings(Some("[profiles.testnet]\ntimeout_secs = 0\n"), None, None).unwrap();
+        assert_eq!(settings.profile.timeout_secs, 1);
     }
 
     #[test]

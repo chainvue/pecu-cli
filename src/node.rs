@@ -15,10 +15,6 @@ use verus_sdk::network::{HttpTransport, RpcClient, RpcError};
 
 use crate::config::Profile;
 
-/// Long enough for a public node under load, short enough that a wrong URL
-/// fails while you are still looking at the terminal.
-const TIMEOUT: Duration = Duration::from_secs(20);
-
 pub type Node = RpcClient<HttpTransport>;
 
 #[derive(Debug, Error, Diagnostic)]
@@ -54,7 +50,10 @@ impl NodeError {
     pub fn request(what: &'static str, url: &str, source: RpcError) -> Self {
         let advice = match &source {
             RpcError::Transport(_) => {
-                "check your connection, or point somewhere else with --node".to_string()
+                "check your connection, or point somewhere else with --node — if the node is \
+                 reachable but simply slow, give it longer with `timeout_secs` for this profile \
+                 in config.toml"
+                    .to_string()
             }
             RpcError::MethodUnavailable { method } => format!(
                 "the endpoint refused `{method}` — public nodes sit behind a method allowlist; \
@@ -93,7 +92,7 @@ pub fn connect(profile: &Profile) -> Result<Node, NodeError> {
             url: url.to_string(),
             source: Box::new(source),
         })?
-        .with_timeout(TIMEOUT)
+        .with_timeout(Duration::from_secs(profile.timeout_secs))
         .with_max_response_bytes(
             usize::try_from(profile.max_response_mb.saturating_mul(1024 * 1024))
                 .unwrap_or(usize::MAX),
