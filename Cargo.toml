@@ -25,7 +25,7 @@ shielded = ["verus-sdk/shielded"]
 # The SDK this whole program exists to demonstrate. Pinned by rev: the crate is
 # in early development and is not on crates.io, so "latest main" is not a
 # reproducible dependency.
-verus-sdk = { git = "https://github.com/chainvue/verus-rust-sdk", rev = "498c396eb2016d2e010ac78eae1839c858455c59", features = [
+verus-sdk = { git = "https://github.com/chainvue/verus-rust-sdk", rev = "ae279ea5cadfd76cffcd4948a2b5a1876cd2753c", features = [
     "network",
 ] }
 

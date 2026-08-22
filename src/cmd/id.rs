@@ -153,6 +153,13 @@ pub enum IdError {
     )]
     RegistrationUnfinished { name: String },
 
+    #[error("this version of pecu does not recognise the state of `{name}`'s commitment")]
+    #[diagnostic(
+        code(pecu::unknown_commitment_state),
+        help("the SDK reported a state this build has no arm for, which means it is newer than this binary: `{detail}`. Nothing was broadcast and the saved reservation is intact — `pecu --version` names the SDK revision this was built against, and updating pecu should give it a name")
+    )]
+    UnknownCommitmentState { name: String, detail: String },
+
     #[error("the saved commitment for `{name}` has expired")]
     #[diagnostic(
         code(pecu::commitment_expired),
@@ -606,6 +613,12 @@ fn begin(
         },
         min_sigs: args.min_sigs,
         referral: args.referral.clone(),
+        // `None` is the daemon's default and today's behaviour: the identity
+        // is its own revocation and recovery authority. The SDK can now set
+        // both at registration, which saves a second transaction — but that is
+        // a new pair of flags and a new panel row, not part of moving the pin.
+        revocation_authority: None,
+        recovery_authority: None,
         pin_fee: None,
     };
 
@@ -1090,6 +1103,26 @@ fn resume(
             ));
             ui.note("run the same command again once it confirms");
             return Ok(());
+        }
+        // The state this file used to infer by string-matching `expiring-soon`
+        // on a rejected re-broadcast. The SDK tracks the expiry height now and
+        // says so by name, which is the difference between knowing and
+        // guessing — the two states need opposite actions, retry versus start
+        // over, and the guess only ever fired once a broadcast had been
+        // attempted. The string match below is kept: it still covers the same
+        // rejection arriving from a node the SDK did not classify.
+        CommitmentStatus::Expired { .. } => return Err(IdError::CommitmentExpired { name }.into()),
+        // `CommitmentStatus` is `#[non_exhaustive]`, and the SDK's own note
+        // says why: the set of ways a commitment can fail is not closed. A
+        // state this version cannot name is not an error in the registration —
+        // the reservation is intact — so it says what it is rather than
+        // guessing which of the arms above it resembles.
+        other => {
+            return Err(IdError::UnknownCommitmentState {
+                name,
+                detail: format!("{other:?}"),
+            }
+            .into())
         }
     };
 
