@@ -100,26 +100,25 @@ because a balance that adds them up is a balance you cannot spend from.
 Two transactions: one commits to the name, a second claims it once the first
 confirms. `pecu` runs both and waits in between.
 
-```
-$ pecu id register alice --from mykey
-
-  ok step 1 of 2 — commitment d29cd23570a9…
-SAVED
-  registration   ~/.config/verus-pecu/pending/alice.json
-  - this file holds the salt. Without it the name cannot be claimed and the
-    commitment fee is lost
-  waiting — in the mempool, 30s elapsed
-  ...
-  ok broadcast — txid 5f7d49c59fec…
-REGISTRATION SENT
-  name        alice@
-  paid        100.00000000 VRSCTEST
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/register-dark.svg">
+  <img alt="pecu id register running both phases, saving the reservation and revealing the name" src="docs/media/register-light.svg">
+</picture>
 
 **Interrupting is safe.** The reservation is written to disk *before* the
 commitment is broadcast, so Ctrl-C, a timeout or a dead connection all leave a
-registration the same command picks up. That path is exercised, not theoretical:
-the run above lost its node mid-wait and resumed from the file.
+registration the same command picks up. That is not theoretical: an earlier run
+lost its node mid-wait and resumed from the file.
+
+## Send
+
+`--dry-run` builds and signs and stops, so you can read the panel before
+anything is broadcast. `--json` refuses to spend without `--yes`.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/send-dark.svg">
+  <img alt="pecu send --dry-run showing the review panel, the built outputs and the signed transaction" src="docs/media/send-light.svg">
+</picture>
 
 ## The air gap
 
