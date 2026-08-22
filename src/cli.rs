@@ -693,7 +693,9 @@ pub struct CurrencyLaunchArgs {
     #[arg(long, conflicts_with = "reserve")]
     pub mintable: bool,
 
-    /// Seed a reserve before launch, as `NAME@:COINS`. Repeat per reserve
+    /// Refused: the SDK's launch builder funds no contribution, so this would
+    /// declare reserve backing the basket does not hold. `pecu currency
+    /// preconvert` is what actually seeds a reserve, and it spends
     #[arg(long, value_name = "NAME@:COINS", requires = "reserve")]
     pub contribute: Vec<String>,
 

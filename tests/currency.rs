@@ -357,6 +357,50 @@ fn reserve_percentages_that_do_not_total_a_hundred_are_refused_before_the_passph
 }
 
 #[test]
+fn contributing_at_launch_is_refused_before_a_key_is_unlocked() {
+    let home = home();
+    generate(&home, "demo");
+    pecu(&home)
+        .env_remove("PECU_PASSPHRASE")
+        .args([
+            "currency",
+            "launch",
+            "alice@",
+            "--supply",
+            "100",
+            "--reserve",
+            "VRSCTEST:60",
+            "--reserve",
+            "TST:40",
+            "--contribute",
+            "VRSCTEST:10",
+            "--node",
+            DEAD_NODE,
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("contribution_unfunded"))
+        // The remedy has to be named, because it is the only funded way to put
+        // anything into a reserve before the start block.
+        .stderr(contains("preconvert"))
+        // Refused ahead of the keystore and the node: this is what would fail
+        // if the guard drifted back down beside the definition.
+        .stderr(contains("passphrase").not());
+}
+
+#[test]
+fn launch_help_says_contribute_is_refused() {
+    let home = home();
+    generate(&home, "demo");
+    pecu(&home)
+        .args(["currency", "launch", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--contribute"))
+        .stdout(predicate::str::contains("Refused"));
+}
+
+#[test]
 fn a_reserve_without_a_percentage_is_refused() {
     let home = home();
     generate(&home, "demo");

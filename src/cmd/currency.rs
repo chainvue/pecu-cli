@@ -294,6 +294,24 @@ pub enum CurrencyError {
     )]
     NftScriptGap,
 
+    #[error("--contribute would declare reserve backing that nothing funds")]
+    #[diagnostic(
+        code(pecu::contribution_unfunded),
+        help(
+            "this is an SDK gap, not a mistake in what you asked for. A contribution is an extra \
+              value-bearing output funding the reserve, and the seven the launch builder emits \
+              never include it — so not one satoshi would leave the signing key. Worse, the launch \
+              notarization published in the same transaction states the reserves hold nothing, so \
+              the definition would claim backing it does not have, permanently and unchangeably. \
+              Launch without --contribute and seed each reserve with `pecu currency preconvert`, \
+              which does spend, before the start block — remembering that a fractional basket \
+              refunds the entire launch unless every one of its reserves receives something. The \
+              SDK has since learnt to build the funding output; this refusal goes when the pin \
+              moves"
+        )
+    )]
+    ContributionUnfunded,
+
     #[error("{what} failed")]
     #[diagnostic(code(pecu::flow_failed), help("{advice}"))]
     Flow {
@@ -1100,6 +1118,22 @@ pub fn launch(
         }
     }
 
+    // Refused here, with the other local refusals, for the reason above: a flag
+    // that can never be honoured should cost neither a passphrase prompt nor a
+    // node. The SDK's launch builder emits seven outputs and none of them funds
+    // a contribution, and the launch notarization it publishes in the same
+    // transaction says the reserves hold nothing — so honouring the flag would
+    // put a permanent claim of backing on chain with nothing behind it.
+    //
+    // The guard reads `args.contribute` and never `definition.initial_contributions`:
+    // the --nft path sets that field to `[Amount::ZERO]` for byte-shape parity,
+    // and consensus refuses an NFT definition whose per-reserve vectors are
+    // absent. A guard on the field would break every NFT launch, and both NFT
+    // tests are #[ignore]d, so nothing offline would catch it.
+    if !args.contribute.is_empty() {
+        return Err(CurrencyError::ContributionUnfunded.into());
+    }
+
     let store = Keystore::new(&settings.paths);
     let envelope = choose_key(&store, args.from.as_deref())?;
     let node = node::connect(&settings.profile)?;
@@ -1203,14 +1237,6 @@ pub fn launch(
                 what: "max-preconvert",
             }
             .into());
-        }
-
-        let contributions = per_reserve(&args.contribute, &names, "contribute")?;
-        if !contributions.is_empty() {
-            // `with_contributions` sets `preconverted` to match. The daemon
-            // initialises the two equal and never reveals the second in its
-            // RPC output, so setting one alone is invisible and wrong.
-            definition = definition.with_contributions(contributions);
         }
 
         if let Some(value) = &args.prelaunch_discount {
@@ -1487,10 +1513,9 @@ fn launch_panel(
                 palette.muted,
             );
             // Everything else this reserve carries, on its own line, because a
-            // seed contribution and a preconversion limit are money and belong
-            // where the ratio is rather than in a separate list to cross-refer.
+            // preconversion limit is money and belongs where the ratio is
+            // rather than in a separate list to cross-refer.
             for (label, values) in [
-                ("seeded", &definition.initial_contributions),
                 ("min", &definition.min_preconversion),
                 ("max", &definition.max_preconversion),
                 ("rate", &definition.conversions),
