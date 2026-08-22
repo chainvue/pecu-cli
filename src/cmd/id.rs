@@ -77,6 +77,20 @@ pub enum IdError {
     )]
     Taken { name: String },
 
+    #[error("`{value}` cannot be a primary address")]
+    #[diagnostic(
+        code(pecu::bad_primary),
+        help("--primary takes transparent R-addresses: a registration writes its primary condition as bare key hashes, so a VerusID cannot hold one. `pecu key list` shows yours. Handing control to another identity is what the revocation and recovery authorities are for. Nothing was broadcast")
+    )]
+    BadPrimary { value: String },
+
+    #[error("a {min_sigs}-of-{primaries} identity is one nobody could ever sign for")]
+    #[diagnostic(
+        code(pecu::bad_min_sigs),
+        help("--min-sigs must be at least 1 and at most the number of --primary addresses — {primaries} here, which without --primary is the paying key alone. Pass more --primary addresses, or lower --min-sigs. Nothing was broadcast")
+    )]
+    BadMinSigs { min_sigs: u32, primaries: usize },
+
     #[error("cannot {action} {}", path.display())]
     #[diagnostic(
         code(pecu::pending_io),
@@ -92,6 +106,17 @@ pub enum IdError {
     #[error("{} is not a registration this version understands", path.display())]
     #[diagnostic(code(pecu::pending_corrupt), help("{detail}"))]
     PendingCorrupt { path: PathBuf, detail: String },
+
+    #[error("the saved reservation for `{name}` can never be completed: {detail}")]
+    #[diagnostic(
+        code(pecu::pending_unusable),
+        help("a resumed registration takes its primary addresses and threshold from the file, written when the commitment was made — the flags on this run are not the ones in play, so correcting them changes nothing. Only the commitment's miner fee was ever spent: run the same command with --restart to discard the reservation and claim the name again. The file, if you want it, is at {}", path.display())
+    )]
+    PendingUnusable {
+        name: String,
+        path: PathBuf,
+        detail: String,
+    },
 
     #[error("the chain moved under this registration")]
     #[diagnostic(
@@ -553,6 +578,12 @@ fn begin(
         pin_fee: None,
     };
 
+    // Cheap, offline, and the last chance: everything after this leads to a
+    // commitment the reveal would refuse to spend. `unwrap_or(1)` is the SDK's
+    // own default, applied where `prepare_registration` builds the `Pending` —
+    // checking the flag as written would not be checking what gets stored.
+    check_controls(&options.primary_addresses, options.min_sigs.unwrap_or(1))?;
+
     let secret = keystore::passphrase(&format!("passphrase for `{}`", envelope.label), false)?;
     let key = envelope.unlock(&secret)?;
 
@@ -659,6 +690,41 @@ fn begin(
     // Straight into step two rather than asking the caller to run it again. The
     // file is already on disk, so a Ctrl-C here costs nothing but the wait.
     resume(ui, settings, globals, node, args, pending, path)
+}
+
+/// The two facts about an identity's control that the SDK only checks in step
+/// two — after the commitment is on chain and the wait is spent.
+///
+/// `build_identity_registration` refuses `min_sigs == 0` or a threshold above
+/// the number of primaries with `InvalidMinSigs`, and any primary that is not
+/// a pubkey hash with `UnsupportedRecipient`. `prepare_registration` checks
+/// neither: it front-loads the name, fee and referral checks precisely so a
+/// commitment is not wasted on a registration that cannot complete, and then
+/// stores these two untouched. A `3-of-1` was discovered only once the
+/// commitment had confirmed, and `--restart` was the only way out.
+///
+/// Takes the values as the SDK will hold them rather than the flags as typed:
+/// `--min-sigs 3` with no `--primary` is the case that matters, and its list is
+/// the paying key's single address, not an empty one. Needs no node and no
+/// key, so it runs before the passphrase prompt.
+fn check_controls(primary_addresses: &[String], min_sigs: u32) -> Result<(), IdError> {
+    for address in primary_addresses {
+        match address.parse::<Address>() {
+            Ok(parsed) if parsed.kind() == AddressKind::PubKeyHash => {}
+            _ => {
+                return Err(IdError::BadPrimary {
+                    value: address.clone(),
+                })
+            }
+        }
+    }
+    if min_sigs == 0 || min_sigs as usize > primary_addresses.len() {
+        return Err(IdError::BadMinSigs {
+            min_sigs,
+            primaries: primary_addresses.len(),
+        });
+    }
+    Ok(())
 }
 
 /// Register `name` if the chain does not have it yet, and wait until it does —
@@ -783,6 +849,20 @@ fn resume(
 ) -> miette::Result<()> {
     let palette = ui.theme.palette;
     let name = pending.name().to_string();
+
+    // These came off disk, not off this run's flags: a reservation written
+    // before this check existed still carries bad values into `complete`,
+    // where the SDK refuses them after the whole wait and `flow()` blames the
+    // node for a bad-flag error. Above the dry-run gate as well as the poll —
+    // pricing a registration that can never complete would be a lie. Nothing
+    // is deleted: the salt stays until the user says --restart.
+    check_controls(&pending.primary_addresses, pending.min_sigs).map_err(|error| {
+        IdError::PendingUnusable {
+            name: name.clone(),
+            path: path.clone(),
+            detail: error.to_string(),
+        }
+    })?;
 
     // Above the poll rather than beside the `complete` it guards. Step two is
     // the transaction that burns the hundred coins, and `CommitmentGone` below

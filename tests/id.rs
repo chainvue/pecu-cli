@@ -171,6 +171,121 @@ fn the_saved_registration_is_matched_case_insensitively() {
         .stderr(contains("the commitment"));
 }
 
+/// A registration writes its primary condition as bare key hashes, so an
+/// i-address can never be one — but the SDK only says so in step two, once the
+/// commitment is on chain and the wait is spent.
+///
+/// The negative assertion is the regression: "preparing the registration" is
+/// what this input produced before the guard existed, which is the SDK call
+/// that leads to the broadcast. Reaching it at all means the refusal came too
+/// late, and came wearing `flow()`'s advice about the node.
+#[test]
+fn an_identity_cannot_be_a_primary_address_and_is_refused_before_the_commitment() {
+    let home = home();
+    generate(&home, "demo");
+
+    for value in ["iJhCezBExJHvtyH3fGhNnt2NhU4Ztkf2yq", "RNotAnAddressAtAll"] {
+        let assertion = pecu(&home)
+            .args([
+                "id",
+                "register",
+                "alice",
+                "--primary",
+                value,
+                "--node",
+                DEAD_NODE,
+            ])
+            .assert()
+            .failure();
+        let stderr = flat(&String::from_utf8_lossy(&assertion.get_output().stderr));
+
+        assert!(
+            stderr.contains("cannot be a primary address") && stderr.contains(value),
+            "did not refuse `{value}` as a primary address:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("preparing the registration"),
+            "`{value}` reached the SDK, which is where the commitment starts:\n{stderr}"
+        );
+    }
+}
+
+/// `min_sigs` is measured against the primaries the SDK will actually store,
+/// not the `--primary` flags as typed: with no `--primary` the list is the
+/// paying key's own address, so `--min-sigs 3` is a 3-of-1 and a check against
+/// `args.primary.len()` would read it as 3-of-0 and refuse for the wrong
+/// reason — or, on an empty list, wave it through.
+#[test]
+fn a_threshold_no_key_set_could_meet_is_refused_before_the_commitment() {
+    let home = home();
+    generate(&home, "demo");
+
+    for (flags, shape) in [
+        // No --primary at all, which a clap `requires = "primary"` would not
+        // catch either.
+        (&["--min-sigs", "3"][..], "3-of-1"),
+        // clap puts no floor under a u32.
+        (&["--min-sigs", "0"][..], "0-of-1"),
+        (
+            &[
+                "--primary",
+                "RComfCn4wHHsGR8vWBAU7T1r3tHHyxN9Hm",
+                "--min-sigs",
+                "2",
+            ][..],
+            "2-of-1",
+        ),
+    ] {
+        let mut command = pecu(&home);
+        command.args(["id", "register", "alice", "--node", DEAD_NODE]);
+        command.args(flags);
+        let assertion = command.assert().failure();
+        let stderr = flat(&String::from_utf8_lossy(&assertion.get_output().stderr));
+
+        assert!(
+            stderr.contains("nobody could ever sign for") && stderr.contains(shape),
+            "did not refuse a {shape} identity:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("preparing the registration"),
+            "a {shape} identity reached the SDK, which is where the commitment starts:\n{stderr}"
+        );
+    }
+}
+
+/// The over-rejection guard. A check stricter than consensus would block every
+/// legitimate registration and every other test here would still pass.
+///
+/// The dead node is the assertion: failing at "preparing the registration" is
+/// the node's failure, reached *past* the new check rather than at it.
+#[test]
+fn a_default_registration_and_a_matching_multisig_are_not_refused() {
+    let home = home();
+    generate(&home, "demo");
+
+    // No flags: the overwhelmingly common case, and the one that exercises the
+    // paying key's address standing in for --primary and the SDK's min_sigs
+    // default of 1.
+    let plain: &[&str] = &[];
+    let multisig: &[&str] = &[
+        "--primary",
+        "RComfCn4wHHsGR8vWBAU7T1r3tHHyxN9Hm",
+        "--primary",
+        "RJ7gsKDjUjPS8XZzENqmQMmWJRLuTnw5hp",
+        "--min-sigs",
+        "2",
+    ];
+    for flags in [plain, multisig] {
+        let mut command = pecu(&home);
+        command.args(["id", "register", "alice", "--node", DEAD_NODE]);
+        command.args(flags);
+        command
+            .assert()
+            .failure()
+            .stderr(contains("preparing the registration"));
+    }
+}
+
 #[test]
 #[ignore = "talks to api.verustest.net"]
 fn an_identity_that_is_its_own_revocation_authority_is_flagged() {
@@ -757,6 +872,85 @@ fn a_dry_run_restart_does_not_discard_the_saved_reservation() {
     assert!(
         reservation.exists(),
         "--restart --dry-run discarded the reservation, which is irreversible"
+    );
+}
+
+/// A reservation carries its own primary addresses and threshold, written when
+/// the commitment was made, so re-running with corrected flags changes nothing
+/// — the values come off the file. One that names an impossible threshold used
+/// to poll for up to `--timeout` minutes and only then fail at the reveal, with
+/// advice about the node.
+///
+/// The fixture holds a single primary address, so `min_sigs: 3` is a 3-of-1.
+/// Not reaching the poll is the sibling of what
+/// `a_saved_registration_is_picked_up_rather_than_started_again` asserts
+/// positively.
+#[test]
+fn a_saved_reservation_that_can_never_complete_says_restart_rather_than_polling() {
+    let home = home();
+    generate(&home, "demo");
+
+    let pending = home.path().join("pending");
+    std::fs::create_dir_all(&pending).expect("a pending dir");
+    let reservation = pending.join("alice.json");
+    let wedged = SAVED_REGISTRATION.replace("\"min_sigs\": 1", "\"min_sigs\": 3");
+    assert_ne!(wedged, SAVED_REGISTRATION, "the fixture's min_sigs moved");
+    std::fs::write(&reservation, &wedged).expect("a saved reservation");
+
+    let assertion = pecu(&home)
+        .args(["id", "register", "alice", "--node", DEAD_NODE])
+        .assert()
+        .failure();
+    let stderr = flat(&String::from_utf8_lossy(&assertion.get_output().stderr));
+
+    assert!(
+        stderr.contains("can never be completed") && stderr.contains("--restart"),
+        "did not name the way out of a wedged reservation:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("waiting for the commitment")
+            && !stderr.contains("checking the commitment"),
+        "polled a reservation that could never be completed:\n{stderr}"
+    );
+    assert!(
+        reservation.exists(),
+        "the reservation was deleted, and `reveal_was_broadcast` reads an absent file as a \
+         registration that reached the reveal"
+    );
+}
+
+/// The refusal sits above the dry-run gate, not below it: pricing step two of a
+/// registration that can never reach step two would be a lie. Nothing is spent
+/// either way, and the salt still survives.
+#[test]
+fn a_dry_run_does_not_price_a_reservation_that_can_never_complete() {
+    let home = home();
+    generate(&home, "demo");
+
+    let pending = home.path().join("pending");
+    std::fs::create_dir_all(&pending).expect("a pending dir");
+    let reservation = pending.join("alice.json");
+    let wedged = SAVED_REGISTRATION.replace("\"min_sigs\": 1", "\"min_sigs\": 3");
+    std::fs::write(&reservation, &wedged).expect("a saved reservation");
+
+    let assertion = pecu(&home)
+        .args(["id", "register", "alice", "--dry-run", "--node", DEAD_NODE])
+        .assert()
+        .failure();
+    let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+    let stderr = flat(&String::from_utf8_lossy(&assertion.get_output().stderr));
+
+    assert!(
+        stderr.contains("can never be completed"),
+        "a dry run did not refuse a wedged reservation:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("STEP 2 OF 2"),
+        "a dry run priced a registration that can never complete:\n{stdout}"
+    );
+    assert!(
+        reservation.exists(),
+        "a refused dry run discarded the reservation, and the salt in it cannot be recovered"
     );
 }
 
