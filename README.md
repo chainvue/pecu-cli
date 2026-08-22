@@ -367,6 +367,12 @@ line beneath it. `--json` carries `currency` (the name as given) and
 a consumer can tell the two apart instead of reading a ticker that might be
 either.
 
+**The `to` row carries two names**: the one you typed and the one the node says
+it resolved to. The node's half is untrusted display text like any other name —
+stripped of control characters, folded onto one line and capped before it goes
+inside the frame — and the pair is budgeted together, so an ordinary
+sub-identity still prints in full rather than losing its middle to an ellipsis.
+
 **Paying out of a VerusID's own funds** is the other half of the `HELD BY ID`
 row in `wallet balance`. Money flows *into* an identity with an ordinary
 `--to alice@`; getting it back out needs `--from-identity`, because the inputs

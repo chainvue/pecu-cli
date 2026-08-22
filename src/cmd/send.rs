@@ -33,6 +33,13 @@ use crate::ui::{fmt, Panel, Text, Ui};
 /// How much of an identity name is ever printed on the review panel.
 const IDENTITY_BUDGET: usize = 40;
 
+/// How much of the `to` row is ever printed. It is the one row carrying two
+/// names — what was typed and what the node answered for it — so it gets both
+/// budgets plus the ` (` and `)` that join them. Capping the pair at one name's
+/// worth would elide the middle of an ordinary `bob@ (bob.VRSCTEST@)` once the
+/// base name passed thirteen characters, on the panel that asks for `yes`.
+const RECIPIENT_BUDGET: usize = IDENTITY_BUDGET * 2 + 3;
+
 #[derive(Debug, Error, Diagnostic)]
 pub enum SendError {
     #[error("the `{profile}` profile is not allowed to spend")]
@@ -272,6 +279,9 @@ struct Recipient {
     address: String,
     /// What to show. The name if there was one, so the confirmation says what
     /// you typed rather than what it resolved to.
+    ///
+    /// Untrusted on both halves — pasted argument and node answer — so `review`
+    /// runs it through `fmt::untrusted` before it goes inside a frame.
     shown: String,
 }
 
@@ -596,12 +606,25 @@ fn review(
                     .push(format!("({})", from.label), palette.muted),
             ),
     };
-    panel = panel.row("to", Text::of(&to.shown, palette.accent)).row(
-        "amount",
-        Text::of(fmt::amount(amount), palette.accent)
-            .space()
-            .push(&moving, palette.muted),
-    );
+    // The `to` row is untrusted on both halves: `--to` is text somebody pasted,
+    // and the name in parentheses is the node repeating what a registrant chose.
+    // Same treatment as the two rows above — an escape run here can repaint the
+    // terminal or forge a row, and this row sits directly above OUTPUTS AS BUILT,
+    // the only place a substituted address would be exposed.
+    panel = panel
+        .row(
+            "to",
+            Text::of(
+                fmt::untrusted(&to.shown, RECIPIENT_BUDGET, glyphs.ellipsis),
+                palette.accent,
+            ),
+        )
+        .row(
+            "amount",
+            Text::of(fmt::amount(amount), palette.accent)
+                .space()
+                .push(&moving, palette.muted),
+        );
 
     // What the name resolved to. `--currency mytoken@` is a name lookup, and a
     // panel that only repeats the name back proves nothing about which currency
@@ -967,14 +990,22 @@ mod tests {
         rendered_with(identity, None)
     }
 
+    /// The address the panel tests pay when the recipient is not what is being
+    /// tested.
+    const RECIPIENT: &str = "RJ7gsKDjUjPS8XZzENqmQMmWJRLuTnw5hp";
+
     fn rendered_with(identity: Option<&str>, token: Option<&Token>) -> String {
+        rendered_paying(identity, token, RECIPIENT)
+    }
+
+    fn rendered_paying(identity: Option<&str>, token: Option<&Token>, shown: &str) -> String {
         let ui = Ui::new(ThemeFlag::Phosphor, false, false);
         let settings =
             Settings::resolve_in(Paths::at("/nonexistent"), None, None).expect("builtin");
         let transaction = fixture_transaction();
         let recipient = Recipient {
-            address: "RJ7gsKDjUjPS8XZzENqmQMmWJRLuTnw5hp".into(),
-            shown: "RJ7gsKDjUjPS8XZzENqmQMmWJRLuTnw5hp".into(),
+            address: RECIPIENT.into(),
+            shown: shown.into(),
         };
         let panel = review(
             &ui,
@@ -1250,6 +1281,43 @@ mod tests {
             widths.windows(2).all(|pair| pair[0] == pair[1]),
             "ragged frame {widths:?}:\n{out}"
         );
+    }
+
+    #[test]
+    fn a_hostile_recipient_name_cannot_break_the_review_frame() {
+        // The `to` row carries what the node answered for `--to bob@`, and a
+        // node hostile enough to answer with escapes is the whole reason this
+        // panel gets checked before `yes`. Same class as the currency name
+        // above, on the row directly over OUTPUTS AS BUILT.
+        let hostile = format!("bob@ (\u{1b}[31mev\nil\u{7f}{}@)", "x".repeat(80));
+        let raw = rendered_paying(None, None, &hostile);
+        assert!(
+            !raw.contains('\u{7f}'),
+            "the delete character survived into the panel:\n{raw}"
+        );
+        let out = crate::ui::text::strip_ansi(&raw);
+        let widths: Vec<usize> = out
+            .lines()
+            .filter(|line| line.starts_with(['\u{250c}', '\u{2502}', '\u{251c}', '\u{2514}']))
+            .map(UnicodeWidthStr::width)
+            .collect();
+        assert!(!widths.is_empty(), "nothing was framed:\n{out}");
+        assert!(
+            widths.windows(2).all(|pair| pair[0] == pair[1]),
+            "ragged frame {widths:?}:\n{out}"
+        );
+    }
+
+    #[test]
+    fn the_to_row_names_both_what_was_typed_and_what_the_node_answered() {
+        // The pair is budgeted as a pair. This name is forty-six characters
+        // across both halves and nothing about it is exotic, so capping the row
+        // at one name's worth of budget would put an ellipsis through the middle
+        // of it — a `to` row with a hole in it, on the panel that asks for `yes`,
+        // is worse than the escape run the cap exists to stop.
+        let shown = "myawesomeproject@ (myawesomeproject.VRSCTEST@)";
+        let out = crate::ui::text::strip_ansi(&rendered_paying(None, None, shown));
+        assert!(out.contains(shown), "{out}");
     }
 
     #[test]
