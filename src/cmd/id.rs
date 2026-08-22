@@ -14,7 +14,7 @@
 //! saw the commitment confirm. Running step two early is a compile error rather
 //! than a spent commitment.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use miette::Diagnostic;
 use thiserror::Error;
@@ -113,6 +113,20 @@ pub enum IdError {
         help("the registration was broadcast and nothing is lost — it is waiting to be mined. `pecu id show {name}@` will find it once it is, and the launch can be run again then")
     )]
     NotMinedInTime { name: String, minutes: u64 },
+
+    #[error("`{name}@` does not exist, and a dry run cannot register it")]
+    #[diagnostic(
+        code(pecu::dry_run_cannot_register),
+        help("--register would burn 100 VRSCTEST creating `{name}@` first, and --dry-run promises to spend nothing — which leaves no identity for the launch to be defined by and so nothing to preview: a currency's id *is* the defining identity's i-address. Register it with `pecu id register {name}`, then re-run this with --dry-run to see the launch")
+    )]
+    DryRunCannotRegister { name: String },
+
+    #[error("`{name}@` is committed to but not registered yet")]
+    #[diagnostic(
+        code(pecu::registration_unfinished),
+        help("registering is two transactions and only the first was broadcast, so there is no identity for this launch to define a currency on and nothing on its way to a block to wait for. Nothing is lost — the reservation is saved and the same command carries on from it once the commitment confirms, a block or so")
+    )]
+    RegistrationUnfinished { name: String },
 
     #[error("the saved commitment for `{name}` has expired")]
     #[diagnostic(
@@ -455,6 +469,23 @@ fn pending_path(settings: &Settings, name: &str) -> PathBuf {
         .join(format!("{}.json", name.to_lowercase()))
 }
 
+/// Whether the registration that just ran got as far as the reveal.
+///
+/// The reservation holds the salt and is deleted in two places: `--restart`
+/// discards it in `register_inner` before re-committing, and `resume` removes
+/// it after `complete` returns, at the "Only now is the salt worthless" line.
+/// `ensure_exists` builds its own `IdRegisterArgs` with `restart: false`, so
+/// the second is the only one it can reach. A file that survived `register` is
+/// therefore a registration that stopped at step one, and a file that is gone
+/// is a name that has been claimed and only needs mining.
+///
+/// Anything that wires `--restart` through to `ensure_exists` breaks that: the
+/// discard happens *before* `begin` writes a fresh reservation, so absence
+/// would no longer mean the reveal went out.
+fn reveal_was_broadcast(reservation: &Path) -> bool {
+    !reservation.exists()
+}
+
 fn load_pending(path: &PathBuf) -> Result<Option<Pending<AwaitingCommitment>>, IdError> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -630,13 +661,24 @@ fn begin(
     resume(ui, settings, globals, node, args, pending, path)
 }
 
-/// Register `name` if the chain does not have it yet, and wait until it does.
+/// Register `name` if the chain does not have it yet, and wait until it does —
+/// or refuse, when no amount of waiting could get it there.
 ///
 /// For `currency launch --register`, where the identity is a prerequisite
 /// rather than the point. Returns without doing anything if the name already
 /// exists, so it is safe to call on a re-run — and a registration interrupted
 /// half way is picked up by the same saved-reservation path everything else
 /// uses.
+///
+/// Two outcomes are neither of those. Under `--dry-run` nothing is broadcast,
+/// so there is no identity to be defined by and nothing on its way to a block:
+/// `DryRunCannotRegister`. And a registration that stopped after the
+/// commitment has claimed nothing yet, so there is again no identity and
+/// nothing to wait for: `RegistrationUnfinished`. Both are errors rather than
+/// quiet skips because the caller reads the defining identity off the chain
+/// the moment this returns — a launch with no defining identity is not a
+/// smaller launch, it is no launch at all, and neither is it something a
+/// preview can stand in for.
 ///
 /// Deliberately not reachable without an explicit flag. Registration burns 100
 /// VRSCTEST and a typo'd name is a plausible mistake; creating `pecubaskt1@`
@@ -655,6 +697,17 @@ pub fn ensure_exists(
     if node.identity(name).is_ok() {
         return Ok(());
     }
+
+    // Nothing below can happen under --dry-run: `begin` stops before it
+    // broadcasts, so the identity never appears and the poll below would run out
+    // the whole --register-timeout waiting for a transaction nobody made.
+    // Refused rather than skipped — the launch preview reads the defining
+    // identity off the chain (`node.identity` in `launch`, right after this
+    // returns), so with no identity there is no launch to preview.
+    if globals.dry_run {
+        return Err(IdError::DryRunCannotRegister { name: bare }.into());
+    }
+
     ui.note(format!(
         "{bare}@ does not exist yet — registering it first, for 100 VRSCTEST"
     ));
@@ -670,7 +723,18 @@ pub fn ensure_exists(
         no_wait: false,
         timeout,
     };
+    let path = pending_path(settings, &bare);
     register(ui, settings, globals, &args)?;
+
+    // `register` returns Ok from six places that broadcast no reveal: --json
+    // stops after the commitment, --no-wait stops there too, and `resume`
+    // returns on a commitment still unconfirmed or one it had to re-broadcast.
+    // Waiting for the identity in any of those is waiting for a transaction
+    // that was never sent — which is what burned --register-timeout minutes and
+    // then reported a broadcast that had not happened.
+    if !reveal_was_broadcast(&path) {
+        return Err(IdError::RegistrationUnfinished { name: bare }.into());
+    }
 
     // Step two is broadcast, not mined. The launch that follows reads the
     // identity off the chain, so waiting for the transaction is not enough —
@@ -1436,4 +1500,63 @@ fn emit(value: &serde_json::Value) {
         "{}",
         serde_json::to_string_pretty(value).expect("plain data")
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Paths;
+
+    /// A `Settings` rooted at a temporary directory, returned with the guard so
+    /// the directory outlives the files the test writes into it.
+    fn settings() -> (tempfile::TempDir, Settings) {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let settings = Settings::resolve_in(Paths::at(dir.path()), None, None)
+            .expect("no config file is the built-in profile");
+        (dir, settings)
+    }
+
+    /// The six `Ok(())`s `ensure_exists` has to tell apart from a real reveal:
+    /// `begin` under --json after the commitment and under --no-wait; `resume`
+    /// on a commitment still `Waiting`, json and rendered; and `resume` on a
+    /// `CommitmentGone` it re-broadcast, json and rendered. Every one of them
+    /// leaves the reservation on disk, because the salt is still needed.
+    ///
+    /// --dry-run is *not* among them, and `reveal_was_broadcast` does not catch
+    /// it: `begin` returns before `save_pending`, so nothing reaches disk, and
+    /// the absent file reads as a finished registration — straight into the
+    /// poll. That is why --dry-run is refused separately, before `register`
+    /// runs at all.
+    #[test]
+    fn a_reservation_that_outlived_the_registration_means_no_reveal_was_sent() {
+        let (_dir, settings) = settings();
+        std::fs::create_dir_all(settings.paths.pending_dir()).expect("writable temp dir");
+        let path = pending_path(&settings, "mybasket");
+        std::fs::write(&path, "{}").expect("writable temp dir");
+
+        assert!(!reveal_was_broadcast(&pending_path(&settings, "mybasket")));
+    }
+
+    /// The polarity, which is the one way this guard could go wrong invisibly:
+    /// inverted, it lets the twenty-minute wait straight back in and every
+    /// other test still passes.
+    #[test]
+    fn a_completed_registration_leaves_no_reservation_to_find() {
+        let (_dir, settings) = settings();
+        std::fs::create_dir_all(settings.paths.pending_dir()).expect("writable temp dir");
+
+        assert!(reveal_was_broadcast(&pending_path(&settings, "mybasket")));
+    }
+
+    /// `pending_path` lowercases and `ensure_exists` hands it the caller's name
+    /// verbatim, so a mixed-case `--register` name that stopped at the
+    /// commitment has to be caught rather than sent to the poll.
+    #[test]
+    fn a_reservation_is_found_whatever_case_the_name_was_typed_in() {
+        let (_dir, settings) = settings();
+        std::fs::create_dir_all(settings.paths.pending_dir()).expect("writable temp dir");
+        std::fs::write(pending_path(&settings, "mybasket"), "{}").expect("writable temp dir");
+
+        assert!(!reveal_was_broadcast(&pending_path(&settings, "MyBasket")));
+    }
 }

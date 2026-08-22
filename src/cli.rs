@@ -766,7 +766,9 @@ pub struct CurrencyLaunchArgs {
     /// How many blocks ahead to start, when --start-block is not given
     #[arg(long, value_name = "BLOCKS", default_value_t = 20)]
     pub start_in: u32,
-    /// Register the defining identity first if it does not exist yet
+    /// Register the defining identity first if it does not exist yet. A dry run
+    /// stops there rather than registering: with no identity on chain there is
+    /// nothing for the launch to be defined by and nothing to preview
     #[arg(long)]
     pub register: bool,
 
