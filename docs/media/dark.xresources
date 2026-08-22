@@ -26,3 +26,9 @@ color15: #f0f6fc
 !
 ! Note: svg-term only honours --profile when the path is outside the repo.
 ! Generate into a temp directory and copy the SVG back.
+
+! The recording must not be piped. `pecu` checks whether stdout is a terminal
+! and falls back to a plain, unframed, uncoloured rendering when it is not — so
+! a demo script that pipes through `head` or `sed` records the fallback and
+! looks nothing like the tool. Let each command write straight to the pty and
+! size the window to fit instead.
