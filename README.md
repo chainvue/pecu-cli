@@ -868,13 +868,28 @@ zero on every reserve, and is refused.
 **`--mintable` and `--reserve` do not compose.** A basket mints and burns by
 conversion; `--mintable` is the token idea of an issuer topping up a supply.
 
+**`--contribute` is refused, and the thing it sounded like is `preconvert`.**
+Seeding a reserve at launch means an extra value-bearing output funding it. The
+SDK's launch builder emits seven outputs and never that one, and the launch
+notarization it publishes in the same transaction states the reserves hold
+nothing — so a definition naming contributions would claim backing nothing put
+there, permanently, while not one satoshi left the signing key. This repo has
+the artefact: `pecudepth2@` (`0b08811f…`) went out with exactly such a
+declaration and nothing behind it. `pecu` now refuses the flag before a key is
+unlocked or a node is asked, and names `pecu currency preconvert` — which does
+spend — as the way to put coins into a reserve before the start block. That is
+also the answer to the `--max-preconvert` trap two paragraphs down: the
+contribution a fractional basket needs from every reserve comes from
+`preconvert`, not from the definition. The SDK has since learnt to build the
+funding output ([#129](https://github.com/chainvue/verus-rust-sdk/issues/129)),
+so the refusal goes when the pin moves.
+
 **The prelaunch economics, and the sub-identity policy.** All of it is per
 reserve, and all of it is keyed by the reserve's *name*:
 
 ```sh
 pecu currency launch mybasket@ --from key --supply 100 \
   --reserve VRSCTEST:60 --reserve TST:40 \
-  --contribute VRSCTEST:10 --contribute TST:5 \
   --min-preconvert VRSCTEST:1 --min-preconvert TST:1 \
   --max-preconvert VRSCTEST:1000 --max-preconvert TST:1000 \
   --prelaunch-discount 5 --prelaunch-carveout 10 \
@@ -883,8 +898,8 @@ pecu currency launch mybasket@ --from key --supply 100 \
 
 ```
 RESERVES
-                     60%  iJhCezBEx…f2yq  seeded 10.00000000  min 1.00000000  max 1000.00000000
-                     40%  iK2k8YH1j…bMqg  seeded 5.00000000
+                     60%  iJhCezBEx…f2yq  min 1.00000000  max 1000.00000000
+                     40%  iK2k8YH1j…bMqg  min 1.00000000  max 1000.00000000
   discount       5%  to anyone converting before launch
   carveout       10%  of the launch, to this identity
 
@@ -1120,7 +1135,7 @@ a slot is one-shot:
 |---|---|---|
 | decentralized token, fixed supply | `pecudepth3@` | `2fecffbb…` |
 | centralized token, `proofprotocol` 2 | `pecuref9@` | `8764a045…` |
-| fractional basket, seeded contributions, min/max preconvert, 5% discount, 10% carveout | `pecudepth2@` | `0b08811f…` |
+| fractional basket, min/max preconvert, 5% discount, 10% carveout | `pecudepth2@` | `0b08811f…` |
 | centralized, governs sub-identity registration: 25 fee, 3 referral levels, mandatory | `pecurefcur1@` | `3205c03f…` |
 | NFT | `pecunft1@` | refused — see below |
 | **mint** — 1,000 new supply on a centralized token | `pecuref9@` | `e8c9d409…` |
@@ -1356,6 +1371,7 @@ prove it on chain.
 | **NFT launch fee** — charged `currencyregistrationfee` (200) instead of `idimportfees` (0.02) | [#112](https://github.com/chainvue/verus-rust-sdk/issues/112) | pins the right fee itself |
 | **NFT definition shape** — `NFT_TOKEN` on a `token()` cannot express a valid one | [#113](https://github.com/chainvue/verus-rust-sdk/issues/113) | sets all five fields by hand |
 | **Expired commitment** — indistinguishable from a dropped one, and `Pending` carries no expiry | [#114](https://github.com/chainvue/verus-rust-sdk/issues/114) | string-matches `expiring-soon` and offers `--restart` |
+| **Seeded contributions at launch** — the builder emits no output funding a declared contribution, and the launch notarization in the same transaction says the reserves are zero | [#129](https://github.com/chainvue/verus-rust-sdk/issues/129) | refuses `--contribute` and points at `preconvert` |
 | **Two payments in one block** — `spendable` never consults the mempool, so the second build reuses the coin the first just spent and rebuilds it byte for byte | [#118](https://github.com/chainvue/verus-rust-sdk/issues/118) | nothing yet; one payment per block |
 
 ### Built but unproven
