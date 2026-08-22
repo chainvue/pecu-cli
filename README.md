@@ -624,6 +624,15 @@ next run to poll for a transaction nobody made.
 **`--json` will not register without `--yes`.** Same rule as `pecu send`, and
 this one burns a hundred coins rather than moving them.
 
+**Both hold on the resumed half too.** A run that finds a saved reservation
+answers to the same two flags: `--dry-run` prints what finishing would cost,
+straight off the file, and stops without polling, broadcasting, or touching the
+reservation — including under `--restart`, which reports what it would discard
+rather than discarding it. `--json` still refuses to reveal the name and burn the
+hundred without `--yes`. The one thing `--json` may do unconsented is *read*:
+`--no-wait --json` reports whether the commitment has confirmed, which spends
+nothing.
+
 The SDK makes the ordering hard to get wrong: `complete` exists only on
 `Pending<ReadyToRegister>`, and the only way to hold one is a `poll` that saw the
 commitment confirm. Running step two early is a **compile error**, not a spent

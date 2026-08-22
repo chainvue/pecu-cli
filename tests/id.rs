@@ -637,6 +637,129 @@ fn a_saved_reservation_is_resumed_rather_than_replaced_by_default() {
     );
 }
 
+/// The half of `id register` that burns the hundred coins lives in `resume`,
+/// and `--dry-run` was only ever checked in `begin`. A saved reservation sent
+/// the run straight past the gate: it polled, and on a confirmed commitment it
+/// paid — on the exact flag README promises costs nothing and writes nothing.
+///
+/// The dead node is the assertion. Exiting *successfully* against a node that
+/// cannot be reached is only possible if the gate fired before the poll, which
+/// is where it has to be: the `CommitmentGone` arm re-broadcasts and rewrites
+/// the saved file, so a gate beside `complete` would still spend and still
+/// write.
+#[test]
+fn a_dry_run_does_not_resume_a_saved_registration() {
+    let home = home();
+    generate(&home, "demo");
+
+    let pending = home.path().join("pending");
+    std::fs::create_dir_all(&pending).expect("a pending dir");
+    let reservation = pending.join("alice.json");
+    std::fs::write(&reservation, SAVED_REGISTRATION).expect("a saved reservation");
+    let before = std::fs::read(&reservation).expect("readable");
+
+    let assertion = pecu(&home)
+        .args(["id", "register", "alice", "--dry-run", "--node", DEAD_NODE])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+
+    // Short substrings on purpose: the panel wraps to the terminal width, so a
+    // whole fee line is a test of `terminal_size` rather than of the estimate.
+    assert!(stdout.contains("STEP 2 OF 2"), "{stdout}");
+    assert!(stdout.contains("100.00000000"), "{stdout}");
+
+    assertion.stderr(contains("127.0.0.1").not());
+
+    assert_eq!(
+        before,
+        std::fs::read(&reservation).expect("the reservation survives a dry run"),
+        "a dry run rewrote the saved reservation, which holds the only copy of the salt"
+    );
+}
+
+/// The estimate a script gets, off the file rather than off the chain. The fee
+/// is recorded at prepare and carried through the transition unchanged, so it
+/// is the same number the confirmation would have shown after the poll.
+#[test]
+fn a_dry_run_says_what_finishing_would_cost_in_json() {
+    let home = home();
+    generate(&home, "demo");
+
+    let pending = home.path().join("pending");
+    std::fs::create_dir_all(&pending).expect("a pending dir");
+    let reservation = pending.join("alice.json");
+    std::fs::write(&reservation, SAVED_REGISTRATION).expect("a saved reservation");
+
+    let assertion = pecu(&home)
+        .args([
+            "id",
+            "register",
+            "alice",
+            "--dry-run",
+            "--json",
+            "--node",
+            DEAD_NODE,
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+    let document: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+
+    assert_eq!(document["kind"], "estimate");
+    assert_eq!(document["broadcast"], false);
+    assert_eq!(document["name"], "alice");
+    assert_eq!(document["registration_fee"], 10_000_000_000u64);
+    // Present only on a step-two estimate, which is how a consumer tells the
+    // two apart.
+    assert_eq!(
+        document["commitment_txid"],
+        "0000000000000000000000000000000000000000000000000000000000000001"
+    );
+
+    assert!(
+        reservation.exists(),
+        "a dry run discarded the reservation, and the salt in it cannot be recovered"
+    );
+}
+
+/// The mirror image of `restart_discards_a_saved_reservation_it_cannot_use`.
+///
+/// `--restart` deletes the salt, and the salt is not on the chain, not on the
+/// node and not anywhere else — losing it loses the name and the commitment fee
+/// both. That is the one irreversible act in the command, and it was happening
+/// under the flag whose whole promise is that nothing irreversible happens.
+#[test]
+fn a_dry_run_restart_does_not_discard_the_saved_reservation() {
+    let home = home();
+    generate(&home, "demo");
+
+    let pending = home.path().join("pending");
+    std::fs::create_dir_all(&pending).expect("a pending dir");
+    let reservation = pending.join("alice.json");
+    std::fs::write(&reservation, SAVED_REGISTRATION).expect("a saved reservation");
+
+    // The run itself cannot get far — `begin` reads the chain first — but what
+    // it must not have done is delete the file on the way there.
+    pecu(&home)
+        .args([
+            "id",
+            "register",
+            "alice",
+            "--restart",
+            "--dry-run",
+            "--node",
+            DEAD_NODE,
+        ])
+        .assert()
+        .failure();
+
+    assert!(
+        reservation.exists(),
+        "--restart --dry-run discarded the reservation, which is irreversible"
+    );
+}
+
 /// Waiting is the default now, so `--no-wait` has to keep the old behaviour:
 /// report the state and stop, leaving the reservation for a later run.
 #[test]
