@@ -90,7 +90,7 @@ answering.
 │ keys        ~/.config/verus-pecu/keys (0 keys)      │
 ├─ BUILD ─────────────────────────────────────────────┤
 │ pecu        0.1.0                                   │
-│ verus-sdk   498c396                                 │
+│ verus-sdk   ae279ea                                 │
 │ features    network                                 │
 ├─ NODE ──────────────────────────────────────────────┤
 │ chain       VRSCTEST                                │
@@ -967,7 +967,8 @@ also the answer to the `--max-preconvert` trap two paragraphs down: the
 contribution a fractional basket needs from every reserve comes from
 `preconvert`, not from the definition. The SDK has since learnt to build the
 funding output ([#129](https://github.com/chainvue/verus-rust-sdk/issues/129)),
-so the refusal goes when the pin moves.
+and the pin has moved — so what the refusal now waits on is one basket launched
+with a seeded reserve and checked at the start block, not a dependency.
 
 **`--conversion` is refused too, and permanently.** A fractional basket's
 pre-launch price is not a number in its definition: consensus derives it at
@@ -1100,13 +1101,18 @@ well-funded key and an empty identity cannot mint, and the refusal says so:
 ```
 
 **The recipient must be a transparent R-address**, and that is an SDK limit
-rather than a protocol one. Consensus treats `DEST_ID` as a first-class reserve
-transfer destination — `sendcurrency` pays identities routinely — but the SDK's
-`build_conversion` writes every recipient as `Destination::PubKeyHash`,
-discarding the address kind. An i-address run through that would pay the
-R-address sharing its hash, which nobody holds a key to, so the flow refuses
-instead. Filed as
-[chainvue/verus-rust-sdk#115](https://github.com/chainvue/verus-rust-sdk/issues/115).
+rather than a protocol one, and it is a limit `pecu` now keeps on its own.
+Consensus treats `DEST_ID` as a first-class reserve transfer destination —
+`sendcurrency` pays identities routinely — and `build_conversion` used to write
+every recipient as `Destination::PubKeyHash`, discarding the address kind. An
+i-address run through that would have paid the R-address sharing its hash, which
+nobody holds a key to.
+
+The SDK maps `AddressKind::Identity` to `Destination::Identity` now
+([chainvue/verus-rust-sdk#115](https://github.com/chainvue/verus-rust-sdk/issues/115)),
+so the refusal here is no longer describing the SDK — it is waiting for somebody
+to pay an identity a token and read it back off the chain as the *identity's*
+holdings rather than a key holder's.
 
 The same limit means **a token cannot be paid to a VerusID at all** — `pecu send
 --to <name@> --currency <token>` is refused for the same reason, while the same
@@ -1251,16 +1257,19 @@ per-reserve vectors are indexed by the reserve list. `pecu` builds all of that,
 and the transaction decodes field-for-field identical to a working on-chain NFT
 across all seven outputs.
 
-It is still refused, by one missing destination. An identity with tokenized
-control carries a *second* destination on its recovery condition — the key hash
-of the `EVAL_IDENTITY_RECOVER` contract pubkey, a constant — and the SDK's
-identity output script does not emit it, so consensus derives a different script.
-That is inside the transaction builder and cannot be reached from a caller, so
-the flag stops at a diagnostic that says so rather than at
-`bad-txns-failed-precheck`. Filed as
-[chainvue/verus-rust-sdk#111](https://github.com/chainvue/verus-rust-sdk/issues/111).
-Nothing is spent by the attempt: the fee is not paid and the identity's one
-currency slot is untouched.
+It was refused by one missing destination. An identity with tokenized control
+carries a *second* destination on its recovery condition — the key hash of the
+`EVAL_IDENTITY_RECOVER` contract pubkey, a constant — and the SDK's identity
+output script did not emit it, so consensus derived a different script. That sat
+inside the transaction builder where no caller could reach it, so the flag
+stopped at a diagnostic rather than at `bad-txns-failed-precheck`.
+
+`identity_primary_script` takes the tokenized-control flag now
+([chainvue/verus-rust-sdk#111](https://github.com/chainvue/verus-rust-sdk/issues/111)),
+so the refusal has outlived its reason and is kept only until an NFT launch is
+watched onto the chain — three of the seven gaps that closed were NFT ones, and
+they want proving together. Nothing is spent by the attempt meanwhile: the fee
+is not paid and the identity's one currency slot is untouched.
 
 ### `--explain`
 
@@ -1456,24 +1465,33 @@ Commands describe *what* a block contains; the renderer decides how it looks.
 
 ## TODO
 
-### Blocked upstream
+### Guards waiting on a chain, not on an SDK
 
-Each of these is built or designed here and refused by the SDK, not by the
-chain. All of them fail with a named diagnostic that says so — none of them
-reaches the user as a bare node error, and none of them spends anything on the
-way to failing. When an issue lands, the work here is to delete the guard and
-prove it on chain.
+Each of these is built here and refused here, with a named diagnostic — none
+reaches the user as a bare node error, and none spends anything on the way to
+failing.
 
-| | tracked | what pecu does today |
-|---|---|---|
-| **Mint / preconvert / convert to a VerusID** — consensus treats `DEST_ID` as a first-class transfer destination; `build_conversion` writes every recipient as `PubKeyHash` and drops the kind | [#115](https://github.com/chainvue/verus-rust-sdk/issues/115) | refuses, and says paying a primary address is *not* the same thing |
-| **Token send to a VerusID** — same root cause, so an identity can hold native coins but not tokens | [#115](https://github.com/chainvue/verus-rust-sdk/issues/115) | refuses with the native-vs-token asymmetry spelled out |
-| **NFT launch** — the identity output omits the tokenized-control recovery destination, so consensus derives a different script | [#111](https://github.com/chainvue/verus-rust-sdk/issues/111) | `--nft` builds the correct definition, then reports the SDK gap |
-| **NFT launch fee** — charged `currencyregistrationfee` (200) instead of `idimportfees` (0.02) | [#112](https://github.com/chainvue/verus-rust-sdk/issues/112) | pins the right fee itself |
-| **NFT definition shape** — `NFT_TOKEN` on a `token()` cannot express a valid one | [#113](https://github.com/chainvue/verus-rust-sdk/issues/113) | sets all five fields by hand |
-| **Expired commitment** — indistinguishable from a dropped one, and `Pending` carries no expiry | [#114](https://github.com/chainvue/verus-rust-sdk/issues/114) | string-matches `expiring-soon` and offers `--restart` |
-| **Seeded contributions at launch** — the builder emits no output funding a declared contribution, and the launch notarization in the same transaction says the reserves are zero | [#129](https://github.com/chainvue/verus-rust-sdk/issues/129) | refuses `--contribute` and points at `preconvert` |
-| **Two payments in one block** — `spendable` never consults the mempool, so the second build reuses the coin the first just spent and rebuilds it byte for byte | [#118](https://github.com/chainvue/verus-rust-sdk/issues/118) | nothing yet; one payment per block |
+They were refused because the SDK could not express them. **That stopped being
+true on 7 August**, when every one of these closed upstream; the pin caught up
+on the 22nd. What stands between them and working is no longer a dependency, it
+is evidence: each is a money path, and the only tests that exercise one spend
+real VRSCTEST against a public node. So the guards stay until somebody removes
+one and watches it land.
+
+| | closed upstream by | what pecu does today | what removing the guard takes |
+|---|---|---|---|
+| **Mint / preconvert / convert to a VerusID** — `build_conversion` wrote every recipient as `PubKeyHash` and dropped the kind, so an i-address would have paid the R-address sharing its hash | [#115](https://github.com/chainvue/verus-rust-sdk/issues/115) — `convert.rs` now maps `AddressKind::Identity` to `Destination::Identity` | refuses, and says paying a primary address is *not* the same thing | pay an identity a token and read it back off the chain as the identity's, not a key holder's |
+| **Token send to a VerusID** — same root cause, so an identity could hold native coins but not tokens | [#115](https://github.com/chainvue/verus-rust-sdk/issues/115) | refuses with the native-vs-token asymmetry spelled out | as above; the two share a code path and should be proven together |
+| **NFT launch** — the identity output omitted the tokenized-control recovery destination, so consensus derived a different script | [#111](https://github.com/chainvue/verus-rust-sdk/issues/111) — `identity_primary_script` now takes `has_tokenized_control` | `--nft` builds the definition, then reports the gap | launch one, and check consensus accepts the identity output rather than `bad-txns-failed-precheck` |
+| **NFT launch fee** — charged `currencyregistrationfee` (200) instead of `idimportfees` (0.02) | [#112](https://github.com/chainvue/verus-rust-sdk/issues/112) | pins the right fee itself | confirm the fee the flow now reads matches the one pinned here, then stop pinning it |
+| **NFT definition shape** — `NFT_TOKEN` on a `token()` could not express a valid one | [#113](https://github.com/chainvue/verus-rust-sdk/issues/113) — `CurrencyDefinition::nft()` exists | sets all five fields by hand | decode a launch built by the constructor against one built by hand; they should agree field for field |
+| **Seeded contributions at launch** — the builder emitted no output funding a declared contribution, and the notarization in the same transaction said the reserves were zero | [#129](https://github.com/chainvue/verus-rust-sdk/issues/129) — the daemon's eighth output is built now | refuses `--contribute` and points at `preconvert` | launch a basket with a seeded reserve and confirm the reserve actually holds it at the start block |
+
+Two rows left this table rather than moving down it.
+
+**The expired commitment** ([#114](https://github.com/chainvue/verus-rust-sdk/issues/114)) is done. `CommitmentStatus::Expired` exists and `resume` matches it by name, before any broadcast — where the old string match on `expiring-soon` could only fire after one had already been attempted, and the two states need opposite actions. The string match is kept as a fallback for the same rejection arriving unclassified.
+
+**Two payments in one block** ([#118](https://github.com/chainvue/verus-rust-sdk/issues/118)) needs no guard removed, because `pecu` never had one — the limitation was simply true. `funding` now reads the mempool and withholds coins an unconfirmed transaction already spends, so a second payment should build against different coins. Unproven here: it wants two sends in one block, watched.
 
 ### Built but unproven
 
