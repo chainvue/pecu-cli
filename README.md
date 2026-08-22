@@ -817,7 +817,12 @@ defined by an identity, so launching on a name that does not exist yet takes two
 registrations' worth of waiting and 300 VRSCTEST. `--register` does the whole
 thing in one command: register, wait for the commitment, reveal, wait to be
 mined, then launch. `--register-timeout` bounds each of those two waits
-separately, so a slow chain can take up to twice it.
+separately, so a slow chain can take up to twice it. **The start block is
+measured after that wait, not before it.** `--start-in` counts from the tip the
+definition is actually built against, which with `--register` is the tip once
+the registration is mined — so a registration that takes eight blocks does not
+eat eight blocks of the offset and leave the launch refused for starting in the
+past.
 
 **It stops rather than waiting for a registration it did not send.** Two cases
 end the command early instead of polling. A dry run stops: registering burns 100

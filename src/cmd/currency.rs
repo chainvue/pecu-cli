@@ -108,6 +108,18 @@ pub enum CurrencyError {
     #[diagnostic(code(pecu::bad_percent), help("a number of percent, as `10` or `2.5`"))]
     BadPercent { what: &'static str, value: String },
 
+    #[error("--start-in {start_in} counts past the last block there can be")]
+    #[diagnostic(
+        code(pecu::start_block_unreachable),
+        help(
+            "the start block is the tip plus --start-in, and {tip} + {start_in} does not fit \
+             the 32-bit height the chain counts in. Nothing was spent. A start block is worth \
+             measuring in blocks rather than aeons — --start-in 20 is about twenty minutes on \
+             VRSCTEST — or name an absolute height with --start-block"
+        )
+    )]
+    StartBlockUnreachable { tip: u32, start_in: u32 },
+
     #[error("`{value}` is not `currency:percent`")]
     #[diagnostic(
         code(pecu::bad_reserve),
@@ -392,6 +404,19 @@ fn flow(what: &'static str, source: FlowError) -> CurrencyError {
              to define another currency"
                 .to_string()
         }
+        // The other NotReady worth naming. The flow re-reads the tip and
+        // refuses `start_block <= tip`, so anything that measured the height
+        // earlier than the flow does arrives here: a --start-block that has
+        // since passed, --start-in 0, or a block mined while the passphrase was
+        // being typed. `pecu doctor` blames a node that answered correctly, and
+        // no retry against a different node helps.
+        FlowError::NotReady(message) if message.contains("start_block") => {
+            "conversions cannot open at a block that has already passed. Nothing was spent — \
+             this is checked before the launch fee — and running it again measures the start \
+             block from a fresh tip. Leave more room with --start-in, or name a height ahead \
+             of the tip with --start-block"
+                .to_string()
+        }
         FlowError::Tx(TxError::NotAPrimaryAddress { .. }) => {
             "the signing key must be one of the defining identity's primary addresses — \
              `pecu id show <name@>` lists them"
@@ -547,6 +572,27 @@ fn weight_percent(scaled: u64) -> String {
         format!("{whole}.{rest:02}%")
             .replace("0%", "%")
             .replace(".%", "%")
+    }
+}
+
+/// The block conversions open at: `--start-block` as given, or `tip` plus
+/// `--start-in`.
+///
+/// Takes the tip rather than reading it, because *when* it is read is the whole
+/// point: with `--register` the height that matters is the one after the
+/// registration was mined, not the one at the start of the command.
+///
+/// `checked_add` rather than `+` or `saturating_add`. `--start-in` is a u32 a
+/// caller types, and neither of the others fails usefully: a wrap lands in the
+/// past, where the flow refuses it and the help blames the node, and a clamp
+/// lands at the last block there can ever be — which is *after* the tip, so it
+/// is accepted, and 200 VRSCTEST buys a currency whose conversions never open.
+fn start_block_for(explicit: Option<u32>, start_in: u32, tip: u32) -> Result<u32, CurrencyError> {
+    match explicit {
+        Some(height) => Ok(height),
+        None => tip
+            .checked_add(start_in)
+            .ok_or(CurrencyError::StartBlockUnreachable { tip, start_in }),
     }
 }
 
@@ -1182,17 +1228,6 @@ pub fn launch(
         .map_err(|source| flow("reading the parent currency", source))?;
     ui.sdk_result(Address::new(AddressKind::Identity, parent.to_bytes()).to_string());
 
-    ui.sdk("node.block_count()");
-    let tip = node.block_count().map_err(|source| {
-        node::NodeError::request("reading the tip", &settings.profile.node, source)
-    })?;
-    ui.sdk_result(fmt::height(tip.into()));
-
-    // A launch cannot start in the past, and the flow refuses one that would.
-    // The default leaves room for the transaction to be mined and for a human
-    // to notice a mistake before conversions open.
-    let start_block = args.start_block.unwrap_or(tip + args.start_in);
-
     // Names to ids, which is the only part that needs the chain.
     let mut reserves = Vec::with_capacity(names.len());
     for name in &names {
@@ -1218,6 +1253,25 @@ pub fn launch(
             args.register_timeout,
         )?;
     }
+
+    // Read here, below the registration, rather than up with the other chain
+    // reads. `--register` blocks for up to `--register-timeout` twice over —
+    // once for the commitment to confirm, once for the registration to be
+    // mined — so a height read above it is minutes and blocks stale by the time
+    // the definition is built against it. `prepare_launch` re-reads the tip and
+    // refuses `start_block <= tip`, which is how a launch measured from the
+    // older height came back as "start_block N is not after the tip M" for a
+    // chain that had simply moved on, on the default --start-in as well.
+    ui.sdk("node.block_count()");
+    let tip = node.block_count().map_err(|source| {
+        node::NodeError::request("reading the tip", &settings.profile.node, source)
+    })?;
+    ui.sdk_result(fmt::height(tip.into()));
+
+    // A launch cannot start in the past, and the flow refuses one that would.
+    // The default leaves room for the transaction to be mined and for a human
+    // to notice a mistake before conversions open.
+    let start_block = start_block_for(args.start_block, args.start_in, tip)?;
 
     let defining = {
         ui.sdk(format!("node.identity({:?})", args.name));
@@ -2989,6 +3043,78 @@ fn check_transparent(recipient: &str) -> Result<(), CurrencyError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The start block is a function of the tip it is handed and nothing else,
+    /// which is the whole reason the tip is an argument: with `--register` the
+    /// tip that must be passed is the one read *after* the registration was
+    /// mined, not the one at the start of the command.
+    #[test]
+    fn the_start_block_is_measured_from_the_tip_it_is_handed() {
+        assert_eq!(start_block_for(None, 20, 1_178_000).unwrap(), 1_178_020);
+        // The same offset, nine blocks later — as after a registration wait.
+        assert_eq!(start_block_for(None, 20, 1_178_009).unwrap(), 1_178_029);
+        // An explicit --start-block is a height, not an offset, and ignores both.
+        assert_eq!(
+            start_block_for(Some(1_200_000), 20, 1_178_000).unwrap(),
+            1_200_000
+        );
+    }
+
+    /// A clamp would be worse than the overflow it patches: `u32::MAX` is
+    /// *after* the tip, so both the flow and consensus accept it, and 200
+    /// VRSCTEST buys a currency whose conversions never open.
+    #[test]
+    fn an_offset_past_the_last_block_there_can_be_is_refused_rather_than_clamped() {
+        let refused = start_block_for(None, u32::MAX, 1_178_000);
+        assert!(matches!(
+            refused,
+            Err(CurrencyError::StartBlockUnreachable {
+                tip: 1_178_000,
+                start_in: u32::MAX
+            })
+        ));
+        assert!(
+            !matches!(refused, Ok(height) if height == u32::MAX),
+            "a clamped start block is still after the tip, so it is accepted and paid for"
+        );
+    }
+
+    /// The misdirection this fix is about: a start block already passed is a
+    /// question about the flags, and the catch-all sends it to `pecu doctor`
+    /// for a node that answered correctly.
+    #[test]
+    fn a_start_block_in_the_past_points_at_the_flags_not_at_the_node() {
+        let refused = flow(
+            "building the launch",
+            FlowError::NotReady(
+                "start_block 1178005 is not after the tip 1178009; the chain refuses a launch \
+                 in the past"
+                    .into(),
+            ),
+        );
+        let CurrencyError::Flow { advice, .. } = refused else {
+            panic!("a flow refusal is a CurrencyError::Flow");
+        };
+        assert!(advice.contains("--start-in"));
+        assert!(advice.contains("--start-block"));
+        assert!(!advice.contains("doctor"));
+    }
+
+    /// Arm ordering: the one-way rule is also a `NotReady`, and being swallowed
+    /// by the new arm is the only way this change could regress it.
+    #[test]
+    fn an_identity_that_already_defines_a_currency_keeps_its_own_advice() {
+        let refused = flow(
+            "building the launch",
+            FlowError::NotReady(
+                "iK2k8 already defines a currency; an identity defines exactly one".into(),
+            ),
+        );
+        let CurrencyError::Flow { advice, .. } = refused else {
+            panic!("a flow refusal is a CurrencyError::Flow");
+        };
+        assert!(advice.contains("defines a currency once and never again"));
+    }
 
     /// The trap that cost a second launch: 100 sent against a cap of 50 is
     /// refunded **whole**, so the leg ends with nothing — and a basket refunds
