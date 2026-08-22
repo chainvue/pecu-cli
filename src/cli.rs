@@ -707,8 +707,10 @@ pub struct CurrencyLaunchArgs {
     #[arg(long, value_name = "NAME@:COINS", requires = "reserve")]
     pub max_preconvert: Vec<String>,
 
-    /// Pre-launch conversion rate for a reserve, as `NAME@:RATE`
-    #[arg(long, value_name = "NAME@:RATE", requires = "reserve")]
+    /// Refused: a basket's launch price is derived from --supply and the reserve
+    /// weights, and consensus never reads the rate a definition carries. There
+    /// is no shape in which this number takes effect
+    #[arg(long, value_name = "NAME@:RATE")]
     pub conversion: Vec<String>,
 
     /// Discount for converting before launch, as a percentage

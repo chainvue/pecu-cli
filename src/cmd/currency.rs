@@ -312,6 +312,23 @@ pub enum CurrencyError {
     )]
     ContributionUnfunded,
 
+    #[error("--conversion writes a launch price consensus derives and ignores")]
+    #[diagnostic(
+        code(pecu::launch_price_derived),
+        help(
+            "a fractional basket's pre-launch price is not a number in its definition. Consensus \
+              computes it at launch, into the launch notarization published in the same \
+              transaction, as SATOSHIDEN^3 divided by (initial supply x weight) — so \
+              `conversions` is read by nothing, and the daemon's own captures settle it: a \
+              definition created by passing [4.0] comes back carrying [0.0]. Honouring the flag \
+              would put a number on chain permanently and unchangeably, in a byte shape no daemon \
+              has ever written, while the price stayed whatever the supply and the weights make \
+              it. The figure that does move it is --supply, the denominator every reserve price \
+              divides by. Launch without --conversion"
+        )
+    )]
+    LaunchPriceDerived,
+
     #[error("{what} failed")]
     #[diagnostic(code(pecu::flow_failed), help("{advice}"))]
     Flow {
@@ -1134,6 +1151,25 @@ pub fn launch(
         return Err(CurrencyError::ContributionUnfunded.into());
     }
 
+    // The same shape of refusal one flag along, for a different reason: this one
+    // is consensus rather than an SDK gap, so unlike --contribute it never goes
+    // away. A basket's pre-launch price is computed at launch from
+    // `initial_supply` and the weights — the formula BasketNeedsSupply names a
+    // few lines up — and written into the launch notarization;
+    // `definition.conversions` is not an input to it, and the daemon zeroes the
+    // field on the way in. Honouring the flag would write a number nothing reads
+    // into a definition that can never be changed, while the panel reported it
+    // back as the price.
+    //
+    // Reads `args.conversion` and never `definition.conversions`, for the same
+    // reason as the guard above: the --nft path sets that field to
+    // `[Amount::ZERO]` for byte-shape parity, and a guard on the field would
+    // refuse every NFT launch — both NFT tests are #[ignore]d, so nothing
+    // offline would catch it.
+    if !args.conversion.is_empty() {
+        return Err(CurrencyError::LaunchPriceDerived.into());
+    }
+
     let store = Keystore::new(&settings.paths);
     let envelope = choose_key(&store, args.from.as_deref())?;
     let node = node::connect(&settings.profile)?;
@@ -1213,7 +1249,10 @@ pub fn launch(
         definition.initial_supply = supply.unwrap_or(Amount::ZERO);
         definition.currencies = reserves;
         definition.weights = weights;
-        definition.conversions = per_reserve(&args.conversion, &names, "conversion")?;
+        // `conversions` is deliberately not among these: the launch price is
+        // derived at launch from the supply and the weights, so the field is
+        // read by nothing and the daemon zeroes it. Left at the empty vector
+        // `token()` builds, which is what every basket this has launched wrote.
         definition.min_preconversion = per_reserve(&args.min_preconvert, &names, "min-preconvert")?;
         definition.max_preconversion = per_reserve(&args.max_preconvert, &names, "max-preconvert")?;
 
@@ -1518,7 +1557,6 @@ fn launch_panel(
             for (label, values) in [
                 ("min", &definition.min_preconversion),
                 ("max", &definition.max_preconversion),
-                ("rate", &definition.conversions),
             ] {
                 if let Some(amount) = values.get(index).filter(|a| **a != Amount::ZERO) {
                     row = row.push(format!("  {label} {}", fmt::amount(*amount)), palette.muted);
