@@ -389,6 +389,84 @@ fn contributing_at_launch_is_refused_before_a_key_is_unlocked() {
 }
 
 #[test]
+fn a_launch_conversion_rate_is_refused_before_a_key_is_unlocked() {
+    let home = home();
+    generate(&home, "demo");
+    pecu(&home)
+        .env_remove("PECU_PASSPHRASE")
+        .args([
+            "currency",
+            "launch",
+            "alice@",
+            "--supply",
+            "100",
+            "--reserve",
+            "VRSCTEST:60",
+            "--reserve",
+            "TST:40",
+            "--conversion",
+            "VRSCTEST:4",
+            "--node",
+            DEAD_NODE,
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("launch_price_derived"))
+        // The remedy has to name the one number that does move the price, since
+        // the flag that sounded like it never did.
+        .stderr(contains("--supply"))
+        // Refused ahead of the keystore and the node: this is what would fail
+        // if the guard drifted back down beside the definition.
+        .stderr(contains("passphrase").not());
+}
+
+#[test]
+fn a_conversion_rate_without_reserves_is_refused_by_name() {
+    let home = home();
+    generate(&home, "demo");
+    pecu(&home)
+        .args([
+            "currency",
+            "launch",
+            "alice@",
+            "--supply",
+            "100",
+            "--conversion",
+            "VRSCTEST:4",
+            "--node",
+            DEAD_NODE,
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("launch_price_derived"))
+        // Not clap's "the following required arguments were not provided:
+        // --reserve", which said the rate would work once a reserve was given —
+        // the exact inversion of the truth, since --reserve is what makes the
+        // price derived.
+        .stderr(contains("were not provided").not());
+}
+
+#[test]
+fn launch_help_says_conversion_is_refused() {
+    let home = home();
+    generate(&home, "demo");
+    let assertion = pecu(&home)
+        .args(["currency", "launch", "--help"])
+        .assert()
+        .success();
+    // clap wraps this help to the terminal width, and it honours COLUMNS even
+    // when stdout is captured, so a narrow terminal breaks the phrase across
+    // two lines. Flatten first so the phrase means what it says.
+    let stdout = flat(&String::from_utf8_lossy(&assertion.get_output().stdout));
+    assert!(stdout.contains("--conversion"), "{stdout}");
+    assert!(stdout.contains("Refused"), "{stdout}");
+    // The word alone would pass on --contribute's doc: this is the sentence
+    // that has to survive, because softening it back into a description of
+    // a rate the flag does not set is the whole defect.
+    assert!(stdout.contains("derived from --supply"), "{stdout}");
+}
+
+#[test]
 fn launch_help_says_contribute_is_refused() {
     let home = home();
     generate(&home, "demo");

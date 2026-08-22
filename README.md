@@ -897,6 +897,22 @@ contribution a fractional basket needs from every reserve comes from
 funding output ([#129](https://github.com/chainvue/verus-rust-sdk/issues/129)),
 so the refusal goes when the pin moves.
 
+**`--conversion` is refused too, and permanently.** A fractional basket's
+pre-launch price is not a number in its definition: consensus derives it at
+launch as `SATOSHIDEN³ / (initial supply × weight)` and writes it into the
+launch notarization published in the same transaction. The `conversions` field
+the flag wrote is read by nothing, and the daemon zeroes it on the way in — a
+definition created by passing `[4.0]` comes back carrying `[0.0]`, and every
+fractional definition in the SDK's captures of real daemon output has an
+all-zero vector. The old flag was worse than useless: it required `--reserve`,
+which is the one configuration where the field is derived and ignored, and the
+confirmation panel printed the number back as `rate` beside genuinely effective
+rows, right before the prompt that spends 200 VRSCTEST on something
+unchangeable. The figure that does move the price is `--supply`, the
+denominator every reserve price divides by — the one the panel labels *the
+reserves are priced against this*. Unlike `--contribute`, this refusal has no
+expiry: it is a consensus fact rather than an SDK gap.
+
 **The prelaunch economics, and the sub-identity policy.** All of it is per
 reserve, and all of it is keyed by the reserve's *name*:
 
