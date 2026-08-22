@@ -96,24 +96,70 @@ pub fn fit(text: &str, max: usize, ellipsis: &str) -> String {
     elide(text, head, max - marker - head, ellipsis)
 }
 
+/// Characters that are invisible, or that reorder what is printed after them.
+///
+/// Not one of these is `is_control()` — they are Unicode format characters
+/// (general category Cf) and the two line separators (Zl, Zp), so the Cc check
+/// in `untrusted` walks straight past them. Every one of them defeats reading a
+/// name. `RLO` reverses display order, so a name registered as
+/// `evil\u{202e}gnp.tnecconni` renders as `innocent.png` on the panel that asks
+/// for `yes`, while the bytes say otherwise; the zero-width set makes two names
+/// that differ in the bytes render identically, on a panel whose whole job is
+/// telling two names apart; U+2028 and U+2029 break a line without being
+/// controls, and `untrusted`'s promise that everything is folded onto one line
+/// has to stay true.
+///
+/// The ranges are written out because `std` has no general-category test and one
+/// display filter does not justify a Unicode-tables dependency. This is Cf as of
+/// Unicode 16; a later version adding to that category would want adding here
+/// too.
+fn deceptive(character: char) -> bool {
+    matches!(
+        character,
+        '\u{ad}'                        // soft hyphen
+            | '\u{600}'..='\u{605}'     // arabic number signs
+            | '\u{61c}'                 // arabic letter mark
+            | '\u{6dd}'                 // arabic end of ayah
+            | '\u{70f}'                 // syriac abbreviation mark
+            | '\u{890}'..='\u{891}'     // arabic pound and piastre marks
+            | '\u{8e2}'                 // arabic disputed end of ayah
+            | '\u{180e}'                // mongolian vowel separator
+            | '\u{200b}'..='\u{200f}'   // zero-width set, LRM, RLM
+            | '\u{2028}'..='\u{2029}'   // line and paragraph separators
+            | '\u{202a}'..='\u{202e}'   // bidi embeddings and overrides
+            | '\u{2060}'..='\u{2064}'   // word joiner, invisible operators
+            | '\u{2066}'..='\u{206f}'   // bidi isolates, deprecated shaping
+            | '\u{feff}'                // BOM / zero-width no-break space
+            | '\u{fff9}'..='\u{fffb}'   // interlinear annotation
+            | '\u{110bd}'               // kaithi number sign
+            | '\u{110cd}'               // kaithi number sign above
+            | '\u{13430}'..='\u{1343f}' // egyptian hieroglyph format controls
+            | '\u{1bca0}'..='\u{1bca3}' // shorthand format controls
+            | '\u{1d173}'..='\u{1d17a}' // musical beam and phrase controls
+            | '\u{e0001}'               // language tag
+            | '\u{e0020}'..='\u{e007f}' // tag characters
+    )
+}
+
 /// Make text that came from a node safe to print.
 ///
 /// The SDK is explicit that currency and identity names are **untrusted display
 /// text**: Verus permits far more in a name than it looks like it does, and the
 /// node is simply repeating what somebody registered. Printed raw, a name can
 /// carry ANSI escapes that repaint the terminal, a newline that forges an extra
-/// row in a balance table, or characters chosen to read as an address or a
-/// number.
+/// row in a balance table, or characters chosen to read as an address, as a
+/// number, or as somebody else's name.
 ///
-/// So: control characters and escapes are replaced, everything is folded onto
-/// one line, and the result is capped. What comes back is display text and
-/// nothing more — the currency **id** is the part that identifies anything, and
-/// it is always shown alongside.
+/// So: control characters and escapes, and the invisible and direction-changing
+/// characters that let one name read as another, are replaced; everything is
+/// folded onto one line; and the result is capped. What comes back is display
+/// text and nothing more — the currency **id** is the part that identifies
+/// anything, and it is always shown alongside.
 pub fn untrusted(text: &str, max: usize, ellipsis: &str) -> String {
     let cleaned: String = text
         .chars()
         .map(|character| {
-            if character.is_control() || character == '\u{7f}' {
+            if character.is_control() || character == '\u{7f}' || deceptive(character) {
                 '·'
             } else {
                 character
@@ -283,6 +329,79 @@ mod tests {
     }
 
     #[test]
+    fn untrusted_text_cannot_reverse_the_order_a_name_reads_in() {
+        // The issue's own case. `RLO` reverses the display order of everything
+        // after it, so these bytes render as `innocent.png` on the panel that
+        // asks for `yes` — a name that reads as one thing and is another.
+        let safe = untrusted("evil\u{202e}gnp.tnecconni", 40, "…");
+        assert_eq!(safe, "evil·gnp.tnecconni");
+        for character in ['\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}']
+            .into_iter()
+            .chain(['\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}'])
+            .chain(['\u{200e}', '\u{200f}', '\u{61c}'])
+        {
+            let safe = untrusted(&format!("a{character}b"), 40, "…");
+            assert_eq!(safe, "a·b", "{character:?} survived: {safe:?}");
+        }
+    }
+
+    #[test]
+    fn two_names_that_differ_only_by_an_invisible_character_do_not_print_the_same() {
+        // The panel's whole job on these rows is telling two registrations
+        // apart. A name that differs only by something with no glyph would
+        // print identically to the one it is impersonating.
+        for character in [
+            '\u{200b}',
+            '\u{200c}',
+            '\u{200d}',
+            '\u{2060}',
+            '\u{feff}',
+            '\u{ad}',
+            '\u{61c}',
+            '\u{e0041}',
+        ] {
+            let safe = untrusted(&format!("alice{character}bob"), 40, "…");
+            assert_ne!(
+                safe,
+                untrusted("alicebob", 40, "…"),
+                "{character:?} printed as nothing"
+            );
+            assert!(safe.contains('·'), "{character:?} survived: {safe:?}");
+        }
+    }
+
+    #[test]
+    fn untrusted_text_stays_on_one_line_even_when_the_break_is_not_a_control_character() {
+        // U+2028 and U+2029 are Zl and Zp, not Cc, so `is_control()` walks past
+        // them while a terminal still breaks the line. They are Unicode
+        // White_Space, so `trim()` only ever reached them at the ends — one in
+        // the middle forged an extra row.
+        let hostile = "ok\u{2028}SPENDABLE  999.00000000\u{2029}more";
+        let safe = untrusted(hostile, 60, "…");
+        assert!(
+            !safe.contains('\u{2028}'),
+            "line separator survived: {safe:?}"
+        );
+        assert!(
+            !safe.contains('\u{2029}'),
+            "paragraph separator survived: {safe:?}"
+        );
+    }
+
+    #[test]
+    fn neutralising_a_character_leaves_one_the_reader_can_count() {
+        // The map is 1:1: `fit`'s budget, every NAME_BUDGET, and the column
+        // widths `currency` measures over the sanitized string all assume it.
+        // Deleting rather than replacing would desynchronise all three, and
+        // would hide from the reader that anything was there.
+        let hostile = "a\u{202e}b\u{200b}c\u{2028}d\u{feff}e";
+        assert_eq!(
+            untrusted(hostile, 200, "…").chars().count(),
+            hostile.chars().count()
+        );
+    }
+
+    #[test]
     fn untrusted_text_is_capped() {
         let long = "n".repeat(500);
         assert!(untrusted(&long, 20, "…").chars().count() <= 20);
@@ -290,7 +409,11 @@ mod tests {
 
     #[test]
     fn ordinary_names_pass_through_untouched() {
+        // The risk of a wider filter is that it starts eating honest text.
         assert_eq!(untrusted("Bridge.vETH", 40, "…"), "Bridge.vETH");
+        assert_eq!(untrusted("Ünïcødé.vRSC", 40, "…"), "Ünïcødé.vRSC");
+        assert_eq!(untrusted("桥.vETH", 40, "…"), "桥.vETH");
+        assert_eq!(untrusted("bridge-eth.vrsc", 40, "…"), "bridge-eth.vrsc");
     }
 
     #[test]

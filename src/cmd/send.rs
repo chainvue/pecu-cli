@@ -1284,6 +1284,36 @@ mod tests {
     }
 
     #[test]
+    fn a_bidi_override_in_a_currency_name_cannot_reverse_the_review_row() {
+        // None of these is `is_control()`, so the frame check above says
+        // nothing about them: RLO reverses the display order of everything
+        // after it and ZWSP has no glyph at all, which on a panel that asks for
+        // `yes` is a name reading as one currency while being another. This is
+        // the end-to-end proof that the row really routes through the
+        // sanitiser rather than printing what the node answered.
+        let hostile = "ev\u{202e}il\u{200b}coin@";
+        let out = rendered_token(hostile);
+        assert!(
+            !out.contains('\u{202e}'),
+            "the bidi override survived into the panel:\n{out}"
+        );
+        assert!(
+            !out.contains('\u{200b}'),
+            "the zero-width space survived into the panel:\n{out}"
+        );
+        let widths: Vec<usize> = out
+            .lines()
+            .filter(|line| line.starts_with(['\u{250c}', '\u{2502}', '\u{251c}', '\u{2514}']))
+            .map(UnicodeWidthStr::width)
+            .collect();
+        assert!(!widths.is_empty(), "nothing was framed:\n{out}");
+        assert!(
+            widths.windows(2).all(|pair| pair[0] == pair[1]),
+            "ragged frame {widths:?}:\n{out}"
+        );
+    }
+
+    #[test]
     fn a_hostile_recipient_name_cannot_break_the_review_frame() {
         // The `to` row carries what the node answered for `--to bob@`, and a
         // node hostile enough to answer with escapes is the whole reason this
