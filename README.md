@@ -468,6 +468,14 @@ sign. `sign` refuses without `--yes` when that check fails.
 **A partial that still needs another signature is never dressed up as finished.**
 It comes back as a partial, with a non-zero exit and instructions to pass it on.
 
+**The guards sit on the two commands that touch the chain.** `plan send` and
+`broadcast` both read `allow_spend`, and `broadcast` also honours `--dry-run` and
+refuses `--json` without `--yes` — the same three rules `pecu send` follows,
+because between them these two *are* `send` taken apart. A plan cannot be
+broadcast, so `plan send` has nothing to stop short of. `sign` is exempt on
+purpose: it opens no socket and a signature alone moves nothing, so the machine
+holding the key needs no profile that is allowed to spend.
+
 #### QR framing
 
 A QR code holds at most 4296 alphanumeric characters, so payloads are split into
