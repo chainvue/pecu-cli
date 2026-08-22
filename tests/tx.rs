@@ -1,9 +1,12 @@
 //! `pecu tx explain`, against real bytes.
 //!
-//! Entirely offline. Every fixture is a genuine VRSCTEST artefact — two mined
-//! transactions pulled off the chain, two currency-launch transactions and two
-//! output scripts from the SDK's own daemon fixtures — so what these assert is
-//! that the decoder says the right thing about bytes the daemon really produced.
+//! Entirely offline. Every fixture but one is a genuine VRSCTEST artefact — two
+//! mined transactions pulled off the chain, two currency-launch transactions and
+//! two output scripts from the SDK's own daemon fixtures — so what these assert
+//! is that the decoder says the right thing about bytes the daemon really
+//! produced. The exception is `outputs-that-do-not-total.hex`, hand-built
+//! because no daemon would ever emit it: a decoder has to be right about bytes
+//! nobody mined either, since it is handed them by a counterparty.
 
 use assert_cmd::Command;
 use predicates::str::contains;
@@ -131,12 +134,47 @@ fn a_zero_expiry_is_named_rather_than_printed_as_zero() {
 }
 
 #[test]
+fn a_total_larger_than_a_u64_is_said_in_words_not_wrapped() {
+    // Two outputs of `u64::MAX`. Nothing in the wire format rules that out, and
+    // a bare `sum::<u64>()` met it with a panic in a debug build and a total
+    // *smaller than one of the outputs* in a release one.
+    let rendered = explain("outputs-that-do-not-total.hex");
+    let flat = unwrapped(&rendered);
+    assert!(
+        flat.contains("2 outputs — more than can be represented in native satoshis"),
+        "{rendered}"
+    );
+    // Each output still says what it is worth; only the total is missing.
+    assert!(rendered.contains("184467440737.09551615"), "{rendered}");
+    assert!(
+        !rendered.contains("184467440737.09551614"),
+        "a wrapped total reached the panel:\n{rendered}"
+    );
+}
+
+#[test]
+fn json_gives_no_total_rather_than_a_wrapped_one() {
+    let document = explain_json("outputs-that-do-not-total.hex");
+    assert_eq!(document["kind"], "transaction");
+    let outputs = document["outputs"].as_array().expect("an outputs array");
+    assert_eq!(outputs.len(), 2);
+    for output in outputs {
+        assert_eq!(output["satoshis"], serde_json::json!(u64::MAX));
+    }
+    assert!(
+        document["total_satoshis"].is_null(),
+        "a wrapped total reached the document: {document}"
+    );
+}
+
+#[test]
 fn every_frame_stays_rectangular_across_all_fixtures() {
     for name in [
         "coinbase.hex",
         "currency-launch-fractional-one-reserve.hex",
         "currency-launch-token-centralized.hex",
         "identity-spend.hex",
+        "outputs-that-do-not-total.hex",
         "script-identity-payment.hex",
         "script-reserve-transfer.hex",
     ] {

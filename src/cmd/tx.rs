@@ -21,6 +21,7 @@ use std::io::Read;
 use miette::Diagnostic;
 use thiserror::Error;
 use verus_sdk::decode::{decode_output_script, Destination, OutputKind};
+use verus_sdk::money::Amount;
 use verus_sdk::network::ChainReader;
 use verus_sdk::send::CurrencyId;
 use verus_sdk::verus_keys::{Address, AddressKind};
@@ -173,7 +174,7 @@ fn fetch(settings: &Settings, txid: &str) -> Result<Vec<u8>, miette::Report> {
 fn render_transaction(ui: &Ui, transaction: &TxV4) {
     let palette = ui.theme.palette;
     let glyphs = ui.theme.glyphs;
-    let total_out: u64 = transaction.outputs.iter().map(|out| out.value).sum();
+    let total_out = total_output_value(transaction);
 
     let expiry = match transaction.expiry_height {
         // Worth naming rather than printing as 0. An expiry of "never" is a
@@ -240,7 +241,7 @@ fn render_transaction(ui: &Ui, transaction: &TxV4) {
         format!(
             "{} — {} in native satoshis",
             fmt::plural(transaction.outputs.len(), "output", "outputs"),
-            fmt::sats(total_out)
+            fmt::total(total_out)
         ),
         palette.muted,
     ));
@@ -268,6 +269,25 @@ fn render_script(ui: &Ui, kind: &OutputKind) {
             .rule()
             .wrapped(0, describe(ui, kind)),
     );
+}
+
+/// The satoshi value of every output added up, or `None` when they do not fit.
+///
+/// The bytes come from whoever handed them over — `tx explain` takes free-form
+/// hex or stdin, `broadcast` takes hex or a QR — and `TxV4::deserialize` reads
+/// each value as a raw `u64` with no range check, so nothing upstream rules out
+/// two outputs of `u64::MAX`. A bare `sum::<u64>()` panicked in a debug build
+/// and wrapped in a release one, printing a total *smaller than one of the
+/// outputs it totalled*. No such transaction can be mined — the sum has to pass
+/// ~184 billion coins to wrap, four orders of magnitude beyond supply — so the
+/// honest answer is not an error, it is that there is no number to print.
+pub fn total_output_value(transaction: &TxV4) -> Option<Amount> {
+    Amount::checked_sum(
+        transaction
+            .outputs
+            .iter()
+            .map(|out| Amount::from_sat(out.value)),
+    )
 }
 
 /// Zero satoshis on a Verus output is normal and meaningful, so it is muted
@@ -534,7 +554,7 @@ fn emit_transaction_json(transaction: &TxV4) {
             })
         }).collect::<Vec<_>>(),
         "outputs": outputs,
-        "total_satoshis": transaction.outputs.iter().map(|out| out.value).sum::<u64>(),
+        "total_satoshis": total_output_value(transaction).map(Amount::to_sat),
     }));
 }
 
