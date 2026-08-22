@@ -28,6 +28,10 @@ const DEAD_NODE: &str = "https://127.0.0.1:1";
 /// dying at the local decode the way a plan or a pile of rubbish would.
 const FINISHED: &str = include_str!("../fixtures/identity-spend.hex");
 
+/// Two outputs of `u64::MAX`, hand-built: bytes no daemon would emit, which is
+/// exactly the kind `broadcast` is handed by a counterparty.
+const OUTPUTS_THAT_DO_NOT_TOTAL: &str = include_str!("../fixtures/outputs-that-do-not-total.hex");
+
 /// The txid `FINISHED` decodes to. Fixed, because the bytes are.
 const FINISHED_TXID: &str = "2828f297d7611b2488c4e9074960006edb916fe6f8e0c70e5ebe05cab7b284d7";
 
@@ -389,6 +393,38 @@ fn mainnet_will_not_plan_a_spend_without_being_told_to() {
         .stderr(contains("not allowed to spend"))
         .stderr(contains("planning the payment").not())
         .stderr(contains("127.0.0.1").not());
+}
+
+#[test]
+fn the_broadcast_panel_never_shows_a_wrapped_total() {
+    // The panel before the confirm prompt carries the txid, the output *count*
+    // and this total — no per-output values — so nothing on screen would
+    // contradict a wrapped figure. It says it cannot be represented instead.
+    let home = home();
+    let assertion = pecu(&home)
+        .args([
+            "broadcast",
+            OUTPUTS_THAT_DO_NOT_TOTAL.trim(),
+            "--dry-run",
+            "--node",
+            DEAD_NODE,
+            "--theme",
+            "phosphor",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+
+    assert!(stdout.contains("WOULD BROADCAST"), "{stdout}");
+    assert!(
+        stdout.contains("more than can be represented"),
+        "the total is not named:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("184467440737.09551614"),
+        "a wrapped total reached the panel:\n{stdout}"
+    );
+    assertion.stderr(contains("127.0.0.1").not());
 }
 
 #[test]

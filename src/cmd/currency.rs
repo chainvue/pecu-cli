@@ -739,6 +739,21 @@ fn coins_to_sat(value: &serde_json::Value) -> u64 {
     (coins * SATOSHIDEN as f64).round() as u64
 }
 
+/// What a node says was preallocated at launch, added up.
+///
+/// Two rows of the same panel ask this. The figures are the node's, converted
+/// by [`coins_to_sat`], whose `as u64` cast saturates at `u64::MAX` — so two
+/// absurd entries in one definition were a debug-build panic and a
+/// release-build wrap on a panel about somebody else's money.
+fn reported_preallocation_total(list: &[serde_json::Value]) -> Option<Amount> {
+    Amount::checked_sum(
+        list.iter()
+            .filter_map(serde_json::Value::as_object)
+            .flat_map(|map| map.values())
+            .map(|value| Amount::from_sat(coins_to_sat(value))),
+    )
+}
+
 fn definition_coins(found: &CurrencySummary, field: &str) -> u64 {
     found.definition.get(field).map_or(0, coins_to_sat)
 }
@@ -881,18 +896,13 @@ fn panel(ui: &Ui, node: &crate::node::Node, found: &CurrencySummary) -> Panel {
             .definition
             .get("preallocations")
             .and_then(|v| v.as_array())
-            .map(|list| {
-                list.iter()
-                    .filter_map(serde_json::Value::as_object)
-                    .flat_map(|map| map.values())
-                    .map(coins_to_sat)
-                    .sum::<u64>()
-            })
-            .unwrap_or(0);
+            .map_or(Some(Amount::ZERO), |list| {
+                reported_preallocation_total(list)
+            });
         let mut row = Text::of(fmt::amount(Amount::from_sat(now)), palette.value);
-        if now != at_launch {
+        if at_launch != Some(Amount::from_sat(now)) {
             row = row.push(
-                format!("  {} at launch", fmt::amount(Amount::from_sat(at_launch))),
+                format!("  {} at launch", fmt::total(at_launch)),
                 palette.muted,
             );
         }
@@ -1070,14 +1080,12 @@ fn panel(ui: &Ui, node: &crate::node::Node, found: &CurrencySummary) -> Panel {
     {
         if !list.is_empty() {
             panel = panel.section("PREALLOCATED");
-            let mut total = 0u64;
             for entry in list {
                 let Some(map) = entry.as_object() else {
                     continue;
                 };
                 for (recipient, amount) in map {
                     let sats = coins_to_sat(amount);
-                    total += sats;
                     panel = panel.row(
                         "",
                         Text::of(fmt::amount(Amount::from_sat(sats)), palette.value)
@@ -1097,7 +1105,7 @@ fn panel(ui: &Ui, node: &crate::node::Node, found: &CurrencySummary) -> Panel {
             panel = panel.note(Text::of(
                 format!(
                     "{} in total at launch",
-                    fmt::amount(Amount::from_sat(total))
+                    fmt::total(reported_preallocation_total(list))
                 ),
                 palette.muted,
             ));
@@ -1464,7 +1472,7 @@ pub fn launch(
             "txid": unsent.outcome.txid,
             "start_block": unsent.outcome.start_block,
             "launch_fee": unsent.outcome.launch_fee.to_sat(),
-            "supply": definition.preallocations.iter().map(|p| p.amount.to_sat()).sum::<u64>(),
+            "supply": Amount::checked_sum(definition.preallocations.iter().map(|p| p.amount)).map(Amount::to_sat),
             "mintable": args.mintable,
             "broadcast": false,
         });
@@ -3043,6 +3051,32 @@ fn check_transparent(recipient: &str) -> Result<(), CurrencyError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both call sites need a node to reach, so this is asked of the helper
+    /// directly: the figures are the node's, and `coins_to_sat` saturates an
+    /// absurd one at `u64::MAX` rather than refusing it, so two of them in one
+    /// definition are a sum that has no answer.
+    #[test]
+    fn a_node_that_reports_an_impossible_preallocation_gets_no_total() {
+        let absurd = vec![
+            serde_json::json!({ "iAddr": 1e30 }),
+            serde_json::json!({ "iAddr": 1e30 }),
+        ];
+        assert_eq!(reported_preallocation_total(&absurd), None);
+
+        let ordinary = vec![
+            serde_json::json!({ "iAddr": 1.5 }),
+            serde_json::json!({ "iAddr": 2.25 }),
+        ];
+        assert_eq!(
+            reported_preallocation_total(&ordinary),
+            Some(Amount::from_sat(375_000_000))
+        );
+
+        // A currency with no preallocations reads as zero, not as a figure
+        // that could not be represented.
+        assert_eq!(reported_preallocation_total(&[]), Some(Amount::ZERO));
+    }
 
     /// The start block is a function of the tip it is handed and nothing else,
     /// which is the whole reason the tip is an argument: with `--register` the

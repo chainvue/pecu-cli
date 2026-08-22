@@ -19,6 +19,22 @@ pub fn sats(value: u64) -> String {
     amount(Amount::from_sat(value))
 }
 
+/// A total that may not exist, because the numbers it was made of did not fit.
+///
+/// Every total on a panel here is built from figures somebody else chose —
+/// output values out of bytes a counterparty handed over, preallocations out of
+/// a node's JSON — and nothing upstream bounds them. A wrapped total is worse
+/// than no total: `u64::MAX - 1e8` plus `2e8` prints as a plausible
+/// `1.00000000` on the panel a reader consults before authorising a broadcast.
+/// So where the sum could not be taken, this says so rather than printing a
+/// number that is not the answer.
+pub fn total(value: Option<Amount>) -> String {
+    match value {
+        Some(sum) => amount(sum),
+        None => "more than can be represented".to_string(),
+    }
+}
+
 /// A movement rather than a holding: always signed, so `+` and `-` line up in
 /// the same column and a net of zero reads as `+0.00000000` rather than as an
 /// amount that happens to be small.

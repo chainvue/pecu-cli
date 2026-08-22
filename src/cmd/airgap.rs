@@ -33,6 +33,7 @@ use verus_sdk::network::{broadcast as submit, prepare_unsigned_send, FlowError};
 use verus_sdk::verus_keys::Address;
 
 use crate::cli::{BroadcastArgs, Globals, PlanSendArgs, QrOut, SignArgs};
+use crate::cmd::tx;
 use crate::cmd::wallet;
 use crate::config::Settings;
 use crate::keystore::{self, Keystore};
@@ -457,7 +458,7 @@ pub fn broadcast(
             .row(
                 "value",
                 Text::of(
-                    fmt::sats(transaction.outputs.iter().map(|o| o.value).sum::<u64>()),
+                    fmt::total(tx::total_output_value(&transaction)),
                     palette.value,
                 )
                 .space()
