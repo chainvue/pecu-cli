@@ -145,7 +145,10 @@ fn attempt(ui: &Ui, settings: &Settings, globals: &Globals, args: &SendArgs) -> 
 
     let recipient = resolve_recipient(ui, &node, &args.to)?;
     let currency = match &args.currency {
-        Some(name) => Some(resolve_currency(ui, &node, name)?),
+        Some(name) => Some(Token {
+            id: resolve_currency(ui, &node, name)?,
+            shown: name.clone(),
+        }),
         None => None,
     };
 
@@ -155,10 +158,10 @@ fn attempt(ui: &Ui, settings: &Settings, globals: &Globals, args: &SendArgs) -> 
     let secret = keystore::passphrase(&format!("passphrase for `{}`", envelope.label), false)?;
     let key = envelope.unlock(&secret)?;
 
-    let unsent = match (&args.from_identity, currency) {
+    let unsent = match (&args.from_identity, &currency) {
         (Some(identity), _) => build_from_identity(ui, &node, &key, identity, &recipient, amount)?,
         (None, None) => build_native(ui, &node, &key, &recipient, amount)?,
-        (None, Some(currency)) => build_token(ui, &node, &key, &recipient, amount, currency)?,
+        (None, Some(currency)) => build_token(ui, &node, &key, &recipient, amount, currency.id)?,
     };
 
     let decoded =
@@ -173,6 +176,7 @@ fn attempt(ui: &Ui, settings: &Settings, globals: &Globals, args: &SendArgs) -> 
         &decoded,
         args.from_identity.as_deref().unwrap_or(&envelope.address),
         args.from_identity.as_deref(),
+        currency.as_ref(),
     );
 
     if !ui.is_json() {
@@ -183,6 +187,7 @@ fn attempt(ui: &Ui, settings: &Settings, globals: &Globals, args: &SendArgs) -> 
             args.from_identity.as_deref(),
             &recipient,
             amount,
+            currency.as_ref(),
             &unsent,
             &decoded,
         ));
@@ -267,6 +272,20 @@ struct Recipient {
     address: String,
     /// What to show. The name if there was one, so the confirmation says what
     /// you typed rather than what it resolved to.
+    shown: String,
+}
+
+/// Which token is moving, when one is. A native send has nothing to name beyond
+/// the profile's own ticker, so this is `None` there.
+///
+/// Name and id travel together on purpose: the name is untrusted display text a
+/// registrant chose, and the id is the part that identifies anything. Two
+/// parallel `Option`s threaded through two signatures could silently disagree.
+struct Token {
+    /// What the SDK is handed — always a currency id.
+    id: CurrencyId,
+    /// What to show. The name as typed, so the confirmation answers the command
+    /// that was given; the `currency id` row is what the node resolved it to.
     shown: String,
 }
 
@@ -528,12 +547,26 @@ fn review(
     identity: Option<&str>,
     to: &Recipient,
     amount: Amount,
+    token: Option<&Token>,
     unsent: &Unsent<verus_sdk::network::Sent>,
     decoded: &Option<TxV4>,
 ) -> Panel {
     let palette = ui.theme.palette;
     let glyphs = ui.theme.glyphs;
     let currency = &settings.profile.currency;
+
+    // The label on the one row anybody actually checks. `--currency` moves a
+    // token while the miner is still paid in the chain's own coins, so this is
+    // the only row that follows what is being sent: labelling all four with the
+    // profile's ticker asserted a native transfer on every token send, on a
+    // transaction that moves no native value at all.
+    let moving = match token {
+        // A currency name is an identity name, so it gets the same treatment
+        // `--from-identity` gets below: it is text somebody registered, going
+        // inside a box frame.
+        Some(token) => fmt::untrusted(&token.shown, IDENTITY_BUDGET, glyphs.ellipsis),
+        None => currency.to_string(),
+    };
 
     // Who the money leaves, which is not always the key that signs for it.
     // Naming the signing key here while an identity paid would misstate the
@@ -563,14 +596,26 @@ fn review(
                     .push(format!("({})", from.label), palette.muted),
             ),
     };
+    panel = panel.row("to", Text::of(&to.shown, palette.accent)).row(
+        "amount",
+        Text::of(fmt::amount(amount), palette.accent)
+            .space()
+            .push(&moving, palette.muted),
+    );
+
+    // What the name resolved to. `--currency mytoken@` is a name lookup, and a
+    // panel that only repeats the name back proves nothing about which currency
+    // the node actually named — while `describe()` prints the reserve output's
+    // currency truncated, so there was nothing full to check it against. The
+    // same pair of rows the mint panel carries, for the same reason.
+    if let Some(token) = token {
+        panel = panel.row(
+            "currency id",
+            Text::of(currency_address(token.id), palette.value),
+        );
+    }
+
     panel = panel
-        .row("to", Text::of(&to.shown, palette.accent))
-        .row(
-            "amount",
-            Text::of(fmt::amount(amount), palette.accent)
-                .space()
-                .push(currency, palette.muted),
-        )
         .row(
             "fee",
             Text::of(fmt::amount(unsent.outcome.fee), palette.value)
@@ -776,6 +821,7 @@ fn plan_json(
     decoded: &Option<TxV4>,
     from: &str,
     identity: Option<&str>,
+    token: Option<&Token>,
 ) -> serde_json::Value {
     serde_json::json!({
         // Who the money leaves. For an identity-funded payment that is the
@@ -788,6 +834,14 @@ fn plan_json(
         "change": unsent.outcome.change.to_sat(),
         "hex": unsent.hex,
         "outputs": decoded.as_ref().map(|tx| tx.outputs.len()),
+        // Which asset moved. Null when native coins are moving, the way
+        // `from_identity` is null on an ordinary spend — a ticker read out of
+        // this field could otherwise be either. `fee` and `change` above are
+        // native satoshis on every path including this one, because a token
+        // moves as a reserve output while the miner is paid in the chain's own
+        // currency, so they are not denominated in `currency`.
+        "currency": token.map(|token| token.shown.as_str()),
+        "currency_id": token.map(|token| currency_address(token.id)),
     })
 }
 
@@ -885,12 +939,8 @@ mod tests {
         }
     }
 
-    fn rendered_for(identity: Option<&str>) -> String {
-        let ui = Ui::new(ThemeFlag::Phosphor, false, false);
-        let settings =
-            Settings::resolve_in(Paths::at("/nonexistent"), None, None).expect("builtin");
-        let transaction = fixture_transaction();
-        let unsent = Unsent {
+    fn unsent() -> Unsent<Sent> {
+        Unsent {
             hex: String::new(),
             txid: "2aada7…".into(),
             outcome: Sent {
@@ -899,7 +949,29 @@ mod tests {
                 change: Amount::from_sat(489_990_000),
                 hex: String::new(),
             },
-        };
+        }
+    }
+
+    /// The i-address behind the token the panel tests move. A currency id is
+    /// an identity's 160-bit hash, which is what `--currency` resolves to.
+    fn token_id() -> CurrencyId {
+        CurrencyId::from_bytes(
+            "iK2k8YH1jfR7RLmEZ3zac2Mkx5rxSgbMqg"
+                .parse::<Address>()
+                .expect("an i-address")
+                .hash(),
+        )
+    }
+
+    fn rendered_for(identity: Option<&str>) -> String {
+        rendered_with(identity, None)
+    }
+
+    fn rendered_with(identity: Option<&str>, token: Option<&Token>) -> String {
+        let ui = Ui::new(ThemeFlag::Phosphor, false, false);
+        let settings =
+            Settings::resolve_in(Paths::at("/nonexistent"), None, None).expect("builtin");
+        let transaction = fixture_transaction();
         let recipient = Recipient {
             address: "RJ7gsKDjUjPS8XZzENqmQMmWJRLuTnw5hp".into(),
             shown: "RJ7gsKDjUjPS8XZzENqmQMmWJRLuTnw5hp".into(),
@@ -911,10 +983,38 @@ mod tests {
             identity,
             &recipient,
             Amount::from_sat(10_000_000),
-            &unsent,
+            token,
+            &unsent(),
             &Some(transaction),
         );
         panel.render(&ui.theme)
+    }
+
+    /// The panel as a token send renders it, with the escapes stripped so the
+    /// assertions can look at one row at a time.
+    fn rendered_token(shown: &str) -> String {
+        crate::ui::text::strip_ansi(&rendered_with(
+            None,
+            Some(&Token {
+                id: token_id(),
+                shown: shown.into(),
+            }),
+        ))
+    }
+
+    /// The single rendered line carrying `label`. Whole-panel assertions cannot
+    /// say anything useful here: a token send legitimately names the chain's own
+    /// currency on other rows, and the point is which row says which.
+    fn row<'a>(rendered: &'a str, label: &str) -> &'a str {
+        let mut matching = rendered.lines().filter(|line| line.contains(label));
+        let found = matching
+            .next()
+            .unwrap_or_else(|| panic!("no `{label}` row in:\n{rendered}"));
+        assert!(
+            matching.next().is_none(),
+            "`{label}` matched more than one line in:\n{rendered}"
+        );
+        found
     }
 
     fn rendered() -> String {
@@ -1058,6 +1158,134 @@ mod tests {
         let out = crate::ui::text::strip_ansi(&rendered());
         assert!(!out.contains("the identity's own funds"), "{out}");
         assert!(!out.contains("signed by"), "{out}");
+    }
+
+    #[test]
+    fn a_token_send_labels_the_amount_with_the_token_it_moves() {
+        // The whole issue. `--currency mytoken@` moves no native coins at all,
+        // so labelling the headline row with the chain's ticker was an
+        // affirmative falsehood on the one row that gets read before `yes`.
+        let out = rendered_token("mytoken@");
+        let amount = row(&out, "amount");
+        assert!(amount.contains("mytoken@"), "{out}");
+        assert!(
+            !amount.contains("VRSCTEST"),
+            "the amount row still claims native coins:\n{out}"
+        );
+    }
+
+    #[test]
+    fn a_native_send_still_labels_the_amount_with_the_chains_own_currency() {
+        // The other half of the same row: nothing about a token send may leak
+        // into the ordinary path, which really is denominated in the chain's
+        // own coins.
+        let out = crate::ui::text::strip_ansi(&rendered());
+        assert!(row(&out, "amount").contains("VRSCTEST"), "{out}");
+    }
+
+    #[test]
+    fn the_fee_and_the_change_stay_native_on_a_token_send() {
+        // Deliberately *not* relabelled. A token moves as a reserve output
+        // while the miner is paid in the chain's own currency, so both of these
+        // figures are native satoshis; naming them after the token would
+        // replace one false statement with two.
+        let out = rendered_token("mytoken@");
+        for label in ["fee", "change"] {
+            let line = row(&out, label);
+            assert!(line.contains("VRSCTEST"), "`{label}`:\n{out}");
+            assert!(!line.contains("mytoken@"), "`{label}`:\n{out}");
+        }
+    }
+
+    #[test]
+    fn the_outputs_as_built_figures_stay_native_on_a_token_send() {
+        // Also deliberately not relabelled. These are the wire `TxOut.value`,
+        // and a reserve output's `0.00000000` is the truth about that output —
+        // the token it carries is on the line beneath it. Stamping the token's
+        // name here would read as "zero of your token reaches the recipient".
+        let out = rendered_token("mytoken@");
+        let outputs: Vec<&str> = out
+            .lines()
+            .filter(|line| line.contains("#0") || line.contains("#1"))
+            .collect();
+        assert!(!outputs.is_empty(), "no outputs were listed:\n{out}");
+        for line in outputs {
+            assert!(line.contains("VRSCTEST"), "{out}");
+        }
+    }
+
+    #[test]
+    fn a_token_send_names_the_currency_id_it_resolved_to() {
+        // A name is a lookup, and repeating the name back proves nothing about
+        // which currency the node named. The reserve output on the OUTPUTS AS
+        // BUILT line shows its currency truncated, so this row is what it can
+        // be checked against.
+        let out = rendered_token("mytoken@");
+        assert!(
+            row(&out, "currency id").contains("iK2k8YH1jfR7RLmEZ3zac2Mkx5rxSgbMqg"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_send_names_no_currency_id_at_all() {
+        let out = crate::ui::text::strip_ansi(&rendered());
+        assert!(!out.contains("currency id"), "{out}");
+    }
+
+    #[test]
+    fn a_hostile_currency_name_cannot_break_the_review_frame() {
+        // A currency name is untrusted display text somebody registered, and it
+        // now reaches the inside of a box frame. An escape that repaints the
+        // terminal or a newline that forges an extra row would do it here.
+        let hostile = format!("\u{1b}[31mev\nil\u{7f}{}@", "x".repeat(80));
+        let out = rendered_token(&hostile);
+        let widths: Vec<usize> = out
+            .lines()
+            .filter(|line| line.starts_with(['\u{250c}', '\u{2502}', '\u{251c}', '\u{2514}']))
+            .map(UnicodeWidthStr::width)
+            .collect();
+        assert!(!widths.is_empty(), "nothing was framed:\n{out}");
+        assert!(
+            widths.windows(2).all(|pair| pair[0] == pair[1]),
+            "ragged frame {widths:?}:\n{out}"
+        );
+    }
+
+    #[test]
+    fn the_plan_names_the_currency_being_sent() {
+        // `--json` is the other consent surface, and a token send looked native
+        // there too.
+        let document = plan_json(
+            &unsent(),
+            &None,
+            "RJ7gsKDjUjPS8XZzENqmQMmWJRLuTnw5hp",
+            None,
+            Some(&Token {
+                id: token_id(),
+                shown: "mytoken@".into(),
+            }),
+        );
+        assert_eq!(document["currency"], "mytoken@");
+        assert_eq!(
+            document["currency_id"],
+            "iK2k8YH1jfR7RLmEZ3zac2Mkx5rxSgbMqg"
+        );
+    }
+
+    #[test]
+    fn the_plan_leaves_the_currency_null_when_native_coins_move() {
+        // Null rather than the chain's ticker, so a consumer can tell a token
+        // send from a native one instead of reading a name that might be either.
+        let document = plan_json(
+            &unsent(),
+            &None,
+            "RJ7gsKDjUjPS8XZzENqmQMmWJRLuTnw5hp",
+            None,
+            None,
+        );
+        assert!(document["currency"].is_null(), "{document:#}");
+        assert!(document["currency_id"].is_null(), "{document:#}");
     }
 
     #[test]

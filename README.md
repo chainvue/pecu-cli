@@ -352,6 +352,21 @@ straight back:
 pecu send --to bob@ --amount 0.1 --dry-run --json | jq -r .hex | pecu tx explain -
 ```
 
+**A token send names the token.** With `--currency`, the `amount` row is labelled
+with the currency you asked for rather than the chain's own, and a `currency id`
+row carries the i-address that name resolved to — a currency name is untrusted
+display text somebody registered, so the id is the part that identifies
+anything, and it is what the truncated currency on the `OUTPUTS AS BUILT` line
+can be matched against by eye. `fee` and `change` stay labelled with the chain's
+own currency because they really are native: a token moves as a reserve output
+while the miner is still paid in the chain's coins. So do the `OUTPUTS AS BUILT`
+figures, which are each output's native `value` — a reserve output's
+`0.00000000` is the truth about that output, and the token it holds is on the
+line beneath it. `--json` carries `currency` (the name as given) and
+`currency_id` (the i-address); both are `null` when native coins are moving, so
+a consumer can tell the two apart instead of reading a ticker that might be
+either.
+
 **Paying out of a VerusID's own funds** is the other half of the `HELD BY ID`
 row in `wallet balance`. Money flows *into* an identity with an ordinary
 `--to alice@`; getting it back out needs `--from-identity`, because the inputs
