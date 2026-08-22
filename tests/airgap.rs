@@ -23,6 +23,14 @@ const ELSEWHERE: &str = "RJ7gsKDjUjPS8XZzENqmQMmWJRLuTnw5hp";
 /// has proved it never opened a socket.
 const DEAD_NODE: &str = "https://127.0.0.1:1";
 
+/// A finished, signed transaction pulled off VRSCTEST. Decodes to a real txid
+/// with no node, which is what lets these tests reach the guards rather than
+/// dying at the local decode the way a plan or a pile of rubbish would.
+const FINISHED: &str = include_str!("../fixtures/identity-spend.hex");
+
+/// The txid `FINISHED` decodes to. Fixed, because the bytes are.
+const FINISHED_TXID: &str = "2828f297d7611b2488c4e9074960006edb916fe6f8e0c70e5ebe05cab7b284d7";
+
 fn home() -> TempDir {
     tempfile::tempdir().expect("a temp dir")
 }
@@ -329,4 +337,137 @@ fn planning_needs_no_key_at_all() {
         .failure()
         .stderr(contains("planning the payment"))
         .stderr(contains("passphrase").not());
+}
+
+// ── the guards ──────────────────────────────────────────────────────────────
+
+#[test]
+fn mainnet_will_not_broadcast_without_being_told_to() {
+    let home = home();
+    // `--yes` is load-bearing here: consent is not a substitute for a profile
+    // that is allowed to spend, and it must not buy past the guard.
+    pecu(&home)
+        .args([
+            "--profile",
+            "mainnet",
+            "broadcast",
+            FINISHED.trim(),
+            "--yes",
+            "--node",
+            DEAD_NODE,
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("not allowed to spend"))
+        .stderr(contains("allow_spend"))
+        .stderr(contains("127.0.0.1").not());
+}
+
+#[test]
+fn mainnet_will_not_plan_a_spend_without_being_told_to() {
+    let home = home();
+    // Planning chooses the coins. That it never reaches `prepare_unsigned_send`
+    // is what the missing "planning the payment" proves — otherwise this would
+    // have failed at the node instead of at the profile.
+    pecu(&home)
+        .args([
+            "--profile",
+            "mainnet",
+            "plan",
+            "send",
+            "--address",
+            ELSEWHERE,
+            "--to",
+            ELSEWHERE,
+            "--amount",
+            "0.1",
+            "--node",
+            DEAD_NODE,
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("not allowed to spend"))
+        .stderr(contains("planning the payment").not())
+        .stderr(contains("127.0.0.1").not());
+}
+
+#[test]
+fn a_dry_run_broadcast_stops_at_the_summary() {
+    let home = home();
+    // Deliberately without `--yes`: a dry run is not a spend and must not ask
+    // for consent to do nothing.
+    let assertion = pecu(&home)
+        .args([
+            "broadcast",
+            FINISHED.trim(),
+            "--dry-run",
+            "--node",
+            DEAD_NODE,
+            "--theme",
+            "phosphor",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+
+    assert!(stdout.contains("WOULD BROADCAST"), "{stdout}");
+    assert!(
+        stdout.contains(FINISHED_TXID),
+        "no txid was shown:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("nothing was sent"),
+        "it does not say it stopped:\n{stdout}"
+    );
+    assertion.stderr(contains("127.0.0.1").not());
+}
+
+#[test]
+fn a_dry_run_broadcast_says_so_in_json() {
+    let home = home();
+    let assertion = pecu(&home)
+        .args([
+            "broadcast",
+            FINISHED.trim(),
+            "--dry-run",
+            "--json",
+            "--node",
+            DEAD_NODE,
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+    let document: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+
+    // The shape stays one shape: a dry run is told apart by a field, not by
+    // becoming a different `kind`.
+    assert_eq!(document["kind"], "broadcast", "{stdout}");
+    assert_eq!(document["broadcast"], false, "{stdout}");
+    assert_eq!(document["txid"], FINISHED_TXID, "{stdout}");
+}
+
+#[test]
+fn json_is_not_consent_to_broadcast() {
+    let home = home();
+    pecu(&home)
+        .args(["broadcast", FINISHED.trim(), "--json", "--node", DEAD_NODE])
+        .assert()
+        .failure()
+        .stderr(contains("will not broadcast without --yes"))
+        .stderr(contains("pecu::needs_yes"))
+        .stderr(contains("127.0.0.1").not());
+}
+
+#[test]
+fn a_finished_transaction_still_goes_to_the_node_when_told_to() {
+    let home = home();
+    // The over-blocking guard. Told to, on a profile allowed to spend, this
+    // must get all the way to the transport and fail there — the three new
+    // gates are not allowed to stand in the ordinary path's way.
+    pecu(&home)
+        .args(["broadcast", FINISHED.trim(), "--yes", "--node", DEAD_NODE])
+        .assert()
+        .failure()
+        .stderr(contains("broadcasting"))
+        .stderr(contains(FINISHED_TXID));
 }

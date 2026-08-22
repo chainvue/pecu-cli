@@ -42,6 +42,13 @@ use crate::ui::{fmt, qr, Panel, Text, Ui};
 
 #[derive(Debug, Error, Diagnostic)]
 pub enum AirgapError {
+    #[error("the `{profile}` profile is not allowed to spend")]
+    #[diagnostic(
+        code(pecu::spending_disabled),
+        help("the air gap is still a spend: planning one picks real coins and broadcasting one is irreversible. Set `allow_spend = true` under [profiles.{profile}] in config.toml")
+    )]
+    SpendingDisabled { profile: String },
+
     #[error("`{amount}` is not an amount")]
     #[diagnostic(
         code(pecu::bad_amount),
@@ -100,6 +107,13 @@ pub enum AirgapError {
     )]
     CannotConfirm,
 
+    #[error("--json will not broadcast without --yes")]
+    #[diagnostic(
+        code(pecu::needs_yes),
+        help("--json is machine-readable output, not consent to spend: the confirmation prompt would go to the same stream you are parsing, and there is nobody to answer it. Add --yes to send these bytes, or --dry-run to stop at the decoded summary")
+    )]
+    NeedsYes,
+
     #[error("{what} failed")]
     #[diagnostic(code(pecu::flow_failed), help("{advice}"))]
     Flow {
@@ -144,6 +158,16 @@ fn plan_send_inner(
     _globals: &Globals,
     args: &PlanSendArgs,
 ) -> miette::Result<()> {
+    // Planning is where a mainnet spend is chosen, even though it is broadcast
+    // two machines later. Every other command gates before it builds, and a
+    // plan that may never legally be broadcast is not worth the round trip.
+    if !settings.profile.allow_spend {
+        return Err(AirgapError::SpendingDisabled {
+            profile: settings.profile.name.clone(),
+        }
+        .into());
+    }
+
     let amount = Amount::from_coins_str(&args.amount).map_err(|_| AirgapError::BadAmount {
         amount: args.amount.clone(),
     })?;
@@ -381,6 +405,16 @@ pub fn broadcast(
     globals: &Globals,
     args: &BroadcastArgs,
 ) -> miette::Result<()> {
+    // Before the payload is even read. Everything else this command refuses is
+    // a property of the bytes; this is a property of the profile, and a profile
+    // that may not spend may not hand finished bytes to a node either.
+    if !settings.profile.allow_spend {
+        return Err(AirgapError::SpendingDisabled {
+            profile: settings.profile.name.clone(),
+        }
+        .into());
+    }
+
     let bytes = if args.qr_in.is_empty() {
         payload::read_hex(args.input.as_deref())?
     } else {
@@ -407,28 +441,54 @@ pub fn broadcast(
     if !ui.is_json() {
         let palette = ui.theme.palette;
         ui.panel(
-            &Panel::new("ABOUT TO BROADCAST")
-                .row("txid", Text::of(&txid, palette.accent))
-                .row(
-                    "outputs",
-                    Text::of(
-                        fmt::plural(transaction.outputs.len(), "output", "outputs"),
-                        palette.value,
-                    ),
-                )
-                .row(
-                    "value",
-                    Text::of(
-                        fmt::sats(transaction.outputs.iter().map(|o| o.value).sum::<u64>()),
-                        palette.value,
-                    )
-                    .space()
-                    .push(&settings.profile.currency, palette.muted),
+            &Panel::new(if globals.dry_run {
+                "WOULD BROADCAST"
+            } else {
+                "ABOUT TO BROADCAST"
+            })
+            .row("txid", Text::of(&txid, palette.accent))
+            .row(
+                "outputs",
+                Text::of(
+                    fmt::plural(transaction.outputs.len(), "output", "outputs"),
+                    palette.value,
                 ),
+            )
+            .row(
+                "value",
+                Text::of(
+                    fmt::sats(transaction.outputs.iter().map(|o| o.value).sum::<u64>()),
+                    palette.value,
+                )
+                .space()
+                .push(&settings.profile.currency, palette.muted),
+            ),
         );
-        if !globals.yes {
-            confirm(ui)?;
+    }
+
+    // `--dry-run` is documented as "never broadcast" (src/cli.rs, README) and
+    // was a silent no-op here: this command went to the wire with the flag set.
+    // Decoded, described, and stopped.
+    if globals.dry_run {
+        if ui.is_json() {
+            emit(&serde_json::json!({ "kind": "broadcast", "txid": txid, "broadcast": false }));
+            return Ok(());
         }
+        ui.blank();
+        ui.note("nothing was sent. Drop --dry-run to broadcast it");
+        ui.explain_panel();
+        return Ok(());
+    }
+
+    if !globals.yes {
+        // The consent used to live inside the `!ui.is_json()` block above,
+        // which made `--json` a spending flag — the same bug `pecu send` fixed
+        // in src/cmd/send.rs. The prompt writes to the stream being parsed and
+        // nobody is there to answer it, so consent has to be passed in.
+        if ui.is_json() {
+            return Err(AirgapError::NeedsYes.into());
+        }
+        confirm(ui)?;
     }
 
     let node = node::connect(&settings.profile)?;
@@ -440,7 +500,7 @@ pub fn broadcast(
     ui.sdk_result(format!("txid {accepted}"));
 
     if ui.is_json() {
-        emit(&serde_json::json!({ "kind": "broadcast", "txid": accepted }));
+        emit(&serde_json::json!({ "kind": "broadcast", "txid": accepted, "broadcast": true }));
         return Ok(());
     }
     ui.blank();
