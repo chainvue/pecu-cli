@@ -27,6 +27,7 @@ use verus_sdk::verus_keys::{Address, AddressKind};
 use verus_sdk::verus_tx::{Timelock, FLAG_LOCKED};
 
 use crate::cli::{Globals, IdRegisterArgs};
+use crate::cmd::uncertain_broadcast_advice;
 use crate::config::Settings;
 use crate::keystore::{self, Envelope, Keystore};
 use crate::node::{self, Node};
@@ -196,9 +197,16 @@ pub enum IdError {
 }
 
 fn flow(what: &'static str, source: FlowError) -> IdError {
+    let advice = match &source {
+        // The node answered, or the connection broke — either way `pecu doctor`
+        // blames a node that is not the problem, and the retry it invites is
+        // how the 100 VRSCTEST gets paid twice.
+        FlowError::BroadcastUncertain { txid, hex, .. } => uncertain_broadcast_advice(txid, hex),
+        _ => "run `pecu doctor`, or point somewhere else with --node".to_string(),
+    };
     IdError::Flow {
         what,
-        advice: "run `pecu doctor`, or point somewhere else with --node".to_string(),
+        advice,
         source: Box::new(source),
     }
 }
@@ -1787,5 +1795,27 @@ mod tests {
         std::fs::write(pending_path(&settings, "mybasket"), "{}").expect("writable temp dir");
 
         assert!(!reveal_was_broadcast(&pending_path(&settings, "MyBasket")));
+    }
+
+    /// `id register` burns 100 VRSCTEST across two transactions, so the advice
+    /// that invites a blind resend is the expensive one to get wrong.
+    #[test]
+    fn an_uncertain_registration_broadcast_does_not_blame_the_node() {
+        // The advice saves the signed bytes, so it needs somewhere that is not the
+        // real keystore root to save them into.
+        let _unsent = crate::cmd::UnsentRoot::temporary();
+        let refused = flow(
+            "broadcasting the commitment",
+            FlowError::BroadcastUncertain {
+                txid: "9c1d55".into(),
+                hex: "0400008085202f89".into(),
+                reason: "node returned error -25: bad-txns-failed-precheck".into(),
+            },
+        );
+        let IdError::Flow { advice, .. } = refused else {
+            panic!("a flow refusal is an IdError::Flow");
+        };
+        assert!(advice.contains("tx explain 9c1d55"));
+        assert!(!advice.contains("doctor"));
     }
 }

@@ -24,6 +24,7 @@ use verus_sdk::convert::{build_conversion, ConversionKind};
 use verus_sdk::decode::Destination;
 use verus_sdk::identity::identity_primary_script;
 use verus_sdk::money::Amount;
+use verus_sdk::network::{broadcast, Broadcaster, FlowError, RpcError};
 use verus_sdk::send::CurrencyId;
 use verus_sdk::verus_keys::{Address, AddressKind};
 
@@ -62,17 +63,20 @@ fn primary_script(tokenized_control: bool) -> Vec<u8> {
     .expect("a primary script for well-formed inputs")
 }
 
-/// Precondition for removing `CurrencyError::NftScriptGap` (`--nft`).
+/// What `NFT_PRECHECK_CANDIDATES` stands on when it says the identity-output
+/// gap is no longer known to be present.
 ///
-/// The guard exists because an identity with tokenized control carries a
-/// *second* destination on its recovery condition — the `EVAL_IDENTITY_RECOVER`
-/// contract key hash — and the SDK's identity output did not emit it, so
-/// consensus derived a different script and refused the launch as
-/// `-25: bad-txns-failed-precheck`, which names nothing.
+/// An identity with tokenized control carries a *second* destination on its
+/// recovery condition — the `EVAL_IDENTITY_RECOVER` contract key hash — and the
+/// SDK's identity output did not emit it, so consensus derived a different
+/// script and refused the launch as `-25: bad-txns-failed-precheck`, which
+/// names nothing. That was once the whole diagnosis a `--nft` refusal got.
 ///
-/// It takes the flag now. This asserts the flag actually changes the script,
+/// It takes the flag now, so `--nft` names that cause as a candidate rather
+/// than as the answer. This asserts the flag actually changes the script,
 /// rather than being accepted and ignored — which is the failure mode that
-/// would look fixed and land the same rejection.
+/// would look fixed, land the same rejection, and make the candidate list wrong
+/// about which one is still open.
 #[test]
 fn a_tokenized_control_identity_output_differs_from_an_ordinary_one() {
     assert_ne!(
@@ -83,11 +87,12 @@ fn a_tokenized_control_identity_output_differs_from_an_ordinary_one() {
     );
 }
 
-/// Precondition for removing `CurrencyError::NftScriptGap` (`--nft`).
+/// The stronger half of the same claim: not merely that the script changed, but
+/// that it changed by carrying *this* destination.
 ///
-/// The stronger half: not merely that the script changed, but that it changed
-/// by carrying *this* destination. A script that differed for some other reason
-/// would satisfy the test above and still be refused on chain.
+/// A script that differed for some other reason would satisfy the test above
+/// and still be refused on chain — and `--nft` would go on listing a cause that
+/// had never actually closed.
 #[test]
 fn the_tokenized_control_script_carries_the_recovery_contract_destination() {
     let with = primary_script(true);
@@ -161,6 +166,54 @@ fn a_conversion_can_name_a_verusid_and_keeps_it_an_identity() {
         other => panic!(
             "an i-address recipient came back as {other:?} — the address kind was discarded, \
              which is the defect the VerusID refusals were written for"
+        ),
+    }
+}
+
+/// Precondition for `nft_aware` (`--nft`), and the guard whose absence let this
+/// regress silently.
+///
+/// The SDK has moved `-25` between `FlowError::Rpc` and
+/// `FlowError::BroadcastUncertain` once already, and `nft_aware` now reads the
+/// daemon's reject reason out of whichever it arrives in. That only works while
+/// the SDK keeps carrying the daemon's message through. Nothing in this repo
+/// pinned that, so the pin bump on the 22nd took the NFT diagnostic out and
+/// nobody found out until a launch was paid for.
+#[test]
+fn a_generic_verify_refusal_still_carries_the_daemons_reason() {
+    /// A node that refuses everything the way a daemon refuses a launch whose
+    /// identity output consensus derives differently.
+    struct RefusesAtPrecheck;
+
+    impl Broadcaster for RefusesAtPrecheck {
+        fn send_raw_transaction(&self, _hex: &str) -> Result<String, RpcError> {
+            Err(RpcError::Node {
+                code: -25,
+                message: "16: bad-txns-failed-precheck".into(),
+            })
+        }
+    }
+
+    let sent = broadcast(&RefusesAtPrecheck, "0400008085202f89", "7fed7b98");
+    match sent {
+        Err(FlowError::BroadcastUncertain { txid, hex, reason }) => {
+            assert_eq!(
+                txid, "7fed7b98",
+                "the locally computed txid did not come back"
+            );
+            assert_eq!(
+                hex, "0400008085202f89",
+                "the signed bytes did not come back"
+            );
+            assert!(
+                reason.contains("failed-precheck"),
+                "the daemon's reject reason was dropped on the way out ({reason}), which is \
+                 what `nft_aware` reads to tell an NFT script gap from any other -25"
+            );
+        }
+        other => panic!(
+            "a daemon -25 came back as {other:?}. If the SDK has reclassified it, `nft_aware` \
+             needs the new shape too — that is the regression this test exists for"
         ),
     }
 }

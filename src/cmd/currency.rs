@@ -38,6 +38,7 @@ use verus_sdk::verus_keys::{Address, AddressKind};
 use crate::cli::{
     CurrencyConvertArgs, CurrencyLaunchArgs, CurrencyMintArgs, CurrencyPreconvertArgs, Globals,
 };
+use crate::cmd::uncertain_broadcast_advice;
 use crate::config::Settings;
 use crate::keystore::{self, Envelope, Keystore};
 use crate::node;
@@ -293,19 +294,6 @@ pub enum CurrencyError {
     )]
     CannotMintABasket { name: String },
 
-    #[error("consensus refused the NFT launch")]
-    #[diagnostic(
-        code(pecu::nft_unsupported),
-        help(
-            "this is an SDK gap, not a mistake in what you asked for. An identity with tokenized \
-              control carries a second destination on its recovery condition — the \
-              EVAL_IDENTITY_RECOVER contract key — and the SDK's identity output script does not \
-              emit it, so consensus derives a different script and refuses the transaction. \
-              Nothing was spent. Tracked upstream; every other currency kind launches"
-        )
-    )]
-    NftScriptGap,
-
     #[error("--contribute would declare reserve backing that nothing funds")]
     #[diagnostic(
         code(pecu::contribution_unfunded),
@@ -351,20 +339,85 @@ pub enum CurrencyError {
     },
 }
 
+/// Candidate causes for a `--nft` launch refused before the mempool.
+///
+/// Deliberately a list. This used to be one sentence naming one cause — the
+/// identity output that omits the tokenized-control recovery destination — and
+/// two things have since made that a guess dressed as a diagnosis.
+/// `identity_primary_script` takes the flag now
+/// ([chainvue/verus-rust-sdk#111]), and `tests/upstream.rs` asserts the
+/// destination really is emitted; and DeFi is switched off chain-wide on
+/// VRSCTEST, so `-25` is what the chain answers to *any* launch while that
+/// lasts. Naming either one as the reason would be confidently wrong most of
+/// the time.
+///
+/// [chainvue/verus-rust-sdk#111]: https://github.com/chainvue/verus-rust-sdk/issues/111
+const NFT_PRECHECK_CANDIDATES: &str =
+    "a `-25` is the chain refusing this before the mempool, and on an NFT launch that has more \
+     than one plausible cause. Currency launches can be switched off chain-wide — they were on \
+     VRSCTEST when this was written — and while they are, every launch is answered this way \
+     whatever it contains. The \
+     other candidate is the one this diagnostic was written for: an identity with tokenized \
+     control carries a second destination on its recovery condition, the EVAL_IDENTITY_RECOVER \
+     contract key, and the SDK once did not emit it. It does now \
+     (chainvue/verus-rust-sdk#111, pinned by `tests/upstream.rs`), so that cause is no longer \
+     known to be present. Nothing here can tell you which of them this was.";
+
 /// A launch refused at `bad-txns-failed-precheck` means something different when
-/// the definition is an NFT: the transaction the SDK builds cannot be accepted,
-/// however the flags are set. Saying so beats sending the user to `pecu doctor`
-/// for a node that is working perfectly.
+/// the definition is an NFT, and the difference is worth saying — but only as
+/// far as it is known. Naming the candidates beats sending the user to
+/// `pecu doctor` for a node that is working perfectly, and it also beats
+/// asserting a cause this repo's own tests no longer support.
 fn nft_aware(nft: bool, what: &'static str, source: FlowError) -> CurrencyError {
     use verus_sdk::network::RpcError;
-    if nft {
-        if let FlowError::Rpc(RpcError::Node { code: -25, message }) = &source {
-            if message.contains("failed-precheck") {
-                return CurrencyError::NftScriptGap;
-            }
+    // Two shapes for one refusal. A `-25` used to arrive as `FlowError::Rpc`;
+    // since the pin moved to ae279ea the SDK classifies every `-25` as
+    // `BroadcastUncertain` instead, because a `-25` — unlike a `-26` — does not
+    // say the transaction was refused, and a blind resend could double-
+    // broadcast something already propagating. That is the right call in
+    // general, and it silently killed this diagnostic: the arm stopped matching
+    // and every `--nft` launch fell through to "run `pecu doctor`" for a node
+    // that was working perfectly. Both are matched now, so the pin can move
+    // either way without the diagnostic going quiet again.
+    //
+    // Keyed on the daemon's reject reason rather than on the wrapper: only a
+    // daemon writes `failed-precheck`, and a connection that broke on the way
+    // out says nothing about an NFT at all. Matching `reason` on the reason
+    // alone, not also on the `-25` prefix, is deliberate: `reason` is a Display
+    // string, and pinning `"node returned error -25: "` would be brittle in
+    // exactly the way that caused this bug.
+    let failed_precheck = match &source {
+        FlowError::Rpc(RpcError::Node { code: -25, message }) => {
+            message.contains("failed-precheck")
+        }
+        FlowError::BroadcastUncertain { reason, .. } => reason.contains("failed-precheck"),
+        _ => false,
+    };
+    if !nft || !failed_precheck {
+        return flow(what, source);
+    }
+    // A `CurrencyError::Flow` rather than a variant of its own, so the `#[source]`
+    // chain still prints the txid and the daemon's words, and so the uncertain
+    // half of the advice survives. A fieldless variant here is how the txid and
+    // the check-before-resending sentence got dropped from the one command this
+    // was filed against.
+    let mut advice = String::from(NFT_PRECHECK_CANDIDATES);
+    if let FlowError::BroadcastUncertain { txid, hex, .. } = &source {
+        // The shared sentence starts lowercase because `help:` normally prints
+        // it first. Here it follows a full stop.
+        let uncertain = uncertain_broadcast_advice(txid, hex);
+        let mut rest = uncertain.chars();
+        if let Some(first) = rest.next() {
+            advice.push(' ');
+            advice.extend(first.to_uppercase());
+            advice.push_str(rest.as_str());
         }
     }
-    flow(what, source)
+    CurrencyError::Flow {
+        what,
+        advice,
+        source: Box::new(source),
+    }
 }
 
 fn flow(what: &'static str, source: FlowError) -> CurrencyError {
@@ -439,6 +492,10 @@ fn flow(what: &'static str, source: FlowError) -> CurrencyError {
         FlowError::Content(_) => {
             "the definition was rejected before anything was signed".to_string()
         }
+        // The node answered, or the connection broke — either way `pecu doctor`
+        // blames a node that is not the problem, and the retry it invites is
+        // how the fee gets paid twice.
+        FlowError::BroadcastUncertain { txid, hex, .. } => uncertain_broadcast_advice(txid, hex),
         _ => "run `pecu doctor`, or point somewhere else with --node".to_string(),
     };
     CurrencyError::Flow {
@@ -2024,6 +2081,10 @@ fn mint_flow(name: &str, source: FlowError) -> CurrencyError {
             "a currency is controlled by the identity that defined it, and nothing on this chain \
              is called {name}@"
         ),
+        // The node answered, or the connection broke — either way `pecu doctor`
+        // blames a node that is not the problem, and the retry it invites is
+        // how the fee gets paid twice.
+        FlowError::BroadcastUncertain { txid, hex, .. } => uncertain_broadcast_advice(txid, hex),
         _ => "run `pecu doctor`, or point somewhere else with --node".to_string(),
     };
     CurrencyError::Flow {
@@ -2436,6 +2497,10 @@ fn convert_flow(name: &str, source: FlowError) -> CurrencyError {
              see it, since it never sets one"
                 .to_string()
         }
+        // The node answered, or the connection broke — either way `pecu doctor`
+        // blames a node that is not the problem, and the retry it invites is
+        // how the fee gets paid twice.
+        FlowError::BroadcastUncertain { txid, hex, .. } => uncertain_broadcast_advice(txid, hex),
         _ => format!(
             "what {name} pays out is decided by the chain, not here, so there is nothing to \
              retry into a better answer. `pecu doctor` if the node itself looks wrong"
@@ -3518,5 +3583,165 @@ mod tests {
         assert!(parse_preallocation("i7r29bDQfrwjkTxjv4bcYD6B1ZV7WZ4kGo").is_err());
         assert!(parse_preallocation("notanaddress:100").is_err());
         assert!(parse_preallocation("i7r29bDQfrwjkTxjv4bcYD6B1ZV7WZ4kGo:abc").is_err());
+    }
+
+    /// The exact string the pinned SDK produces for a daemon `-25`, since that
+    /// is what stopped the diagnostic: `broadcast()` wraps the `RpcError` in a
+    /// `BroadcastUncertain` and flattens it through `Display`, so the reason
+    /// reads "node returned error -25: …" and no longer matches on the wrapper.
+    ///
+    /// What it must say is the harder half. A `-25` on an NFT launch is not
+    /// evidence of the SDK gap this diagnostic was written for — launches are
+    /// off chain-wide on VRSCTEST, and #111 closed the gap — so it names both
+    /// and picks neither, and it keeps every word the uncertain broadcast is
+    /// owed: the txid, and the instruction to check before resending.
+    #[test]
+    fn an_nft_refused_at_precheck_is_told_the_candidates_rather_than_one_cause() {
+        // The advice saves the signed bytes, so it needs somewhere that is not the
+        // real keystore root to save them into.
+        let _unsent = crate::cmd::UnsentRoot::temporary();
+        let refused = nft_aware(
+            true,
+            "broadcasting the launch",
+            FlowError::BroadcastUncertain {
+                txid: "7fed7b98aa90c71a5ca5d68080aacdb1558ccc6c981d59530122a784089c3712".into(),
+                hex: "0400008085202f89".into(),
+                reason: "node returned error -25: bad-txns-failed-precheck".into(),
+            },
+        );
+        let CurrencyError::Flow { advice, source, .. } = refused else {
+            panic!("an uncertain outcome stays a CurrencyError::Flow, so the txid still prints");
+        };
+        assert!(
+            advice.contains("more than one plausible cause"),
+            "the NFT arm picked a cause instead of naming the candidates: {advice}"
+        );
+        assert!(advice.contains("switched off chain-wide"));
+        assert!(advice.contains("EVAL_IDENTITY_RECOVER"));
+        assert!(
+            !advice.contains("Nothing was spent"),
+            "an unsettled broadcast is the one thing that cannot promise this: {advice}"
+        );
+        assert!(
+            advice.contains(
+                "tx explain 7fed7b98aa90c71a5ca5d68080aacdb1558ccc6c981d59530122a784089c3712"
+            ),
+            "the check-before-resending advice was dropped on the --nft path: {advice}"
+        );
+        assert!(!advice.contains("doctor"));
+        assert!(matches!(*source, FlowError::BroadcastUncertain { .. }));
+    }
+
+    /// The shape a `-25` used to arrive in. Guards the arm that would otherwise
+    /// look like dead code and be deleted, so a pin that rolls back does not
+    /// kill the diagnostic a second time. Nothing is uncertain here — the node
+    /// answered and the answer was final — so there is no resend advice to
+    /// carry, only the candidates.
+    #[test]
+    fn the_rpc_shape_of_a_precheck_refusal_still_names_the_candidates() {
+        use verus_sdk::network::RpcError;
+        let refused = nft_aware(
+            true,
+            "broadcasting the launch",
+            FlowError::Rpc(RpcError::Node {
+                code: -25,
+                message: "16: bad-txns-failed-precheck".into(),
+            }),
+        );
+        let CurrencyError::Flow { advice, .. } = refused else {
+            panic!("a flow refusal is a CurrencyError::Flow");
+        };
+        assert!(advice.contains("more than one plausible cause"));
+        assert!(!advice.contains("doctor"));
+    }
+
+    /// A connection that broke on the way out says nothing about an NFT, so the
+    /// candidates must not be pinned to it — the generic uncertain advice is
+    /// the whole of what is known.
+    #[test]
+    fn an_nft_whose_broadcast_merely_stopped_answering_gets_no_nft_diagnosis() {
+        // The advice saves the signed bytes, so it needs somewhere that is not the
+        // real keystore root to save them into.
+        let _unsent = crate::cmd::UnsentRoot::temporary();
+        let refused = nft_aware(
+            true,
+            "broadcasting the launch",
+            FlowError::BroadcastUncertain {
+                txid: "7fed7b98".into(),
+                hex: "0400008085202f89".into(),
+                reason: "transport: connection reset by peer".into(),
+            },
+        );
+        let CurrencyError::Flow { advice, .. } = refused else {
+            panic!("a dropped connection is a CurrencyError::Flow");
+        };
+        assert!(advice.contains("tx explain 7fed7b98"));
+        assert!(!advice.contains("EVAL_IDENTITY_RECOVER"));
+    }
+
+    /// The NFT arm must not swallow the general case, and the general case must
+    /// stop blaming a node that answered.
+    #[test]
+    fn a_launch_that_is_not_an_nft_is_told_to_check_before_resending() {
+        // The advice saves the signed bytes, so it needs somewhere that is not the
+        // real keystore root to save them into.
+        let _unsent = crate::cmd::UnsentRoot::temporary();
+        let refused = nft_aware(
+            false,
+            "broadcasting the launch",
+            FlowError::BroadcastUncertain {
+                txid: "7fed7b98".into(),
+                hex: "0400008085202f89".into(),
+                reason: "node returned error -25: bad-txns-failed-precheck".into(),
+            },
+        );
+        let CurrencyError::Flow { advice, .. } = refused else {
+            panic!("a flow refusal is a CurrencyError::Flow");
+        };
+        assert!(advice.contains("tx explain 7fed7b98"));
+        assert!(!advice.contains("doctor"));
+    }
+
+    #[test]
+    fn an_uncertain_mint_broadcast_does_not_blame_the_node() {
+        // The advice saves the signed bytes, so it needs somewhere that is not the
+        // real keystore root to save them into.
+        let _unsent = crate::cmd::UnsentRoot::temporary();
+        let refused = mint_flow(
+            "pecuref9",
+            FlowError::BroadcastUncertain {
+                txid: "9c1d55".into(),
+                hex: "0400008085202f89".into(),
+                reason: "node returned error -25: bad-txns-failed-precheck".into(),
+            },
+        );
+        let CurrencyError::Flow { advice, .. } = refused else {
+            panic!("a flow refusal is a CurrencyError::Flow");
+        };
+        assert!(advice.contains("tx explain 9c1d55"));
+        assert!(!advice.contains("doctor"));
+    }
+
+    /// This mapper's catch-all asserts "there is nothing to retry into a better
+    /// answer", which is an affirmative falsehood for an outcome nobody knows
+    /// yet.
+    #[test]
+    fn an_uncertain_conversion_is_not_told_there_is_nothing_to_retry() {
+        // The advice saves the signed bytes, so it needs somewhere that is not the
+        // real keystore root to save them into.
+        let _unsent = crate::cmd::UnsentRoot::temporary();
+        let refused = convert_flow(
+            "triccrypto2",
+            FlowError::BroadcastUncertain {
+                txid: "9c1d55".into(),
+                hex: "0400008085202f89".into(),
+                reason: "node returned error -25: bad-txns-failed-precheck".into(),
+            },
+        );
+        let CurrencyError::Flow { advice, .. } = refused else {
+            panic!("a flow refusal is a CurrencyError::Flow");
+        };
+        assert!(advice.contains("tx explain 9c1d55"));
+        assert!(!advice.contains("nothing to"));
     }
 }

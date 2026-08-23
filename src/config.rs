@@ -118,6 +118,17 @@ impl Paths {
         self.root.join("pending")
     }
 
+    /// Signed transactions whose broadcast the node never settled.
+    ///
+    /// A `BroadcastUncertain` hands back the bytes precisely so the caller does
+    /// not have to rebuild them, and an error message is the one place they
+    /// cannot be printed: a launch is kilobytes of hex, and every renderer that
+    /// wraps it to the terminal width destroys it for copying. So they are
+    /// written here and the diagnostic names the path.
+    pub fn unsent_dir(&self) -> PathBuf {
+        self.root.join("unsent")
+    }
+
     /// How many keys the keystore holds. A missing directory is zero, not an
     /// error: not having made a key yet is the normal first state.
     pub fn key_count(&self) -> usize {
