@@ -26,7 +26,7 @@ use verus_sdk::verus_wire::TxV4;
 
 use crate::cli::{Globals, SendArgs};
 use crate::cmd::tx;
-use crate::cmd::uncertain_broadcast_advice;
+use crate::cmd::{estimated_native_fee, uncertain_broadcast_advice, what_the_fee_leaves, Fee};
 use crate::config::Settings;
 use crate::keystore::{self, Envelope, Keystore};
 use crate::node::{self, Node};
@@ -96,6 +96,14 @@ pub enum SendError {
     #[error("not enough spendable funds at {address}")]
     #[diagnostic(code(pecu::insufficient_funds), help("{advice}"))]
     Insufficient { address: String, advice: String },
+
+    #[error("not enough {currency} at {address}")]
+    #[diagnostic(code(pecu::insufficient_tokens), help("{advice}"))]
+    InsufficientToken {
+        address: String,
+        currency: String,
+        advice: String,
+    },
 
     #[error("{address} holds no {currency} to send")]
     #[diagnostic(
@@ -177,7 +185,7 @@ fn attempt(ui: &Ui, settings: &Settings, globals: &Globals, args: &SendArgs) -> 
     let unsent = match (&args.from_identity, &currency) {
         (Some(identity), _) => build_from_identity(ui, &node, &key, identity, &recipient, amount)?,
         (None, None) => build_native(ui, &node, &key, &recipient, amount)?,
-        (None, Some(currency)) => build_token(ui, &node, &key, &recipient, amount, currency.id)?,
+        (None, Some(currency)) => build_token(ui, &node, &key, &recipient, amount, currency)?,
     };
 
     let decoded =
@@ -414,8 +422,13 @@ fn build_native(
         to.address,
         amount.to_coins_string()
     ));
+    let spend = Spend {
+        from: key.address().to_string(),
+        amount,
+        token: None,
+    };
     let unsent = prepare_send(node, key, &to.address, amount)
-        .map_err(|source| insufficient_or_flow("building the payment", source))?;
+        .map_err(|source| insufficient_or_flow("building the payment", &spend, source))?;
     ui.sdk_result(format!(
         "Unsent<Sent> {{ txid: {}, fee: {}, change: {} }}",
         unsent.outcome.txid, unsent.outcome.fee, unsent.outcome.change
@@ -534,7 +547,7 @@ fn build_token(
     key: &PrivateKey,
     to: &Recipient,
     amount: Amount,
-    currency: CurrencyId,
+    currency: &Token,
 ) -> Result<Unsent<verus_sdk::network::Sent>, miette::Report> {
     let from = key.address().to_string();
 
@@ -550,24 +563,33 @@ fn build_token(
         funding.other.len()
     ));
 
-    let token_utxos = carrying(&funding.other, currency);
+    let token_utxos = carrying(&funding.other, currency.id);
     if token_utxos.is_empty() {
         return Err(SendError::NoTokenOutputs {
             address: from,
-            currency: currency_address(currency),
+            // As typed, for the same reason the shortfall below is: the id is
+            // forty hex characters nobody entered and `pecu currency show`
+            // cannot resolve. The `--explain` trace above has already printed
+            // what the name resolved to, for anyone who wants it.
+            currency: currency.shown.clone(),
         }
         .into());
     }
 
     ui.sdk(format!(
         "verus_sdk::network::prepare_send_token(&node, &key, {}, {:?}, {}, &[{} token utxos])",
-        currency_address(currency),
+        currency_address(currency.id),
         to.address,
         amount.to_coins_string(),
         token_utxos.len()
     ));
-    let unsent = prepare_send_token(node, key, currency, &to.address, amount, &token_utxos)
-        .map_err(|source| insufficient_or_flow("building the token payment", source))?;
+    let spend = Spend {
+        from: from.clone(),
+        amount,
+        token: Some(currency.shown.clone()),
+    };
+    let unsent = prepare_send_token(node, key, currency.id, &to.address, amount, &token_utxos)
+        .map_err(|source| insufficient_or_flow("building the token payment", &spend, source))?;
     ui.sdk_result(format!(
         "Unsent<Sent> {{ txid: {}, fee: {} }}",
         unsent.outcome.txid, unsent.outcome.fee
@@ -858,10 +880,66 @@ fn flow(what: &'static str, source: FlowError) -> SendError {
     }
 }
 
+/// What the payment was trying to do, for the shortfall messages that have to
+/// name it.
+///
+/// These three are exactly what the SDK's shortfall errors leave out.
+/// `TxError::InsufficientFunds` carries no address; its `required` only splits
+/// back into amount and fee against the amount that was asked for; and
+/// `TxError::InsufficientTokens` names the currency as forty hex characters,
+/// which is neither what was typed nor anything `pecu currency show` resolves.
+struct Spend {
+    /// The address the coins come from.
+    from: String,
+    /// What was asked for.
+    amount: Amount,
+    /// The currency as it was typed, when a token is moving; `None` on a native
+    /// send. It is also what tells the two readings of `required` apart — see
+    /// [`insufficient_or_flow`].
+    token: Option<String>,
+}
+
+/// The sentence the native shortfalls end on. `spendable` is routinely smaller
+/// than the balance, and that difference is the first thing worth explaining.
+///
+/// The address is spelled into the command rather than left for the reader to
+/// supply: a bare `pecu wallet balance` refuses outright once the keystore
+/// holds more than one key, and the flag that picks one there is `--key`, not
+/// the `--from` this command was just given. `--address` sidesteps both, and
+/// the address is already in the headline.
+fn rest_is_elsewhere(address: &str) -> String {
+    format!(
+        "`pecu wallet balance --address {address}` shows the rest: value that is withheld, or \
+         held by a VerusID, cannot be moved by this key."
+    )
+}
+
 /// Insufficient funds deserves its own message: the numbers are in the error,
 /// and the likeliest confusion — value the address holds but this key cannot
 /// move — is worth naming before someone goes looking for a bug.
-fn insufficient_or_flow(what: &'static str, source: FlowError) -> SendError {
+///
+/// Four shortfalls arrive here from three places in the SDK, and they do not
+/// say the same thing. `FlowError::InsufficientFunds` is a pre-flight check
+/// whose `needed` is the bare amount, because the fee is not known until coin
+/// selection has run. `TxError::InsufficientFunds` is what selection itself
+/// raises, and its `required` is the amount plus that fee on the native path
+/// but the fee **alone** on the token one, where the amount is not native
+/// value at all. `TxError::InsufficientTokens` is a shortfall in the token
+/// being moved, and the fee has nothing to do with it.
+///
+/// Only those are diverted. Everything else — a node that would not answer, a
+/// transaction that would not balance — is a genuine failure and keeps the node
+/// remedy, which is the same mistake as this one pointing the other way.
+fn insufficient_or_flow(what: &'static str, spend: &Spend, source: FlowError) -> SendError {
+    use verus_sdk::verus_tx::TxError;
+
+    // `spend.token.is_none()` pins an invariant rather than handling a case:
+    // the token flow funds through `funding::spendable` and never calls
+    // `funding::require`, so this variant cannot arrive with a token in flight
+    // today. If one is ever added there, the numbers here would silently mix
+    // units — a native `available` in the same sentence as a token `amount` —
+    // and falling through to the node remedy is the better of two wrong
+    // answers.
     if let FlowError::InsufficientFunds {
         needed,
         available,
@@ -869,15 +947,92 @@ fn insufficient_or_flow(what: &'static str, source: FlowError) -> SendError {
         utxos,
     } = &source
     {
-        return SendError::Insufficient {
-            address: address.clone(),
-            advice: format!(
-                "{available} spendable across {utxos} output(s), {needed} needed including fee. \
-                 `pecu wallet balance` shows the rest: value that is withheld, or held by a \
-                 VerusID, cannot be moved by this key.",
-            ),
+        if spend.token.is_none() {
+            return SendError::Insufficient {
+                address: address.clone(),
+                advice: format!(
+                    "{} spendable across {utxos} output(s), and this sends {}. {} {}",
+                    fmt::amount(*available),
+                    fmt::amount(*needed),
+                    what_the_fee_leaves(
+                        available.to_sat(),
+                        Fee::Estimated(estimated_native_fee(*utxos))
+                    ),
+                    rest_is_elsewhere(address),
+                ),
+            };
+        }
+    }
+
+    if let FlowError::Tx(TxError::InsufficientFunds {
+        required,
+        available,
+    }) = &source
+    {
+        return match &spend.token {
+            // The token builder charges its fee against whatever native value
+            // the offered outputs carry, and reports the fee by itself as
+            // `required` — reserve outputs routinely carry none, so this is a
+            // plain "fund the address" and not a comment on the token at all.
+            Some(name) => SendError::Insufficient {
+                address: spend.from.clone(),
+                advice: format!(
+                    "the fee for a {name} payment is paid in native coin, not in {name}: it \
+                     needs {}, and the outputs it can draw on — the {name} outputs, plus \
+                     whatever native coin is spendable at {from} — hold {} between them. Pay a \
+                     little native coin to {from} and send again; `pecu wallet balance \
+                     --address {from}` shows what is there, including value that is withheld \
+                     and cannot pay a fee yet.",
+                    fmt::sats(*required),
+                    fmt::sats(*available),
+                    from = spend.from,
+                ),
+            },
+            // Selection's own refusal on the native path, reached once the
+            // amount clears the pre-flight check above and the fee tips it
+            // over — which is exactly where that check's message sends anyone
+            // who reads it and retries with the balance.
+            None => {
+                let fee = required.saturating_sub(spend.amount.to_sat());
+                SendError::Insufficient {
+                    address: spend.from.clone(),
+                    advice: format!(
+                        "{} spendable, and {} plus a {} fee comes to {}. {} {}",
+                        fmt::sats(*available),
+                        fmt::amount(spend.amount),
+                        fmt::sats(fee),
+                        fmt::sats(*required),
+                        // The fee priced the transaction that was just
+                        // refused, so what is left after it is the exact
+                        // ceiling and may be named as one.
+                        what_the_fee_leaves(*available, Fee::Charged(fee)),
+                        rest_is_elsewhere(&spend.from),
+                    ),
+                }
+            }
         };
     }
+
+    // The currency in the error is forty hex characters of currency id, so the
+    // name is taken from the command instead. That is a substitution rather
+    // than a guess: one builder raises this, over one recipient, whose currency
+    // is the one that was asked for. A caller with no name in hand would rather
+    // fall through than have this invent one.
+    if let FlowError::Tx(TxError::InsufficientTokens { missing, .. }) = &source {
+        if let Some(name) = &spend.token {
+            return SendError::InsufficientToken {
+                address: spend.from.clone(),
+                currency: name.clone(),
+                advice: format!(
+                    "short by {}. `pecu wallet balance --address {}` lists the tokens this \
+                     address holds, in the form to copy.",
+                    fmt::sats(*missing),
+                    spend.from,
+                ),
+            };
+        }
+    }
+
     flow(what, source)
 }
 
@@ -1568,6 +1723,299 @@ mod tests {
         };
         assert!(advice.contains("tx explain 9c1d55"));
         assert!(!advice.contains("doctor"));
+    }
+
+    fn native(from: &str, amount: u64) -> Spend {
+        Spend {
+            from: from.to_string(),
+            amount: Amount::from_sat(amount),
+            token: None,
+        }
+    }
+
+    fn token(from: &str, amount: u64, name: &str) -> Spend {
+        Spend {
+            from: from.to_string(),
+            amount: Amount::from_sat(amount),
+            token: Some(name.to_string()),
+        }
+    }
+
+    /// The pre-flight check runs before coin selection, so the SDK cannot know
+    /// the fee yet — and the message used to claim it was in the figure anyway.
+    ///
+    /// What replaced it may not overclaim in the other direction either: the
+    /// fee here is [`Fee::Estimated`], priced as though every output were a
+    /// CryptoCondition and over every output the address holds, so the figure
+    /// it leaves is one that goes through and not the ceiling.
+    #[test]
+    fn the_pre_flight_shortfall_no_longer_claims_the_fee_is_in_the_figure() {
+        let refused = insufficient_or_flow(
+            "building the payment",
+            &native("RXQXEHraYWzrNy65Ni1fiEpd7bY1bqDmWt", 6_000_000_000),
+            FlowError::InsufficientFunds {
+                needed: Amount::from_sat(6_000_000_000),
+                available: Amount::from_sat(5_000_000_000),
+                address: "RXQXEHraYWzrNy65Ni1fiEpd7bY1bqDmWt".into(),
+                utxos: 2,
+            },
+        );
+        let SendError::Insufficient { address, advice } = refused else {
+            panic!("a shortfall is not a flow failure: {refused:?}");
+        };
+        assert_eq!(address, "RXQXEHraYWzrNy65Ni1fiEpd7bY1bqDmWt");
+        assert!(!advice.contains("including fee"), "{advice}");
+        assert!(advice.contains("charged on top of the amount"), "{advice}");
+        // Two inputs, so the estimate sits on the 10,000-satoshi floor.
+        assert!(
+            advice.contains("a payment of 49.99990000 will go through"),
+            "{advice}"
+        );
+        assert!(!advice.contains("the most that can move"), "{advice}");
+        assert!(advice.contains("withheld"), "{advice}");
+        assert!(advice.contains("VerusID"), "{advice}");
+        // Runnable as printed: a bare `pecu wallet balance` refuses once the
+        // keystore holds more than one key, and its flag is `--key`, not the
+        // `--from` this command was given.
+        assert!(
+            advice.contains("`pecu wallet balance --address RXQXEHraYWzrNy65Ni1fiEpd7bY1bqDmWt`"),
+            "{advice}"
+        );
+    }
+
+    /// The other end of the same sentence: selection's fee priced the
+    /// transaction it refused, so there the ceiling is exact and is named as
+    /// one. Nothing else in the two messages tells them apart.
+    #[test]
+    fn a_charged_fee_may_be_called_a_ceiling_and_an_estimated_one_may_not() {
+        let estimated = crate::cmd::what_the_fee_leaves(5_000_000_000, Fee::Estimated(10_000));
+        let charged = crate::cmd::what_the_fee_leaves(5_000_000_000, Fee::Charged(10_000));
+        assert!(
+            estimated.contains("a payment of 49.99990000 will go through"),
+            "{estimated}"
+        );
+        assert!(!estimated.contains("the most that can move"), "{estimated}");
+        assert!(
+            charged.contains("the most that can move from here is 49.99990000"),
+            "{charged}"
+        );
+    }
+
+    /// A leftover the fee has all but eaten is not an amount to advertise:
+    /// the output would be dust, which a node may refuse whatever the
+    /// subtraction says.
+    #[test]
+    fn a_leftover_that_would_be_dust_is_not_offered_as_a_payment() {
+        let advice = crate::cmd::what_the_fee_leaves(10_500, Fee::Charged(10_000));
+        assert!(advice.contains("refuse the output as dust"), "{advice}");
+        assert!(!advice.contains("will go through"), "{advice}");
+        assert!(!advice.contains("the most that can move"), "{advice}");
+    }
+
+    /// An empty address is told it is empty. Where the fee sits changes
+    /// nothing there, and saying it anyway reads as boilerplate on the one
+    /// message that most wants to be plain.
+    #[test]
+    fn an_empty_address_is_not_lectured_about_where_the_fee_sits() {
+        let refused = insufficient_or_flow(
+            "building the payment",
+            &native("RXQXEHraYWzrNy65Ni1fiEpd7bY1bqDmWt", 100_000_000),
+            FlowError::InsufficientFunds {
+                needed: Amount::from_sat(100_000_000),
+                available: Amount::from_sat(0),
+                address: "RXQXEHraYWzrNy65Ni1fiEpd7bY1bqDmWt".into(),
+                utxos: 0,
+            },
+        );
+        let SendError::Insufficient { advice, .. } = refused else {
+            panic!("a shortfall is not a flow failure: {refused:?}");
+        };
+        assert!(
+            advice.contains("There is nothing at this address to pay with"),
+            "{advice}"
+        );
+        assert!(!advice.contains("charged on top"), "{advice}");
+    }
+
+    /// Where the message above used to send anyone who read it and retried
+    /// with the whole balance: selection's own refusal, which was not diverted
+    /// at all and blamed the node instead.
+    #[test]
+    fn a_fee_that_tips_the_balance_over_is_a_shortfall_not_a_node_problem() {
+        let refused = insufficient_or_flow(
+            "building the payment",
+            &native("RQC1EG3GhZ9pvT9YgCp3YvxyYBsdb4FYfH", 39_999_979_600),
+            FlowError::Tx(verus_sdk::verus_tx::TxError::InsufficientFunds {
+                required: 39_999_989_600,
+                available: 39_999_979_600,
+            }),
+        );
+        let SendError::Insufficient { address, advice } = refused else {
+            panic!("a shortfall is not a flow failure: {refused:?}");
+        };
+        assert_eq!(address, "RQC1EG3GhZ9pvT9YgCp3YvxyYBsdb4FYfH");
+        assert!(!advice.contains("doctor"), "{advice}");
+        assert!(advice.contains("0.00010000 fee"), "{advice}");
+        assert!(
+            advice.contains("the most that can move from here is 399.99969600"),
+            "{advice}"
+        );
+    }
+
+    /// The id in the error is forty hex characters that `pecu currency show`
+    /// cannot resolve, and the shortfall was in raw satoshis.
+    #[test]
+    fn a_token_shortfall_names_the_currency_as_it_was_typed() {
+        let refused = insufficient_or_flow(
+            "building the token payment",
+            &token(
+                "RCvP2M7HjvGLHMf47qopqxsNGBmM97Q4n3",
+                99_999_900_000_000,
+                "dudecoin@",
+            ),
+            FlowError::Tx(verus_sdk::verus_tx::TxError::InsufficientTokens {
+                currency: "86238f2324fc6a8eac1c4f0b08bec288a2c2bcec".into(),
+                missing: 99_809_900_000_000,
+            }),
+        );
+        let SendError::InsufficientToken {
+            address,
+            currency,
+            advice,
+        } = refused
+        else {
+            panic!("a token shortfall is not a flow failure: {refused:?}");
+        };
+        assert_eq!(address, "RCvP2M7HjvGLHMf47qopqxsNGBmM97Q4n3");
+        assert_eq!(currency, "dudecoin@");
+        assert!(!advice.contains("86238f"), "{advice}");
+        assert!(!advice.contains("doctor"), "{advice}");
+        assert!(advice.contains("short by 998099.00000000"), "{advice}");
+        assert!(
+            advice.contains("`pecu wallet balance --address RCvP2M7HjvGLHMf47qopqxsNGBmM97Q4n3`"),
+            "{advice}"
+        );
+    }
+
+    /// One branch above the shortfall, raised by the same function over the
+    /// same argument: holding *none* of a token named the id, holding too
+    /// little named `dudecoin@`. Both now say what was typed.
+    ///
+    /// The substitution itself is one line at the call site, which needs a node
+    /// to reach; what this pins is that the variant prints the name it is
+    /// handed, so a `shown` passed in cannot come out as anything else.
+    #[test]
+    fn holding_none_of_a_token_names_it_the_way_holding_too_little_does() {
+        let token = Token {
+            id: CurrencyId::from_bytes([0x86; 20]),
+            shown: "dudecoin@".into(),
+        };
+        let refused = SendError::NoTokenOutputs {
+            address: "RJdpjrBGJnirwxXB1tBm24Voa1omwSoRDx".into(),
+            currency: token.shown.clone(),
+        };
+        assert_eq!(
+            refused.to_string(),
+            "RJdpjrBGJnirwxXB1tBm24Voa1omwSoRDx holds no dudecoin@ to send"
+        );
+        // The id is what the message used to carry, and what `pecu currency
+        // show` cannot resolve.
+        assert!(
+            !refused.to_string().contains(&currency_address(token.id)),
+            "{refused}"
+        );
+    }
+
+    /// The one variant the pre-flight branch must not answer. It cannot arrive
+    /// with a token in flight today — the token flow never calls
+    /// `funding::require` — and if that changes, a native `available` printed
+    /// beside a token `amount` would be the units mix-up the rest of this goes
+    /// to trouble to avoid.
+    #[test]
+    fn a_pre_flight_shortfall_carrying_a_token_is_not_read_as_native() {
+        let refused = insufficient_or_flow(
+            "building the token payment",
+            &token("RCvP2M7HjvGLHMf47qopqxsNGBmM97Q4n3", 1_000, "dudecoin@"),
+            FlowError::InsufficientFunds {
+                needed: Amount::from_sat(1_000),
+                available: Amount::from_sat(0),
+                address: "RCvP2M7HjvGLHMf47qopqxsNGBmM97Q4n3".into(),
+                utxos: 0,
+            },
+        );
+        let SendError::Flow { advice, .. } = refused else {
+            panic!("a token pre-flight shortfall has no message of its own yet: {refused:?}");
+        };
+        assert!(advice.contains("doctor"), "{advice}");
+    }
+
+    /// On the token path `required` is the fee by itself. Read the way the
+    /// native branch reads it, a 0.0001 fee would be announced as the whole
+    /// payment and the reader told to send nothing.
+    #[test]
+    fn a_token_payment_short_on_native_coin_says_the_fee_is_what_is_missing() {
+        let refused = insufficient_or_flow(
+            "building the token payment",
+            &token(
+                "RCvP2M7HjvGLHMf47qopqxsNGBmM97Q4n3",
+                100_000_000,
+                "dudecoin@",
+            ),
+            FlowError::Tx(verus_sdk::verus_tx::TxError::InsufficientFunds {
+                required: 10_000,
+                available: 0,
+            }),
+        );
+        let SendError::Insufficient { advice, .. } = refused else {
+            panic!("a shortfall is not a flow failure: {refused:?}");
+        };
+        assert!(
+            advice.contains("paid in native coin, not in dudecoin@"),
+            "{advice}"
+        );
+        assert!(advice.contains("it needs 0.00010000"), "{advice}");
+        assert!(!advice.contains("the most that can move"), "{advice}");
+        assert!(!advice.contains("doctor"), "{advice}");
+        // Native satoshis are held, not carried: this codebase says "carry"
+        // of the tokens on an output, and the clause is about neither.
+        assert!(!advice.contains("carry"), "{advice}");
+        // A balance that is real but still maturing is not fixed by sending
+        // more coin, so the message may not stop at "go fund it".
+        assert!(advice.contains("withheld"), "{advice}");
+        assert!(
+            advice.contains("`pecu wallet balance --address RCvP2M7HjvGLHMf47qopqxsNGBmM97Q4n3`"),
+            "{advice}"
+        );
+    }
+
+    /// The bug being fixed pointed one way; reporting a genuine failure as a
+    /// shortfall is the same mistake pointing the other. Only the shortfall
+    /// variants may be diverted.
+    #[test]
+    fn a_genuine_failure_still_reaches_the_node_remedy() {
+        use verus_sdk::verus_tx::TxError;
+        let failures = [
+            FlowError::Tx(TxError::ValueOverflow),
+            FlowError::Tx(TxError::MissingChangeScript),
+            FlowError::Stalled("the node stopped answering".into()),
+            // No name in hand, so nothing may be printed as the currency.
+            FlowError::Tx(TxError::InsufficientTokens {
+                currency: "86238f2324fc6a8eac1c4f0b08bec288a2c2bcec".into(),
+                missing: 1,
+            }),
+        ];
+        for source in failures {
+            let described = source.to_string();
+            let refused = insufficient_or_flow(
+                "building the payment",
+                &native("RQC1EG3GhZ9pvT9YgCp3YvxyYBsdb4FYfH", 1),
+                source,
+            );
+            let SendError::Flow { advice, .. } = refused else {
+                panic!("{described} is not a shortfall, but was reported as one");
+            };
+            assert!(advice.contains("doctor"), "{described}: {advice}");
+        }
     }
 
     /// Arm ordering: the token-recipient refusal comes first and has to stay
