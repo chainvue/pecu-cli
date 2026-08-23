@@ -27,10 +27,18 @@ here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../.." && pwd)
 work=$(mktemp -d)
 
-# A throwaway keystore under $HOME, so the rendered path reads `~/.cache/...`
-# rather than a temp directory nobody will recognise.
+# A keystore under $HOME, so the rendered path reads `~/.cache/...` rather than
+# a temp directory nobody will recognise.
+#
+# This script MUST NOT delete it. An earlier version began with `rm -rf`, on the
+# theory that a demo keystore is disposable — and wiped a key that had just been
+# funded with 130 VRSCTEST to record a registration. The coins are still on
+# chain and nobody can spend them. A directory holding private keys is not
+# scratch space, however temporary its name sounds.
+#
+# If a demo needs a key that does not exist yet, create it before calling this,
+# and remove a single stale key file by hand rather than the directory.
 demo_home="$HOME/.cache/pecu-demo"
-rm -rf "$demo_home"
 mkdir -p "$demo_home"
 
 cat > "$work/play.sh" <<SCRIPT
@@ -48,6 +56,26 @@ cd "$repo"
 PATH="$repo/target/release:$repo/target/debug:$PATH" \
     asciinema rec --overwrite -c "$work/play.sh" --window-size "78x$rows" "$work/rec.cast" >/dev/null 2>&1
 asciinema convert --output-format asciicast-v2 "$work/rec.cast" "$work/rec-v2.cast" >/dev/null 2>&1
+
+# Cap the dead air. A public node can take minutes to answer, and a two-phase
+# registration waits for a block on purpose — making the reader sit through that
+# is not more honest, only longer. Only the gaps shrink; every line still
+# arrives in the order and at the relative pace it did.
+python3 - "$work/rec-v2.cast" <<'CAP'
+import json, sys
+path = sys.argv[1]
+lines = open(path).read().splitlines()
+out, previous, shift = [], 0.0, 0.0
+for line in lines[1:]:
+    event = json.loads(line)
+    gap = event[0] - previous
+    previous = event[0]
+    if gap > 2.0:
+        shift += gap - 2.0
+    event[0] = round(event[0] - shift, 3)
+    out.append(json.dumps(event))
+open(path, "w").write(lines[0] + "\n" + "\n".join(out) + "\n")
+CAP
 
 for variant in dark light; do
     cp "$here/$variant.xresources" "$work/$variant.xresources"
