@@ -139,7 +139,7 @@ pecu wallet history --key demo --from-height 1176000
 │ IN CONDITIONS   1159.18038198  VRSCTEST  (210 outputs) │
 │ TOTAL          21314.21551542  VRSCTEST                │
 ├─ TOKENS ───────────────────────────────────────────────┤
-│ 9272.49511041  (unnamed)  iHBwQo7LU…dK9f               │
+│ 9272.49511041  Kaiju@  iHBwQo7LU…dK9f                  │
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -203,6 +203,27 @@ satoshi.
 - **A failed token lookup means "unknown", never "none".** It is a separate call
   from the native figure so that one bucket being uncountable cannot take the
   other down with it, and `--json` says `"known": false` rather than an empty list.
+  The same rule applies to a token's **name**: a name is asked for one currency
+  at a time, so one currency this build cannot read cannot blank the names of
+  the others — which it used to, leaving every token on screen saying
+  `(unnamed)`. A row whose lookup failed says `(name unknown)`, and
+  `wallet balance --json` carries `"name": {"known": false, "error": …}` with the
+  reason. The words are deliberately not "unreadable": a timeout, a refused
+  connection and a node that does not serve the method all land here, and in
+  none of them did an answer arrive to be read, so the panel does not guess at a
+  cause it has not got. A node that answers `-5` or `-8` — "I know no such
+  currency" — did say something, and that row prints `(no such currency)` and
+  `{"known": true, "name": null, "reason": …}`. Not `(unnamed)`: a node denying
+  the currency exists has not told anyone the currency is nameless, and the row
+  beside those words is printing a balance in it.
+
+  This shape is `wallet balance --json` only, under `.tokens.balances[].name`
+  and `.pending.tokens[].name`. `wallet history --json` carries no `name` field
+  at all — its `net_currencies` entries are `{currency, satoshis}` — and neither
+  does `wallet utxos --json`. Both of those `name` fields **changed shape**: they
+  were a bare string or `null`, and are now this object. A string cannot say
+  "unknown", which is the whole point, but a consumer reading `.name` as a
+  string needs `.name.name`.
 - **Currency names are untrusted.** They come from the node and Verus permits
   more in a name than it looks like it does, so they are stripped of control
   characters and of the invisible and direction-changing ones that let two
@@ -210,9 +231,18 @@ satoshi.
   printing — and the currency **id** is always shown next to the name, because
   the id is the part that identifies anything. On the `TOKENS` rows that id is
   re-encoded from the currency id the SDK parsed rather than reprinted from the
-  node's text, and shortened to fit the column. `wallet history` has no such
-  luxury: it falls back to the node's own key for a currency it has no name for,
-  and that string is filtered the same way the name is.
+  node's text, and shortened to fit the column — except where there is no name
+  beside it, when the id is the only handle left and is printed whole. Whether
+  there is room for it is measured on the finished table rather than guessed at
+  per row, because the column is shared: a *sibling* row's long name moves the
+  id right, and the `PENDING` table has a label column `TOKENS` has not. Where
+  the whole id will not fit, every id in that table stays elided — a shortened
+  id is better than a row that runs out through the frame. `wallet history` has
+  no such luxury: it falls back to the node's own key for a currency it has no
+  name for, and that string is filtered the same way the name is. Because that
+  column holds every leg of a transaction in one cell, it cannot say *why* any
+  one leg is a bare id — so the panel's note names the ids whose lookup failed
+  rather than implying the same cause for the ones the node answered about.
 - **Addresses are parsed before the node sees them.** A typo'd address comes back
   from a node as an empty balance, which reads as "no funds" — the one wrong
   answer a wallet must never give.

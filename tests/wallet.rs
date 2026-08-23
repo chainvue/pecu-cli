@@ -251,13 +251,38 @@ fn a_real_balance_separates_spendable_withheld_and_tokens() {
     assert!(document["spendable"]["satoshis"].is_number());
     assert!(document["withheld"]["outputs"].as_u64().unwrap_or(0) > 0);
     assert_eq!(document["tokens"]["known"], true);
+    let balances = document["tokens"]["balances"]
+        .as_array()
+        .expect("balances")
+        .clone();
     assert!(
-        !document["tokens"]["balances"]
-            .as_array()
-            .expect("balances")
-            .is_empty(),
+        !balances.is_empty(),
         "the chain identity should hold tokens: {document}"
     );
+    // The `name` field's shape, pinned. It is an object rather than the bare
+    // string or `null` it used to be, and that is a break worth a test rather
+    // than a paragraph: a string has no way to say "the lookup failed", which
+    // is the whole of issue #46. `known` is about the name the way the `known`
+    // around it is about the balance, so a consumer that trusts `name.name`
+    // without reading `name.known` is back to printing a confident nothing.
+    for row in &balances {
+        let name = &row["name"];
+        assert!(
+            name.is_object(),
+            "a token name is an object, not a bare string: {row}"
+        );
+        match name["known"].as_bool() {
+            Some(true) => assert!(
+                name["name"].is_string() || name["name"].is_null(),
+                "a known name is the name, or null with a reason: {row}"
+            ),
+            Some(false) => assert!(
+                name["error"].is_string() && name.get("name").is_none(),
+                "a lookup that failed says why and does not answer: {row}"
+            ),
+            None => panic!("every name says whether it is known: {row}"),
+        }
+    }
 }
 
 #[test]
