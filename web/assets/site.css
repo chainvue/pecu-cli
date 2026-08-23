@@ -450,6 +450,30 @@ pre:hover .copy, .copy:focus-visible { opacity: 1; }
 .dot-wait { background: var(--amber); }
 .dot-no { background: var(--muted); }
 
+/* The closing note. Quieter than the sections above it — it is the last thing
+   read, which is where a digression belongs and where it costs nothing. */
+.colophon { background: var(--surface); }
+.etym { max-width: 42rem; }
+.etym .word {
+  margin: 0 0 .1rem; font-family: var(--mono); font-size: clamp(1.6rem, 3.5vw, 2.2rem);
+  color: var(--green); letter-spacing: -.01em;
+}
+.etym .word .pos, .etym .word .gloss {
+  font-family: var(--sans); font-size: .8rem; font-style: italic;
+  color: var(--muted); letter-spacing: 0; vertical-align: .55em; margin-left: .35rem;
+}
+.etym .def {
+  margin: 0 0 1.6rem; padding-bottom: 1.3rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 1.15rem; color: var(--strong);
+}
+.etym p { margin: 0 0 1.1rem; color: var(--muted); line-height: 1.65; }
+.etym p:last-child { margin-bottom: 0; }
+.etym b, .etym code { color: var(--text); }
+.etym b { font-weight: 600; }
+.etym code { font-size: .875em; }
+.etym q { font-style: italic; }
+
 .note {
   margin: 1.5rem 0 0; padding: .9rem 1.1rem; border-radius: 8px;
   border: 1px solid var(--border); border-left: 3px solid var(--amber);
