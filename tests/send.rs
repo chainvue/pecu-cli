@@ -380,6 +380,23 @@ fn a_node_that_never_answered_is_not_a_currency_that_did_not_resolve() {
 }
 
 #[test]
+fn a_dead_node_is_not_an_unknown_recipient() {
+    let home = home();
+    generate(&home, "demo");
+    // What #44 reported: a node that never answered was reported as a payee
+    // that does not exist, and the help then steered towards pasting a raw
+    // address — on the one command that spends.
+    pecu(&home)
+        .args(["send", "--to", "bob@", "--amount", "1", "--node", DEAD_NODE])
+        .assert()
+        .failure()
+        .stderr(contains("looking up the recipient failed"))
+        .stderr(contains("pecu::node_unreachable"))
+        .stderr(contains("nothing on this chain is called").not())
+        .stderr(contains("unknown_recipient").not());
+}
+
+#[test]
 fn an_unresolvable_recipient_still_blames_the_recipient() {
     let home = home();
     generate(&home, "demo");

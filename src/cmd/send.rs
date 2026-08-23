@@ -159,7 +159,7 @@ fn attempt(ui: &Ui, settings: &Settings, globals: &Globals, args: &SendArgs) -> 
     let envelope = choose_key(&store, args.from.as_deref())?;
     let node = node::connect(profile)?;
 
-    let recipient = resolve_recipient(ui, &node, &args.to)?;
+    let recipient = resolve_recipient(ui, &node, &profile.node, &args.to)?;
     let currency = match &args.currency {
         Some(name) => Some(Token {
             id: resolve_currency(ui, &node, &profile.node, name)?,
@@ -308,7 +308,12 @@ struct Token {
     shown: String,
 }
 
-fn resolve_recipient(ui: &Ui, node: &Node, to: &str) -> Result<Recipient, miette::Report> {
+fn resolve_recipient(
+    ui: &Ui,
+    node: &Node,
+    url: &str,
+    to: &str,
+) -> Result<Recipient, miette::Report> {
     if to.parse::<Address>().is_ok() {
         return Ok(Recipient {
             address: to.to_string(),
@@ -317,9 +322,22 @@ fn resolve_recipient(ui: &Ui, node: &Node, to: &str) -> Result<Recipient, miette
     }
 
     ui.sdk(format!("node.identity({to:?})"));
-    let record = node.identity(to).map_err(|_| SendError::UnknownRecipient {
-        name: to.to_string(),
-    })?;
+    let record = match node.identity(to) {
+        Ok(record) => record,
+        // `-5` is no such name and `-8` is not a usable reference at all; both
+        // are the daemon answering. Anything else is it failing to, and telling
+        // someone their payee does not exist — then offering an address to use
+        // instead — is the worst possible advice on the one command that spends.
+        Err(RpcError::Node { code: -5 | -8, .. }) => {
+            return Err(SendError::UnknownRecipient {
+                name: to.to_string(),
+            }
+            .into())
+        }
+        Err(other) => {
+            return Err(node::NodeError::request("looking up the recipient", url, other).into())
+        }
+    };
     ui.sdk_result(format!(
         "IdentityRecord {{ identity_address: {}, status: {} }}",
         record.identity_address, record.status
