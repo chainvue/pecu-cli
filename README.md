@@ -12,6 +12,9 @@
 sends, air-gapped signing, transaction decoding, the VerusID lifecycle and
 currency operations — from one binary.
 
+**[chainvue.github.io/pecu-cli](https://chainvue.github.io/pecu-cli/)** — the
+same documentation, searchable, with the demos below playing in place.
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/media/doctor-dark.svg">
   <img alt="pecu doctor reporting profile, node, build, chain tip and DeFi being switched off" src="docs/media/doctor-light.svg">

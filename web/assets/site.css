@@ -348,8 +348,22 @@ pre:hover .copy, .copy:focus-visible { opacity: 1; }
 
 /* ---------------------------------------------------------------- landing */
 
-.hero { padding: clamp(3rem, 9vw, 6rem) var(--gutter) 0; }
+.hero { padding: clamp(2.5rem, 6vw, 4.5rem) var(--gutter) 0; }
 .hero-inner { max-width: 74rem; margin: 0 auto; }
+
+/* Wide enough for both, and the capture is the argument — a reader who has to
+   scroll past the claim to reach the evidence has been asked to take the claim
+   on faith first. Below this the capture still gets its full width, which is
+   the right trade when there is only one column to give it. */
+@media (min-width: 78rem) {
+  .hero-inner {
+    display: grid; align-items: center; gap: clamp(2rem, 4vw, 3.5rem);
+    grid-template-columns: minmax(0, 27rem) minmax(0, 1fr);
+  }
+  .hero-proof .term { max-width: none; margin-bottom: 0; }
+  .hero h1 { font-size: clamp(2.1rem, 3.6vw, 3rem); }
+  .hero .cta { margin-bottom: 0; }
+}
 .hero-logo {
   margin: 0 0 1.6rem; font-family: var(--mono); font-size: clamp(.7rem, 1.7vw, 1rem);
   line-height: 1.15; color: var(--green); white-space: pre; overflow-x: auto;

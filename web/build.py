@@ -30,6 +30,9 @@ DOCS = ROOT / "docs"
 MEDIA = DOCS / "media"
 OUT = WEB / "_site"
 
+# Page links stay relative; this is used only where a spec demands an absolute
+# URL — the link-preview card and the sitemap. Change it and both follow.
+SITE = "https://chainvue.github.io/pecu-cli/"
 REPO = "https://github.com/chainvue/pecu-cli"
 SDK = "https://github.com/chainvue/verus-rust-sdk"
 DESCRIPTION = (
@@ -339,10 +342,17 @@ def shell(*, slug, title, blurb, content, rel, toc=None, source=None, prev=None,
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{html.escape(full_title)}</title>
 <meta name="description" content="{html.escape(blurb)}">
+<link rel="canonical" href="{SITE}{slug}{"/" if slug else ""}">
 <meta property="og:title" content="{html.escape(full_title)}">
 <meta property="og:description" content="{html.escape(blurb)}">
 <meta property="og:type" content="website">
-<meta name="twitter:card" content="summary">
+<meta property="og:url" content="{SITE}{slug}{"/" if slug else ""}">
+<meta property="og:image" content="{SITE}assets/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="pecu — a Verus wallet that lives in your terminal">
+<meta property="og:site_name" content="pecu">
+<meta name="twitter:card" content="summary_large_image">
 <meta name="color-scheme" content="dark light">
 <link rel="icon" href="{rel}assets/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="{rel}assets/site.css">
@@ -609,9 +619,16 @@ def build():
 
     assets = OUT / "assets"
     assets.mkdir()
-    for name in ("site.css", "site.js", "favicon.svg"):
+    for name in ("site.css", "site.js", "favicon.svg", "og.png"):
         shutil.copy(WEB / "assets" / name, assets / name)
     (assets / "search.json").write_text(json.dumps(index, separators=(",", ":")))
+
+    urls = "".join(f"<url><loc>{SITE}{p['slug']}{'/' if p['slug'] else ''}</loc></url>"
+                   for p in PAGES)
+    (OUT / "sitemap.xml").write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{urls}</urlset>\n')
+    (OUT / "robots.txt").write_text(f"User-agent: *\nAllow: /\nSitemap: {SITE}sitemap.xml\n")
     # Pages runs Jekyll over anything it is handed unless told not to; a folder
     # starting with an underscore would quietly vanish.
     (OUT / ".nojekyll").write_text("")
