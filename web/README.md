@@ -54,6 +54,31 @@ page. It also sidesteps
 [#47](https://github.com/chainvue/pecu-cli/issues/47): the light captures render
 at 1.1:1 and are unreadable.
 
+## Phone widths
+
+```sh
+make mobile        # asserts no page scrolls sideways at 320/360/390/414
+```
+
+Worth its own command because the obvious way to check is wrong: headless Chrome
+clamps its viewport to a 500px minimum, so `--window-size=390` renders a 500px
+layout squeezed into a 390px image and everything looks fine. The script loads
+each page in an iframe of the target width and reads `scrollWidth` from inside
+it, which is the only honest measurement available here.
+
+What it was written after: a `min-width` on the captures, added so a terminal
+could be panned on a phone, made a 390px viewport scroll to 594px. Grid items do
+not shrink below their content unless told to, so one wide child dragged every
+paragraph's right edge off the screen — and the visible symptom was clipped
+prose, nowhere near the capture that caused it.
+
+**A capture rests on a different frame depending on the device.** Above the phone
+breakpoint, with motion allowed and an `IntersectionObserver` available, it rests
+on frame zero and plays when scrolled to. Otherwise it rests on its finished
+frame. The choice is made in the inline `<head>` script, before first paint,
+because `site.js` is deferred: deciding after the first frame is on screen is
+what produces a flash rather than preventing one.
+
 ## Re-recording a capture
 
 `docs/media/record.sh <name> <rows> <command…>` — read its header first. Both

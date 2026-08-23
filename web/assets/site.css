@@ -236,7 +236,14 @@ h2:hover .headerlink, h3:hover .headerlink, .headerlink:focus { opacity: 1; }
 .prose :not(pre) > code {
   padding: .15em .38em; border-radius: 5px;
   background: var(--surface-2); border: 1px solid var(--border-sm);
-  font-size: .875em; color: var(--strong); white-space: nowrap;
+  font-size: .875em; color: var(--strong);
+  /* `anywhere`, not `nowrap`. Keeping a command on one line reads better and is
+     what this was, but the reference quotes raw hashes inline, and a 40-character
+     unbreakable token under `nowrap` cannot wrap — so it pushed the whole page
+     sideways on a phone and took every paragraph's right edge with it.
+     `anywhere` still prefers to break at spaces and only splits a word when the
+     alternative is overflowing. */
+  overflow-wrap: anywhere;
 }
 
 /* Ties on specificity with the chip rule above, so it has to come after it:
@@ -302,7 +309,16 @@ pre:hover .copy, .copy:focus-visible { opacity: 1; }
   background: #0d1117;
   box-shadow: var(--shadow);
 }
-.term-screen { border-radius: 10px; overflow: hidden; display: block; }
+.term-command {
+  display: flex; align-items: baseline; gap: .4rem;
+  padding: .5rem .8rem .55rem; border-bottom: 1px solid var(--border);
+  font-family: var(--mono); font-size: .82rem; line-height: 1.4;
+  color: var(--strong); overflow-wrap: anywhere;
+}
+.term-dollar { color: var(--green); flex: none; }
+.term-command code { min-width: 0; }
+
+.term-screen { border-radius: 0 0 10px 10px; overflow: hidden; display: block; }
 .term-screen svg { display: block; }
 .term figcaption {
   margin: .6rem .1rem 0; font-size: .82rem; color: var(--muted);
@@ -312,11 +328,11 @@ pre:hover .copy, .copy:focus-visible { opacity: 1; }
 }
 
 .term-replay {
-  position: absolute; top: .6rem; right: .7rem;
+  margin-left: auto; flex: none; align-self: center;
   display: inline-flex; align-items: center; gap: .3rem;
-  padding: .2rem .5rem; border-radius: 5px;
-  border: 1px solid #30363d; background: #161b22cc; color: #8b949e;
-  font: inherit; font-size: .72rem; cursor: pointer; backdrop-filter: blur(4px);
+  padding: .15rem .45rem; border-radius: 5px;
+  border: 1px solid var(--border); background: var(--bg); color: var(--muted);
+  font: inherit; font-size: .7rem; cursor: pointer;
   opacity: 0; transition: opacity .12s;
 }
 .term:hover .term-replay, .term-replay:focus-visible { opacity: 1; }
@@ -333,6 +349,18 @@ pre:hover .copy, .copy:focus-visible { opacity: 1; }
   animation-play-state: paused;
   animation-delay: calc(-1 * var(--term-dur));
 }
+
+/* `term-defer` is set in the head, before first paint, and only when the page
+   knows it will actually play these: scripting on, motion allowed, a wide
+   enough screen, and an IntersectionObserver to start them with. Then the
+   resting state is frame zero — an empty terminal about to be typed into.
+   Without it the rest above stands, and the capture shows its finished screen.
+
+   The flash this removes: parking on the LAST frame and then starting from the
+   first meant every capture showed its own answer for an instant and then threw
+   it away to type it out. Nobody reads a demo that spoils itself. */
+.js.term-defer [data-term] svg g[style*="animation-name"] { animation-delay: 0s; }
+
 .js [data-term].is-playing svg g[style*="animation-name"] {
   animation-play-state: running;
   animation-delay: 0s;
@@ -419,6 +447,14 @@ pre:hover .copy, .copy:focus-visible { opacity: 1; }
 .split { display: grid; gap: clamp(1.5rem, 4vw, 3rem); grid-template-columns: 1fr; align-items: start; }
 @media (min-width: 62rem) { .split { grid-template-columns: minmax(0, 22rem) minmax(0, 1fr); } }
 @media (min-width: 62rem) { .split-wide { grid-template-columns: minmax(0, 1fr) minmax(0, 26rem); } }
+
+/* Every grid and flex item here gets `min-width: 0`. The default is
+   `min-content`, so one wide child — a terminal capture, a long word — stops the
+   whole column shrinking and drags the page sideways with it. That is not
+   hypothetical: a `min-width` on the captures made a 390px viewport scroll to
+   594px, and it was the paragraphs either side of the demo that visibly lost
+   their right-hand edge, not the demo. */
+.cards > *, .split > *, .demo-list > *, .statusgrid > *, .hero-inner > * { min-width: 0; }
 
 .cards { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); }
 .card {
@@ -552,12 +588,6 @@ pre:hover .copy, .copy:focus-visible { opacity: 1; }
   .sidebar-nav a { border-left: 0; padding: .25rem .6rem; border: 1px solid var(--border-sm); border-radius: 6px; }
 }
 @media (max-width: 46rem) {
-  /* A 78-column terminal scaled to a phone is a picture of text, not text.
-     Below this width it pans instead, the same way the wide tables and code
-     blocks do — and `contain` keeps that pan from stealing the page's. */
-  .term-screen { overflow-x: auto; overscroll-behavior-x: contain; }
-  .term-screen svg { min-width: 36rem; }
-
   .topnav { display: none; }
   .search-open span { display: none; }
   .search-open kbd { display: none; }

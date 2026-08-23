@@ -80,6 +80,12 @@
   var terms = Array.prototype.slice.call(document.querySelectorAll('[data-term]'));
   if (terms.length) {
     var reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    // On a narrow screen a capture is scaled small enough that the typing is
+    // not readable anyway, and playing it means someone scrolling past sees an
+    // empty terminal for five seconds instead of the output the section is
+    // talking about. The finished frame is the informative one, so that is what
+    // a phone gets; Replay is still there for anyone who wants the animation.
+    var narrow = matchMedia('(max-width: 46rem)').matches;
     terms.forEach(function (term) {
       var replay = term.querySelector('[data-replay]');
       if (replay && !reduced) {
@@ -92,7 +98,9 @@
         });
       }
     });
-    if (!reduced && 'IntersectionObserver' in window) {
+    // The head already decided; agreeing with it keeps one rule in one place.
+    var deferred = root.classList.contains('term-defer');
+    if (deferred) {
       var seen = new IntersectionObserver(function (entries) {
         entries.forEach(function (entry) {
           if (!entry.isIntersecting) return;
@@ -101,9 +109,9 @@
         });
       }, { threshold: 0.25 });
       terms.forEach(function (term) { seen.observe(term); });
-    } else {
-      terms.forEach(function (term) { term.classList.add('is-playing'); });
     }
+    // Nothing to do in the other branch: without `term-defer` the capture is
+    // already resting on its finished frame, which is the state worth showing.
   }
 
   /* ------------------------------------------------------------ scroll spy */

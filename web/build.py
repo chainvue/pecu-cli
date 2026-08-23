@@ -231,13 +231,21 @@ def capture(name, command, caption):
     if any(entity in command + caption for entity in ("&lt;", "&gt;", "&amp;", "&#")):
         raise SystemExit(f"{name}: caption is pre-escaped — write the plain text instead")
 
+    # The command sits ABOVE the screen, not in the caption below it. A capture
+    # is up to nine hundred pixels tall, and on a phone that is more than a
+    # screenful: by the time the output is in view the prompt line that produced
+    # it has scrolled away, and the caption naming it has not arrived yet. A
+    # label pinned above the terminal is the one place it stays legible however
+    # tall the recording is and however small the type has been scaled.
     return f"""<figure class="term" data-term style="--term-end:{end_frame(svg)}px;--term-dur:{duration(svg)}s">
+  <div class="term-command"><span class="term-dollar" aria-hidden="true">$</span> <code>{html.escape(command)}</code>
+    <button class="term-replay" type="button" data-replay hidden>
+      <svg viewBox="0 0 16 16" aria-hidden="true" width="13" height="13"><path fill="currentColor" d="M8 3V0.5L4.5 3.75 8 7V4.5a3.5 3.5 0 1 1-3.5 3.5H3a5 5 0 1 0 5-5Z"/></svg>
+      Replay
+    </button>
+  </div>
   <div class="term-screen">{svg}</div>
-  <button class="term-replay" type="button" data-replay hidden>
-    <svg viewBox="0 0 16 16" aria-hidden="true" width="13" height="13"><path fill="currentColor" d="M8 3V0.5L4.5 3.75 8 7V4.5a3.5 3.5 0 1 1-3.5 3.5H3a5 5 0 1 0 5-5Z"/></svg>
-    Replay
-  </button>
-  <figcaption><code>{html.escape(command)}</code> — {html.escape(caption)}</figcaption>
+  <figcaption>{html.escape(caption)}</figcaption>
 </figure>"""
 
 
@@ -394,6 +402,16 @@ def shell(*, slug, title, blurb, content, rel, toc=None, source=None, prev=None,
   (function () {{
     var d = document.documentElement;
     d.classList.add('js');
+    // Decided here rather than in site.js because site.js is deferred: by the
+    // time it runs the first frame is already on screen, and choosing the
+    // resting state after that is what produces a flash instead of preventing
+    // one.
+    if (window.matchMedia
+        && !matchMedia('(prefers-reduced-motion: reduce)').matches
+        && !matchMedia('(max-width: 46rem)').matches
+        && 'IntersectionObserver' in window) {{
+      d.classList.add('term-defer');
+    }}
     try {{
       var t = localStorage.getItem('pecu-theme');
       if (t) d.dataset.theme = t;

@@ -2,7 +2,7 @@
 # Nothing here needs a network connection except the `testnet` target.
 
 .DEFAULT_GOAL := help
-.PHONY: help check fmt fmt-check lint test testnet snapshots gallery build run clean site serve
+.PHONY: help check fmt fmt-check lint test testnet snapshots gallery build run clean site serve mobile
 
 help: ## Show this help
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  \033[32m%-12s\033[0m %s\n", $$1, $$2}'
@@ -54,6 +54,9 @@ site: $(WEB_PY) ## Build the website into web/_site
 	$(WEB_PY) web/build.py
 
 PORT ?= 8000
+mobile: site ## Assert no page scrolls sideways at phone widths (needs Chrome)
+	web/check-mobile.sh
+
 serve: $(WEB_PY) ## Build the website and serve it: make serve [PORT=8000]
 	$(WEB_PY) web/build.py --serve --port $(PORT)
 
