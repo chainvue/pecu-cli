@@ -38,6 +38,76 @@ fn generate(home: &TempDir, label: &str) -> String {
         .to_string()
 }
 
+/// A node that answers one request with one canned JSON-RPC refusal, so what
+/// the daemon says can be asserted without a network.
+///
+/// The daemon's own codes: a currency name without its `@` reaches
+/// `getidentity` as `-8`, "Identity parameter must be valid friendly name or
+/// identity address"; a name nobody registered is `-5`. The reply is the same
+/// whatever was asked, because only one call is made before the command gives
+/// up. `http://127.0.0.1:…` is accepted because loopback is the one place
+/// plaintext is not refused.
+fn refusing_node(code: i64, message: &str) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let url = format!("http://{}", listener.local_addr().expect("a bound address"));
+    let body = format!(r#"{{"error":{{"code":{code},"message":"{message}"}},"id":1}}"#);
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        // Drained until the request is whole rather than after one read: a POST
+        // whose headers and body land in separate segments would otherwise get
+        // its answer — and a closed socket — mid-write, which reads as a
+        // transport failure instead of the refusal this is here to send.
+        let mut request = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let Some(head) = find_header_end(&request) else {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => request.extend_from_slice(&chunk[..read]),
+                }
+                continue;
+            };
+            if request.len() - head >= content_length(&request[..head]) {
+                break;
+            }
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => request.extend_from_slice(&chunk[..read]),
+            }
+        }
+        let reply = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = stream.write_all(reply.as_bytes());
+        let _ = stream.flush();
+    });
+    url
+}
+
+/// Where the body starts, once the blank line ending the headers has arrived.
+fn find_header_end(request: &[u8]) -> Option<usize> {
+    request
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|start| start + 4)
+}
+
+/// The declared body length, or zero when the request carries no body.
+fn content_length(headers: &[u8]) -> usize {
+    String::from_utf8_lossy(headers)
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse().ok())?
+        })
+        .unwrap_or(0)
+}
+
 #[test]
 fn mainnet_will_not_spend_without_being_told_to() {
     let home = home();
@@ -224,6 +294,112 @@ fn a_name_nobody_registered_is_refused_before_a_key_is_unlocked() {
         .assert()
         .failure()
         .stderr(contains("nothing on this chain is called"));
+}
+
+#[test]
+fn a_currency_without_its_at_sign_blames_the_currency_not_the_recipient() {
+    let home = home();
+    generate(&home, "demo");
+    // What #36 reported: a valid `--to` and a currency name missing its `@`,
+    // answered with a diagnostic about the recipient. The `--to` here is an
+    // i-address, so it resolves without a node call and the currency lookup is
+    // the only request the stub ever sees.
+    let node = refusing_node(
+        -8,
+        "Identity parameter must be valid friendly name or identity address",
+    );
+    pecu(&home)
+        .args([
+            "send",
+            "--to",
+            CHAIN_IDENTITY,
+            "--amount",
+            "5",
+            "--currency",
+            "sdkcur",
+            "--node",
+            &node,
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("pecu::unknown_currency"))
+        // Short tokens: miette wraps the help text, so anything longer is at
+        // the mercy of where the line breaks.
+        .stderr(contains("--currency"))
+        .stderr(contains("sdkcur@"))
+        .stderr(contains("unknown_recipient").not());
+}
+
+#[test]
+fn a_currency_name_that_already_ends_in_at_is_not_suggested_twice() {
+    let home = home();
+    generate(&home, "demo");
+    let node = refusing_node(-5, "Identity not found");
+    pecu(&home)
+        .args([
+            "send",
+            "--to",
+            CHAIN_IDENTITY,
+            "--amount",
+            "5",
+            "--currency",
+            "ghost@",
+            "--node",
+            &node,
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("ghost@"))
+        .stderr(contains("ghost@@").not());
+}
+
+#[test]
+fn a_node_that_never_answered_is_not_a_currency_that_did_not_resolve() {
+    let home = home();
+    generate(&home, "demo");
+    // Nothing was looked up at all, so neither "did not resolve" nor a claim
+    // about the recipient is an answer this program has.
+    pecu(&home)
+        .args([
+            "send",
+            "--to",
+            CHAIN_IDENTITY,
+            "--amount",
+            "5",
+            "--currency",
+            "sdkcur",
+            "--node",
+            DEAD_NODE,
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("looking up the currency failed"))
+        .stderr(contains("pecu::node_unreachable"))
+        .stderr(contains("did not resolve to a currency").not())
+        .stderr(contains("unknown_recipient").not());
+}
+
+#[test]
+fn an_unresolvable_recipient_still_blames_the_recipient() {
+    let home = home();
+    generate(&home, "demo");
+    // The other half of #36: `--to` was never the problem there, and the
+    // wording it gets for a name nobody registered is right as it stands.
+    let node = refusing_node(-5, "Identity not found");
+    pecu(&home)
+        .args([
+            "send",
+            "--to",
+            "nothing-is-called-this-surely@",
+            "--amount",
+            "1",
+            "--node",
+            &node,
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("nothing on this chain is called"))
+        .stderr(contains("pecu::unknown_recipient"));
 }
 
 #[test]
