@@ -53,7 +53,18 @@ SCRIPT
 chmod +x "$work/play.sh"
 
 cd "$repo"
-PATH="$repo/target/release:$repo/target/debug:$PATH" \
+
+# Build first, and put exactly one binary on the PATH.
+#
+# This used to prepend both `target/release` and `target/debug` and record
+# whatever it found. `target/release` held a binary sixteen days old, so every
+# demo was recorded against it — the `doctor` capture in the README announced an
+# SDK revision that had already been replaced. A demo of a stale build is worse
+# than no demo: it is a screenshot of something that is not the software.
+cargo build --release --quiet
+# Prepended, not replaced: the recorded script still needs `sh` and friends.
+# `target/debug` is deliberately absent, so there is only one `pecu` to find.
+PATH="$repo/target/release:$PATH" \
     asciinema rec --overwrite -c "$work/play.sh" --window-size "78x$rows" "$work/rec.cast" >/dev/null 2>&1
 asciinema convert --output-format asciicast-v2 "$work/rec.cast" "$work/rec-v2.cast" >/dev/null 2>&1
 
