@@ -25,6 +25,7 @@ use verus_sdk::verus_keys::{Address, AddressKind, PrivateKey};
 use verus_sdk::verus_wire::TxV4;
 
 use crate::cli::{Globals, SendArgs};
+use crate::cmd::tx;
 use crate::config::Settings;
 use crate::keystore::{self, Envelope, Keystore};
 use crate::node::{self, Node};
@@ -735,7 +736,7 @@ fn describe(ui: &Ui, script: &[u8]) -> Text {
             tokens,
         }) => Text::of(ui.theme.glyphs.arrow, palette.muted)
             .space()
-            .push(format!("{destination:?}"), palette.value)
+            .push(tx::show(&destination), palette.value)
             .push(
                 format!(
                     " holds {}",
@@ -926,12 +927,16 @@ fn delivery_json(mut plan: serde_json::Value, delivery: Delivery<'_>) -> serde_j
 #[cfg(test)]
 mod tests {
     use unicode_width::UnicodeWidthStr;
+    use verus_sdk::decode::Destination;
     use verus_sdk::network::Sent;
+    use verus_sdk::verus_tx::cc::reserve_output_script_to;
+    use verus_sdk::verus_wire::TxOut;
 
     use super::*;
     use crate::cli::Theme as ThemeFlag;
     use crate::config::Paths;
     use crate::keystore::{Cipher, Kdf, ENVELOPE_VERSION};
+    use crate::ui::theme::{Skin, Theme};
 
     /// A real VRSCTEST transaction, so the review panel is exercised against
     /// bytes the daemon actually produced rather than something hand-rolled.
@@ -1031,6 +1036,50 @@ mod tests {
                 shown: shown.into(),
             }),
         ))
+    }
+
+    /// The panel over the outputs a token send really builds. The checked-in
+    /// fixture is a native identity spend and carries no reserve output, which
+    /// is why every assertion here passed while the recipient row printed
+    /// twenty numbers — so this replaces the outputs with a script from the
+    /// SDK's own encoder, the one `build_token_send` writes.
+    fn rendered_holding(destination: Destination) -> String {
+        let mut ui = Ui::new(ThemeFlag::Phosphor, false, false);
+        // Pin the width, as the integration tests pin `PECU_WIDTH`, so the
+        // assertions do not depend on whoever's terminal ran them: the output
+        // row wraps between the address and the amount below about sixty
+        // columns, and the panel is drawn as narrow as forty-eight.
+        ui.theme = Theme::with_skin(Skin::Phosphor, 84);
+        let settings =
+            Settings::resolve_in(Paths::at("/nonexistent"), None, None).expect("builtin");
+        let mut transaction = fixture_transaction();
+        transaction.outputs = vec![TxOut {
+            // Zero, as the builder writes it: the value is the token in the
+            // payload, not the satoshis on the output.
+            value: 0,
+            script_pubkey: reserve_output_script_to(destination, token_id(), 500_000_000)
+                .expect("the SDK encodes its own reserve output"),
+        }];
+        let token = Token {
+            id: token_id(),
+            shown: "mytoken@".into(),
+        };
+        let recipient = Recipient {
+            address: RECIPIENT.into(),
+            shown: RECIPIENT.into(),
+        };
+        let panel = review(
+            &ui,
+            &settings,
+            &envelope(),
+            None,
+            &recipient,
+            Amount::from_sat(500_000_000),
+            Some(&token),
+            &unsent(),
+            &Some(transaction),
+        );
+        crate::ui::text::strip_ansi(&panel.render(&ui.theme))
     }
 
     /// The single rendered line carrying `label`. Whole-panel assertions cannot
@@ -1256,6 +1305,48 @@ mod tests {
             row(&out, "currency id").contains("iK2k8YH1jfR7RLmEZ3zac2Mkx5rxSgbMqg"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn a_token_output_names_the_address_it_pays_rather_than_its_bytes() {
+        // The whole issue. The reserve arm formatted its destination with
+        // `{:?}`, so the one row that says where the token goes read
+        // `PubKeyHash([38, 176, …])` — twenty decimal numbers nobody can check
+        // against the address they typed, on the panel that asks for `yes`.
+        //
+        // The address paid here is deliberately neither `RECIPIENT` nor the
+        // envelope's, both of which already appear elsewhere on this panel: a
+        // third address is the only way the assertion can prove it read *this*
+        // row.
+        let paid = "RComfCn4wHHsGR8vWBAU7T1r3tHHyxN9Hm";
+        let hash = paid.parse::<Address>().expect("an R-address").hash();
+        let out = rendered_holding(Destination::PubKeyHash(hash));
+        assert!(out.contains(paid), "{out}");
+        assert!(!out.contains("PubKeyHash("), "{out}");
+        // The token half of the same line must survive the fix — a rendering
+        // that named the address and dropped the amount would be no better.
+        assert!(out.contains("holds 5.00000000"), "{out}");
+    }
+
+    #[test]
+    fn a_token_output_held_for_an_identity_reads_as_an_i_address() {
+        // The display twin of the upstream bug in `docs/status.md` (#115): an
+        // identity destination written as a key hash pays a different owner
+        // entirely, because the two share their 160 bits and differ only in the
+        // kind. A renderer that guesses `PubKeyHash` shows the reader the wrong
+        // address for the right output, so the `i` and the `R` are asserted
+        // apart rather than together.
+        //
+        // Not reachable from the CLI today — `build_token_send` refuses a
+        // non-key-hash recipient and `--from-identity` conflicts with
+        // `--currency` — so this pins the rendering ahead of the path.
+        let held = "i7r29bDQfrwjkTxjv4bcYD6B1ZV7WZ4kGo";
+        let hash = held.parse::<Address>().expect("an i-address").hash();
+        let twin = Address::new(AddressKind::PubKeyHash, hash).to_string();
+        let out = rendered_holding(Destination::Identity(hash));
+        assert!(out.contains(held), "{out}");
+        assert!(!out.contains("Identity("), "{out}");
+        assert!(!out.contains(&twin), "the key-hash twin was shown:\n{out}");
     }
 
     #[test]

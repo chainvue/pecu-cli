@@ -471,7 +471,14 @@ fn describe(ui: &Ui, kind: &OutputKind) -> Text {
     }
 }
 
-fn show(destination: &Destination) -> String {
+/// A destination as the address it is, for every kind an output can name.
+///
+/// Shared with the `send` confirmation panel, which decodes the same reserve
+/// outputs this reads back. While that panel had a rendering of its own it
+/// printed `PubKeyHash([38, 176, …])` where the recipient belongs — twenty
+/// numbers nobody can compare by eye to the address they typed, on the one row
+/// that says where the token goes.
+pub fn show(destination: &Destination) -> String {
     match destination {
         Destination::PubKeyHash(hash) => address(AddressKind::PubKeyHash, *hash),
         Destination::Identity(hash) => address(AddressKind::Identity, *hash),
