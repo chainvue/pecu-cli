@@ -1,0 +1,255 @@
+<section class="hero">
+  <div class="hero-inner">
+    <pre class="hero-logo" aria-label="pecu">┌─┐┌─┐┌─┐┬ ┬
+├─┘├┤ │  │ │
+┴  └─┘└─┘└─┘</pre>
+    <h1>A Verus wallet that lives in your terminal.</h1>
+    <p class="lede">
+      Keys, transparent sends, air-gapped signing, transaction decoding, the
+      VerusID lifecycle and currency operations — from one binary, with
+      <strong>no full node to run</strong>.
+    </p>
+    <div class="cta">
+      <a class="btn btn-primary" href="commands/">Command reference</a>
+      <a class="btn btn-ghost" href="https://github.com/chainvue/pecu-cli">
+        <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path fill="currentColor" d="M8 0a8 8 0 0 0-2.5 15.6c.4.1.5-.2.5-.4v-1.4C3.8 14.2 3.4 13 3.4 13c-.4-.9-.9-1.2-.9-1.2-.7-.5.1-.5.1-.5.8.1 1.2.8 1.2.8.7 1.2 1.9.9 2.4.7 0-.6.3-.9.5-1.1-1.8-.2-3.6-.9-3.6-4 0-.9.3-1.6.8-2.1 0-.2-.3-1 .1-2.1 0 0 .7-.2 2.2.8a7.6 7.6 0 0 1 4 0c1.5-1 2.2-.8 2.2-.8.4 1.1.2 1.9.1 2.1.5.5.8 1.2.8 2.1 0 3.1-1.8 3.8-3.6 4 .3.2.5.7.5 1.5v2.2c0 .2.1.5.6.4A8 8 0 0 0 8 0Z"/></svg>
+        Source
+      </a>
+      <span class="snippet" data-snippet="cargo build --release">
+        <span class="dollar" aria-hidden="true">$</span>cargo build --release
+      </span>
+    </div>
+
+    <!--demo:doctor-->
+  </div>
+</section>
+
+<section class="section" id="no-daemon">
+  <div class="section-inner">
+    <p class="eyebrow">The point</p>
+    <h2>There is no daemon.</h2>
+    <p class="sub">
+      No <code>verusd</code> to install, no chain to sync, no wallet process to keep
+      alive. <code>pecu</code> asks a public RPC endpoint questions and hands it
+      finished transaction bytes. That is the whole architecture.
+    </p>
+
+    <div class="cards">
+      <div class="card">
+        <h3>Starts in milliseconds</h3>
+        <p><code>pecu id show VRSCTEST@</code> answers in about the time
+           <code>curl</code> to the same node would take. There is nothing to warm up.</p>
+      </div>
+      <div class="card">
+        <h3>Keys never leave the machine</h3>
+        <p>Generated locally, encrypted at rest with Argon2id and ChaCha20-Poly1305,
+           signed in process. The node is never asked to hold, unlock or use a key.</p>
+      </div>
+      <div class="card">
+        <h3>One URL to point somewhere else</h3>
+        <p><code>--node</code>, an environment variable or a config file. Your own
+           daemon works exactly as well as a public one; it is the same interface.</p>
+      </div>
+      <div class="card">
+        <h3>Built to teach the SDK</h3>
+        <p>Every command takes <code>--explain</code>, which prints the exact
+           <a href="https://github.com/chainvue/verus-rust-sdk">verus-sdk</a> calls
+           it just made.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="reading">
+  <div class="section-inner">
+    <p class="eyebrow">Reading the chain</p>
+    <h2>It tells you what things mean.</h2>
+    <p class="sub">
+      Most of the value is not in fetching data — any HTTP client does that. It is in
+      saying what the data implies, at the moment you are about to act on it.
+    </p>
+
+    <div class="demo-list">
+      <div>
+        <h3>An identity, and whether it can be revoked at all</h3>
+        <p>
+          An identity that is its own recovery authority cannot be revoked: consensus
+          refuses a revocation nobody could undo. Nothing in the raw RPC reply says so.
+          The last line does.
+        </p>
+        <!--demo:id-->
+      </div>
+
+      <div>
+        <h3>A transaction, output by output</h3>
+        <p>
+          A real VRSCTEST currency launch — seven outputs, one of which <em>holds a
+          VerusID</em> and one of which holds reserves. Output <code>#2</code> is why
+          this command exists: an undecodable CryptoCondition that may hold currency,
+          called out rather than printed as an empty <code>0.00000000</code>.
+        </p>
+        <!--demo:tx-->
+      </div>
+
+      <div>
+        <h3>A balance you can actually spend</h3>
+        <p>
+          Spendable, withheld, in-conditions and every token on the address, kept
+          apart — because a balance that adds them together is a balance you cannot
+          spend from.
+        </p>
+        <!--demo:wallet-->
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="writing">
+  <div class="section-inner">
+    <p class="eyebrow">Writing to the chain</p>
+    <h2>Nothing irreversible happens quietly.</h2>
+    <p class="sub">
+      Every spending command builds a panel first, names what cannot be undone, and
+      then asks. <code>--dry-run</code> stops after signing, so you can read the whole
+      thing before a single byte is broadcast.
+    </p>
+
+    <div class="demo-list">
+      <div>
+        <h3>Send</h3>
+        <p>Built and signed and stopped. Nothing broadcast, nothing written.</p>
+        <!--demo:send-->
+      </div>
+
+      <div>
+        <h3>Send a token</h3>
+        <p>
+          <code>--currency</code> moves a token instead of the chain's own coins. The
+          amount is labelled with what is actually moving; the fee stays in VRSCTEST,
+          because that is what the miner is paid in. The token-carrying outputs read
+          <code>0.00000000 VRSCTEST</code> because a token rides in the output's
+          script, not its value.
+        </p>
+        <!--demo:send-token-->
+      </div>
+
+      <div>
+        <h3>Register a VerusID</h3>
+        <p>
+          Two transactions: one commits to the name, a second claims it once the first
+          confirms. The reservation is written to disk <em>before</em> the commitment
+          is broadcast, so Ctrl-C, a timeout or a dead connection all leave a
+          registration the same command picks up. That is not theoretical — an earlier
+          run lost its node mid-wait and resumed from the file.
+        </p>
+        <!--demo:register-->
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="air-gap">
+  <div class="section-inner">
+    <div class="split split-wide">
+      <div>
+        <p class="eyebrow">Air gap</p>
+        <h2>Three commands, three machines.</h2>
+        <p class="sub">
+          The machine holding the key never opens a socket. The machines that talk to
+          the network never see a key. Each step also speaks QR codes, so the offline
+          machine needs no cable either.
+        </p>
+<pre><code># 1. where the node is. No key on this machine at all.
+pecu plan send --address R… --to R… --amount 1 --out plan.hex
+
+# 2. where the key is. This one opens no socket.
+pecu sign @plan.hex --key cold --out signed.hex
+
+# 3. back where the node is. Carries no key.
+pecu broadcast @signed.hex</code></pre>
+      </div>
+      <div>
+        <ul class="guards">
+          <li>
+            <span class="mark" aria-hidden="true">✓</span>
+            <span><strong>Mainnet ships unable to spend</strong>
+            <span class="body">Spending is off for it by default. Moving real coins
+            takes a deliberate edit, not a forgotten <code>--profile</code>.</span></span>
+          </li>
+          <li>
+            <span class="mark" aria-hidden="true">✓</span>
+            <span><strong>--json is output, not consent</strong>
+            <span class="body">Machine-readable mode refuses to spend without
+            <code>--yes</code>, because the confirmation prompt would go to the stream
+            you are parsing.</span></span>
+          </li>
+          <li>
+            <span class="mark" aria-hidden="true">✓</span>
+            <span><strong>Burned fees are named as burned</strong>
+            <span class="body">A registration fee is not recoverable, and the panel
+            says so in those words before you agree to it.</span></span>
+          </li>
+          <li>
+            <span class="mark" aria-hidden="true">✓</span>
+            <span><strong>Refusals are diagnostics, not stack traces</strong>
+            <span class="body">Each one has a code, an explanation of what the chain
+            would have done, and the next thing to try.</span></span>
+          </li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="status">
+  <div class="section-inner">
+    <p class="eyebrow">Status</p>
+    <h2>Early, and specific about it.</h2>
+    <p class="sub">
+      This is the SDK's example app before it is anything else. The honest version of
+      where it stands:
+    </p>
+
+    <div class="statusgrid">
+      <div class="card">
+        <h3><span class="dot dot-ok"></span>Proven on chain</h3>
+        <p>Identity registration and reads, transaction decoding, key management,
+           balances and UTXO reads, transparent sends.</p>
+      </div>
+      <div class="card">
+        <h3><span class="dot dot-wait"></span>Built, waiting on a chain</h3>
+        <p><code>--nft</code>, seeded contributions at launch, and paying a token to a
+           VerusID are each refused by a named diagnostic rather than attempted.</p>
+      </div>
+      <div class="card">
+        <h3><span class="dot dot-no"></span>Not in scope</h3>
+        <p>Shielded and z-address operations, marketplace offers.</p>
+      </div>
+    </div>
+
+    <p class="note">
+      <strong>DeFi is currently switched off on both VRSCTEST and VRSC.</strong>
+      While the switch is in force the daemon refuses every currency launch and every
+      conversion, whatever the transaction contains. <code>pecu doctor</code> reads
+      that from the chain's notification oracle and tells you before you sign one —
+      see <a href="status/">Status</a> for what it unblocks.
+    </p>
+  </div>
+</section>
+
+<section class="section" id="start">
+  <div class="section-inner">
+    <h2>Start here</h2>
+    <p class="sub">Rust 1.95, which <code>rust-toolchain.toml</code> pins. No other
+       system dependency.</p>
+<pre><code>git clone https://github.com/chainvue/pecu-cli
+cd pecu-cli
+cargo build --release
+./target/release/pecu doctor</code></pre>
+    <div class="cta" style="margin-top:1.5rem">
+      <a class="btn btn-primary" href="commands/">Read the command reference</a>
+      <a class="btn btn-ghost" href="configuration/">Configuration</a>
+      <a class="btn btn-ghost" href="design/">Design notes</a>
+    </div>
+  </div>
+</section>

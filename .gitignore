@@ -18,3 +18,7 @@
 .env
 .env.*
 !.env.example
+
+# The website is generated from docs/*.md and web/; nothing in it is authored.
+/web/_site/
+/web/.venv/

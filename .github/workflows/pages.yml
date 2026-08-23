@@ -1,0 +1,56 @@
+name: pages
+
+# The site is docs/*.md plus web/. Anything that changes either changes the
+# site; nothing else needs to redeploy it, and a Rust-only commit should not.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'web/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time, and let a newer commit win rather than queueing behind
+# an older one — but never cancel a deploy that is already writing.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install the one dependency
+        run: pip install --disable-pip-version-check markdown==3.7
+
+      # build.py fails on a dangling internal link or a terminal capture whose
+      # class names it could not namespace, so a broken site does not deploy.
+      - name: Build
+        run: python web/build.py
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/_site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

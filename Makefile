@@ -2,7 +2,7 @@
 # Nothing here needs a network connection except the `testnet` target.
 
 .DEFAULT_GOAL := help
-.PHONY: help check fmt fmt-check lint test testnet snapshots gallery build run clean
+.PHONY: help check fmt fmt-check lint test testnet snapshots gallery build run clean site serve
 
 help: ## Show this help
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  \033[32m%-12s\033[0m %s\n", $$1, $$2}'
@@ -40,5 +40,22 @@ build: ## Debug build
 run: ## Run the CLI: make run ARGS="doctor"
 	cargo run -- $(ARGS)
 
+# --- website -----------------------------------------------------------------
+# The site is docs/*.md plus web/. Python-Markdown is the only dependency and it
+# lives in a venv under web/, so nothing is installed system-wide and nothing
+# here touches the Rust build.
+WEB_PY := web/.venv/bin/python
+
+$(WEB_PY):
+	python3 -m venv web/.venv
+	web/.venv/bin/pip install --quiet --disable-pip-version-check markdown==3.7
+
+site: $(WEB_PY) ## Build the website into web/_site
+	$(WEB_PY) web/build.py
+
+serve: $(WEB_PY) ## Build the website and serve it on :8000
+	$(WEB_PY) web/build.py --serve
+
 clean:
 	cargo clean
+	rm -rf web/_site
