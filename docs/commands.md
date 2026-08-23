@@ -8,7 +8,7 @@
 | `pecu wallet balance\|utxos\|history` | Spendable, withheld, token and unconfirmed balances; the transaction log | ✅ done |
 | `pecu tx explain` | Says what every output in a transaction actually *is* | ✅ done |
 | `pecu send` | Transparent sends: native, token, or out of a VerusID's own funds | ✅ done |
-| `pecu plan send` / `pecu sign` / `pecu broadcast` | The air-gap trio, over files or QR codes | ✅ done |
+| `pecu plan send` / `pecu sign` / `pecu broadcast` | The air-gap trio, over files or QR codes — the chain's own coins only, since no builder produces an unsigned token or identity spend | ✅ done |
 | `pecu id show\|register` | Read an identity; register one (two-phase, resumable) | ✅ done |
 | `pecu id update\|revoke\|recover\|unlock` | The rest of the lifecycle, including timelocks | ✅ done |
 | `pecu id login\|publish\|read` | Sign-in with VerusID, and VDXF data | M8 |
@@ -521,10 +521,27 @@ the `error` saying why it is not done — see [Failures, in
 **The guards sit on the two commands that touch the chain.** `plan send` and
 `broadcast` both read `allow_spend`, and `broadcast` also honours `--dry-run` and
 refuses `--json` without `--yes` — the same three rules `pecu send` follows,
-because between them these two *are* `send` taken apart. A plan cannot be
-broadcast, so `plan send` has nothing to stop short of. `sign` is exempt on
-purpose: it opens no socket and a signature alone moves nothing, so the machine
-holding the key needs no profile that is allowed to spend.
+because between them these two *are* `send`'s native mode taken apart. A plan
+cannot be broadcast, so `plan send` has nothing to stop short of. `sign` is
+exempt on purpose: it opens no socket and a signature alone moves nothing, so
+the machine holding the key needs no profile that is allowed to spend.
+
+**The gap carries the chain's own coins, and nothing else.** `pecu send` has
+three modes and the trio takes one of them apart. `plan send` accepts the other
+two flags and refuses each by name, before it opens a socket:
+
+| flag | code | why |
+|---|---|---|
+| `--currency` | `pecu::plan_has_no_token_path` | `prepare_unsigned_send` is the only SDK builder that hands back a partial transaction, and it writes a plain native output. A token rides in an output's script; the SDK's token builders each sign as they build, so there is no unsigned form of a token payment to carry offline. A partial is started with whatever outputs it is handed — what is missing is a builder, not a byte shape |
+| `--from-identity` | `pecu::plan_has_no_identity_path` | what a VerusID holds sits in pay-to-identity outputs, and those inputs are unlocked by a fulfillment rather than by a signature and public key. The partial format has an input kind for exactly that — what is missing is a builder, not a byte shape |
+
+Both exit **1**, the code for a request understood and answered no, and under
+`--json` both are a document on stdout carrying `.error.code`. They used to be
+clap's `unexpected argument`, which exits 2, prints on stderr and reads as a
+misspelling — see [Exit codes](configuration.md#exit-codes). `pecu send` moves
+both, signing on the machine that talks to the node, which is exactly the
+property the gap exists to keep. There is no offline path to either yet, and the
+refusals go when the SDK grows the builders.
 
 #### QR framing
 

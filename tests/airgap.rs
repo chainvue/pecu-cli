@@ -624,3 +624,281 @@ fn a_broadcast_that_did_not_come_back_exits_four() {
         "{document:#}"
     );
 }
+
+// ── what the gap cannot carry ───────────────────────────────────────────────
+//
+// `pecu send` has three modes and the gap carries one of them. The other two
+// used to die in clap as `unexpected argument '--currency' found`, which reads
+// as a misspelling: the wrong sentence, on the wrong stream, with no code for a
+// script and no JSON document under `--json`. These pin the replacement.
+
+/// miette hard-wraps help to the terminal width, and that width differs between
+/// an interactive run and a captured one — so a phrase that sits on one line by
+/// hand straddles two under `cargo test`. Flatten first, so a multi-word
+/// assertion means what it says rather than testing the wrap.
+fn flat(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[test]
+fn a_planned_token_is_refused_by_name() {
+    let home = home();
+    let assertion = pecu(&home)
+        .args([
+            "plan",
+            "send",
+            "--address",
+            ELSEWHERE,
+            "--to",
+            ELSEWHERE,
+            "--amount",
+            "1",
+            "--currency",
+            "TST",
+            "--node",
+            DEAD_NODE,
+        ])
+        .assert()
+        // A local refusal, not clap's usage error: the flag is understood and
+        // the answer is no.
+        .code(1);
+    let stderr = flat(&String::from_utf8_lossy(&assertion.get_output().stderr));
+
+    assert!(stderr.contains("pecu::plan_has_no_token_path"), "{stderr}");
+    // The reason, not just the refusal. Without this the message is a longer
+    // way of saying "unexpected argument".
+    assert!(stderr.contains("no unsigned form"), "{stderr}");
+    assert!(
+        stderr.contains("token builders each sign as they build"),
+        "{stderr}"
+    );
+    // Which layer the gap is in. Without this the reader can conclude the
+    // partial *format* cannot hold a token and file the follow-up upstream
+    // against the wrong thing.
+    assert!(
+        stderr.contains("The partial format is not the blocker"),
+        "{stderr}"
+    );
+    // The remedy is a command, not a flag: typed out against a keystore holding
+    // more than one key, `pecu send --currency` alone stops on the ambiguous
+    // key instead (#45), so `--from` is named here rather than discovered.
+    assert!(
+        stderr.contains("`pecu send --currency NAME@ --amount N --to ADDRESS --from LABEL`"),
+        "{stderr}"
+    );
+    // The honest caveat on it: the command that moves a token signs where the
+    // node is, which is the property being given up.
+    assert!(stderr.contains("the air gap exists to avoid"), "{stderr}");
+    // Names the flag to drop, the way the --contribute and --conversion
+    // refusals do, rather than implying it. `-c VRSCTEST@` — the chain's own
+    // coin, named — lands here too, and "plan the chain's own coins instead"
+    // would read as a contradiction to whoever typed it.
+    assert!(stderr.contains("Plan without --currency"), "{stderr}");
+    // Refused ahead of the node: nothing was asked of the endpoint.
+    assert!(!stderr.contains("127.0.0.1"), "{stderr}");
+}
+
+#[test]
+fn planning_from_an_identity_is_refused_by_name() {
+    let home = home();
+    let assertion = pecu(&home)
+        .args([
+            "plan",
+            "send",
+            "--address",
+            ELSEWHERE,
+            "--to",
+            ELSEWHERE,
+            "--amount",
+            "1",
+            "--from-identity",
+            "bob@",
+            "--node",
+            DEAD_NODE,
+        ])
+        .assert()
+        .code(1);
+    let stderr = flat(&String::from_utf8_lossy(&assertion.get_output().stderr));
+
+    assert!(
+        stderr.contains("pecu::plan_has_no_identity_path"),
+        "{stderr}"
+    );
+    // What the identity was, so the sentence is about the thing that was asked
+    // for rather than about the flag in the abstract.
+    assert!(stderr.contains("bob@"), "{stderr}");
+    // The mechanism: this is where the funds are, and why a plan cannot see
+    // them. It is the same sentence the shortfall on an identity --address
+    // reports, which is why it is written once.
+    assert!(stderr.contains("pay-to-identity outputs"), "{stderr}");
+    assert!(stderr.contains("only the plain P2PKH kind"), "{stderr}");
+    // A CryptoCondition input still has a scriptSig — the fulfillment goes
+    // inside it — so the contrast is with what a P2PKH input carries, not with
+    // having a scriptSig at all.
+    assert!(
+        stderr.contains("unlocked by a fulfillment rather than by a signature and public key"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("`pecu send --from-identity bob@ --amount N --to ADDRESS --from LABEL`"),
+        "{stderr}"
+    );
+    // A command the reader can paste, which is the whole point of naming it.
+    assert!(
+        stderr.contains("`pecu wallet balance --address bob@`"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("Plan without --from-identity"), "{stderr}");
+    assert!(!stderr.contains("127.0.0.1"), "{stderr}");
+}
+
+/// `--from-identity ""` is the same refusal, and it must not quote an empty
+/// value back or print a remedy with its argument missing.
+#[test]
+fn an_empty_identity_is_refused_without_quoting_nothing() {
+    let home = home();
+    let assertion = pecu(&home)
+        .args([
+            "plan",
+            "send",
+            "--address",
+            ELSEWHERE,
+            "--to",
+            ELSEWHERE,
+            "--amount",
+            "1",
+            "--from-identity",
+            "   ",
+            "--node",
+            DEAD_NODE,
+        ])
+        .assert()
+        .code(1);
+    let stderr = flat(&String::from_utf8_lossy(&assertion.get_output().stderr));
+
+    assert!(
+        stderr.contains("pecu::plan_has_no_identity_path"),
+        "{stderr}"
+    );
+    // No empty backticks anywhere, in the title or in a remedy.
+    assert!(!stderr.contains("``"), "{stderr}");
+    assert!(stderr.contains("spends what a VerusID holds"), "{stderr}");
+    // The balance remedy names an identity or it is not printed at all: `pecu
+    // wallet balance --address` with nothing after it does not run.
+    assert!(!stderr.contains("wallet balance"), "{stderr}");
+    assert!(
+        stderr.contains("`pecu send --from-identity NAME@ --amount N --to ADDRESS --from LABEL`"),
+        "{stderr}"
+    );
+}
+
+/// Under `--json` a refusal is a document a script can branch on, not clap text
+/// on stderr and an empty stdout (#49).
+#[test]
+fn a_refused_plan_is_one_json_document_with_a_code() {
+    let home = home();
+    let assertion = pecu(&home)
+        .args([
+            "plan",
+            "send",
+            "--address",
+            ELSEWHERE,
+            "--to",
+            ELSEWHERE,
+            "--amount",
+            "1",
+            "--currency",
+            "TST",
+            "--node",
+            DEAD_NODE,
+            "--json",
+        ])
+        .assert()
+        .code(1);
+    let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+
+    let documents: Vec<serde_json::Value> = serde_json::Deserializer::from_str(&stdout)
+        .into_iter::<serde_json::Value>()
+        .map(|document| document.unwrap_or_else(|error| panic!("not json: {error}\n{stdout}")))
+        .collect();
+    assert_eq!(documents.len(), 1, "one document, not two:\n{stdout}");
+    assert_eq!(
+        documents[0]["error"]["code"],
+        "pecu::plan_has_no_token_path"
+    );
+    assert!(
+        documents[0]["error"]["help"]
+            .as_str()
+            .expect("help")
+            .contains("`pecu send --currency NAME@ --amount N --to ADDRESS --from LABEL`"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn a_refused_identity_plan_is_one_json_document_with_a_code() {
+    let home = home();
+    let assertion = pecu(&home)
+        .args([
+            "plan",
+            "send",
+            "--address",
+            ELSEWHERE,
+            "--to",
+            ELSEWHERE,
+            "--amount",
+            "1",
+            "--from-identity",
+            "bob@",
+            "--node",
+            DEAD_NODE,
+            "--json",
+        ])
+        .assert()
+        .code(1);
+    let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+
+    let documents: Vec<serde_json::Value> = serde_json::Deserializer::from_str(&stdout)
+        .into_iter::<serde_json::Value>()
+        .map(|document| document.unwrap_or_else(|error| panic!("not json: {error}\n{stdout}")))
+        .collect();
+    assert_eq!(documents.len(), 1, "one document, not two:\n{stdout}");
+    assert_eq!(
+        documents[0]["error"]["code"],
+        "pecu::plan_has_no_identity_path"
+    );
+    assert!(
+        documents[0]["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("bob@"),
+        "{stdout}"
+    );
+}
+
+/// The refusal a reader should never have to trigger. `--help` says which two
+/// flags the gap does not carry before either is typed, the way the launch
+/// guards do.
+#[test]
+fn plan_send_help_says_which_flags_are_refused() {
+    let home = home();
+    let assertion = pecu(&home)
+        .args(["plan", "send", "--help"])
+        .assert()
+        .success();
+    let stdout = flat(&String::from_utf8_lossy(&assertion.get_output().stdout));
+
+    assert!(stdout.contains("--currency"), "{stdout}");
+    assert!(stdout.contains("--from-identity"), "{stdout}");
+    // The word alone would pass on a flag documented as working, so pin the
+    // clause that carries the reason: softening either back into a description
+    // of what the flag would do is the defect this issue was about.
+    assert!(
+        stdout.contains("Refused: a token rides in an output's script"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("Refused: what a VerusID holds sits in pay-to-identity outputs"),
+        "{stdout}"
+    );
+}

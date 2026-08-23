@@ -22,3 +22,6 @@
 # The website is generated from docs/*.md and web/; nothing in it is authored.
 /web/_site/
 /web/.venv/
+
+# Python bytecode from the site build
+__pycache__/
