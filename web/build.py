@@ -640,11 +640,32 @@ def build():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--serve", action="store_true", help="serve on :8000 afterwards")
+    parser.add_argument("--serve", action="store_true", help="serve the output afterwards")
+    parser.add_argument("--port", type=int, default=8000, help="port for --serve (default 8000)")
     args = parser.parse_args()
     out = build()
-    if args.serve:
-        os.chdir(out)
-        import http.server
-        print("http://localhost:8000")
-        http.server.test(HandlerClass=http.server.SimpleHTTPRequestHandler, port=8000, bind="127.0.0.1")
+    if not args.serve:
+        raise SystemExit(0)
+
+    import functools
+    import http.server
+
+    # `directory=` rather than chdir. The build deletes and recreates _site, so a
+    # server that chdir'd into it once is left holding an unlinked inode: it goes
+    # on accepting connections and answers none of them, and the next `make
+    # serve` cannot bind because the corpse still owns the port. Resolving the
+    # path per request means a rebuild in another terminal is simply picked up.
+    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(out))
+    try:
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", args.port), handler)
+    except OSError as error:
+        raise SystemExit(
+            f"cannot bind 127.0.0.1:{args.port} ({error.strerror}).\n"
+            f"  what is holding it:  lsof -nP -iTCP:{args.port}\n"
+            f"  or pick another:     make serve PORT={args.port + 1}")
+
+    print(f"http://localhost:{args.port}  (ctrl-c to stop)")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print()

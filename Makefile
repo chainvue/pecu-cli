@@ -53,8 +53,9 @@ $(WEB_PY):
 site: $(WEB_PY) ## Build the website into web/_site
 	$(WEB_PY) web/build.py
 
-serve: $(WEB_PY) ## Build the website and serve it on :8000
-	$(WEB_PY) web/build.py --serve
+PORT ?= 8000
+serve: $(WEB_PY) ## Build the website and serve it: make serve [PORT=8000]
+	$(WEB_PY) web/build.py --serve --port $(PORT)
 
 clean:
 	cargo clean
