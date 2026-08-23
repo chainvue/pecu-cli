@@ -20,12 +20,15 @@ use std::path::{Path, PathBuf};
 use clap::CommandFactory;
 use miette::Diagnostic;
 use thiserror::Error;
+use verus_sdk::money::DEFAULT_FEE_PER_KB;
+use verus_sdk::verus_tx::estimate_fee;
+use verus_sdk::verus_tx::fee::DUST_THRESHOLD;
 
 use crate::cli::{
     Cli, Command, CurrencyCommand, DevCommand, IdCommand, PlanCommand, TxCommand, WalletCommand,
 };
 use crate::config::{Paths, Settings};
-use crate::ui::Ui;
+use crate::ui::{fmt, Ui};
 
 /// A command that exists in the tree but has not been built yet.
 #[derive(Debug, Error, Diagnostic)]
@@ -183,6 +186,95 @@ fn uncertain_broadcast_text(txid: &str, saved: Option<&Path>) -> String {
          `pecu tx explain {txid}` decodes it if the node has it, and says it knows no such \
          transaction if nothing was ever accepted.{bytes}"
     )
+}
+
+/// The fee a shortfall message has in hand, and how sure of it that message may
+/// sound.
+///
+/// The distinction is the whole point. A fee taken out of the builder's own
+/// refusal priced the exact transaction that was refused, so what is left after
+/// it is a ceiling: retrying at that figure selects the same inputs, pays the
+/// same fee and leaves no change. A fee worked out *before* selection ran is
+/// deliberately high — see [`estimated_native_fee`] — so the same subtraction
+/// is a floor and nothing more. Calling that a maximum would be a smaller
+/// version of the "needed including fee" wording this replaced: a sentence
+/// asserting more than the code behind it knows.
+pub(crate) enum Fee {
+    /// What the builder charged, read back out of its refusal.
+    Charged(u64),
+    /// What a transaction of this shape would cost at most, sized before the
+    /// inputs were chosen.
+    Estimated(u64),
+}
+
+/// What the fee leaves for a payment, said in a sentence.
+///
+/// Shared by `pecu send` and `pecu plan send` because the arithmetic is the
+/// same on both: the fee is charged on top of the amount, never taken out of
+/// it, so the number worth printing is what is left after it — not the number
+/// that was just refused.
+pub(crate) fn what_the_fee_leaves(available: u64, fee: Fee) -> String {
+    const ON_TOP: &str = "The fee is charged on top of the amount rather than taken out of it";
+
+    // With nothing to spend, where the fee sits explains nothing: the payment
+    // fails identically either way, and the clause is filler in front of a
+    // reader who has just been told the address is empty.
+    if available == 0 {
+        return "There is nothing at this address to pay with.".to_string();
+    }
+
+    let (fee, exact) = match fee {
+        Fee::Charged(fee) => (fee, true),
+        Fee::Estimated(fee) => (fee, false),
+    };
+    match available.checked_sub(fee) {
+        None | Some(0) => {
+            format!("{ON_TOP}, and what is here does not cover a payment and a fee as well.")
+        }
+        // An output this small is dust, which a node is entitled to refuse
+        // whatever the arithmetic says. Naming it as an amount that works
+        // would be the same overclaim as naming an amount the fee eats.
+        Some(most) if most <= DUST_THRESHOLD => format!(
+            "{ON_TOP}, and the {} it would leave is small enough that a node may refuse the \
+             output as dust.",
+            fmt::sats(most)
+        ),
+        Some(most) if exact => {
+            format!(
+                "{ON_TOP}, so the most that can move from here is {}.",
+                fmt::sats(most)
+            )
+        }
+        Some(most) => format!(
+            "{ON_TOP}, so a payment of {} will go through — perhaps a little more, since the \
+             fee is not settled until the inputs are chosen and the recipient's output is \
+             sized.",
+            fmt::sats(most)
+        ),
+    }
+}
+
+/// What a one-recipient native send of this shape would pay in fees, erring
+/// high.
+///
+/// Sized as though every output were a CryptoCondition, which is true when the
+/// recipient is a VerusID and not when it is an R-address, where the builder
+/// prices 34 bytes rather than 200 — a flat 3,320 satoshis of overshoot from
+/// five inputs up. It is also priced over *every* output the address holds,
+/// where selection stops as soon as it has enough. Both err the same way, and
+/// [`Fee::Estimated`] is what keeps the sentence built on it from claiming
+/// otherwise: overstating the fee understates the payment, so the figure named
+/// is one that goes through rather than one that is refused a second time —
+/// which is the whole complaint this exists to answer. Below four inputs both
+/// output shapes land on the same 10,000-satoshi floor in any case.
+///
+/// `u64::MAX` on overflow rather than some fallback figure: an input count that
+/// overflows the size arithmetic is not a transaction anybody can pay for, and
+/// saying nothing works beats naming an amount that does not.
+pub(crate) fn estimated_native_fee(utxos: usize) -> u64 {
+    // One recipient and the change output, which is the shape `prepare_send`
+    // builds and the count `select_utxos` prices its fee at.
+    estimate_fee(utxos as u64, 2, DEFAULT_FEE_PER_KB, true).unwrap_or(u64::MAX)
 }
 
 pub fn dispatch(cli: Cli) -> miette::Result<()> {

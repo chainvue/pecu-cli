@@ -30,12 +30,12 @@ use thiserror::Error;
 use verus_sdk::cosign::{PartialTransaction, Summary};
 use verus_sdk::money::Amount;
 use verus_sdk::network::{broadcast as submit, prepare_unsigned_send, FlowError};
-use verus_sdk::verus_keys::Address;
+use verus_sdk::verus_keys::{Address, AddressKind};
 
 use crate::cli::{BroadcastArgs, Globals, PlanSendArgs, QrOut, SignArgs};
 use crate::cmd::tx;
-use crate::cmd::uncertain_broadcast_advice;
 use crate::cmd::wallet;
+use crate::cmd::{estimated_native_fee, uncertain_broadcast_advice, what_the_fee_leaves, Fee};
 use crate::config::Settings;
 use crate::keystore::{self, Keystore};
 use crate::node;
@@ -116,6 +116,10 @@ pub enum AirgapError {
     )]
     NeedsYes,
 
+    #[error("not enough spendable funds at {address}")]
+    #[diagnostic(code(pecu::insufficient_funds), help("{advice}"))]
+    Insufficient { address: String, advice: String },
+
     #[error("{what} failed")]
     #[diagnostic(code(pecu::flow_failed), help("{advice}"))]
     Flow {
@@ -143,6 +147,111 @@ fn flow(what: &'static str, source: FlowError) -> AirgapError {
         advice,
         source: Box::new(source),
     }
+}
+
+/// `pecu send`'s closing sentence ends "cannot be moved by this key". Planning
+/// is watch-only and holds no key at all, so this one blames nothing but the
+/// address — and says only what is true of a *watch-only* shortfall: value the
+/// node withholds. It deliberately does not repeat `send`'s "or held by a
+/// VerusID", which reads as a contradiction here, since resolving a VerusID
+/// name is exactly what `--address` does. What is true of that case is worth a
+/// message of its own, below.
+fn rest_is_elsewhere(address: &str) -> String {
+    format!(
+        "`pecu wallet balance --address {address}` shows what is there: value the node reports \
+         as withheld — coinbase still maturing, or already spent by a transaction that has not \
+         confirmed — cannot be planned."
+    )
+}
+
+/// Planning from a VerusID is not a shortfall that funding it would fix.
+///
+/// `plan send --address bob@` resolves the name, so the request looks like it
+/// worked and then reports nothing to spend. The reason is structural:
+/// `prepare_unsigned_send` funds through `funding::spendable`, which keeps only
+/// P2PKH outputs, and what an identity holds is a pay-to-identity output. So
+/// the figure is always zero, and "add funds" is the one remedy that cannot
+/// help.
+fn a_verusid_holds_it_differently(address: &str) -> String {
+    format!(
+        "{address} is a VerusID, and what a VerusID holds sits in pay-to-identity outputs. An \
+         unsigned plan can spend only the plain P2PKH kind, so planning finds none of it, \
+         however much the identity is worth — funding it would not change that. `pecu send \
+         --from-identity` moves those funds instead, signing with one of the identity's primary \
+         keys; `pecu wallet balance --address {address}` shows what it holds."
+    )
+}
+
+/// A shortfall is not a node problem, and `pecu plan send` used to report every
+/// one of them as one.
+///
+/// The same two variants and the same two readings as `pecu send`'s
+/// [`insufficient_or_flow`](crate::cmd::send) — planning goes through the same
+/// `funding::require` and the same coin selection, so the pre-flight `needed`
+/// excludes the fee here too, and selection's `required` includes it. There is
+/// no token path to plan yet, so `TxError::InsufficientTokens` is deliberately
+/// not diverted: it cannot arrive, and if it ever did there would be no name to
+/// print.
+fn insufficient_or_flow(
+    what: &'static str,
+    from: &Address,
+    amount: Amount,
+    source: FlowError,
+) -> AirgapError {
+    use verus_sdk::verus_tx::TxError;
+
+    if let FlowError::InsufficientFunds {
+        needed,
+        available,
+        address,
+        utxos,
+    } = &source
+    {
+        if from.kind() == AddressKind::Identity {
+            return AirgapError::Insufficient {
+                address: address.clone(),
+                advice: a_verusid_holds_it_differently(address),
+            };
+        }
+        return AirgapError::Insufficient {
+            address: address.clone(),
+            advice: format!(
+                "{} spendable across {utxos} output(s), and this plans a payment of {}. {} {}",
+                fmt::amount(*available),
+                fmt::amount(*needed),
+                what_the_fee_leaves(
+                    available.to_sat(),
+                    Fee::Estimated(estimated_native_fee(*utxos))
+                ),
+                rest_is_elsewhere(address),
+            ),
+        };
+    }
+
+    if let FlowError::Tx(TxError::InsufficientFunds {
+        required,
+        available,
+    }) = &source
+    {
+        let fee = required.saturating_sub(amount.to_sat());
+        let address = from.to_string();
+        return AirgapError::Insufficient {
+            advice: format!(
+                "{} spendable, and {} plus a {} fee comes to {}. {} {}",
+                fmt::sats(*available),
+                fmt::amount(amount),
+                fmt::sats(fee),
+                fmt::sats(*required),
+                // Selection priced the transaction it refused, so what is left
+                // after that fee is the exact ceiling and may be named as one.
+                what_the_fee_leaves(*available, Fee::Charged(fee)),
+                rest_is_elsewhere(&address),
+            ),
+            address,
+        };
+    }
+
+    flow(what, source)
 }
 
 // ── plan ────────────────────────────────────────────────────────────────────
@@ -204,7 +313,7 @@ fn plan_send_inner(
         amount.to_coins_string()
     ));
     let partial = prepare_unsigned_send(&node, &from, &args.to, amount)
-        .map_err(|source| flow("planning the payment", source))?;
+        .map_err(|source| insufficient_or_flow("planning the payment", &from, amount, source))?;
     ui.sdk(format!(
         "PartialTransaction with {} input(s), {} output(s)",
         partial.inputs.len(),
@@ -760,5 +869,176 @@ mod tests {
         };
         assert!(advice.contains("tx explain 9c1d55"));
         assert!(!advice.contains("doctor"));
+    }
+
+    /// The address a plan pays from, parsed. Every shortfall message is
+    /// written for one, and the identity case says something different.
+    fn paying(address: &str) -> Address {
+        address.parse().expect("a valid address")
+    }
+
+    /// `plan send` had no shortfall message at all: every one of them, at
+    /// either level, was reported as a failure of a node that was answering
+    /// perfectly well.
+    #[test]
+    fn a_plan_that_cannot_be_funded_does_not_blame_the_node() {
+        let refused = insufficient_or_flow(
+            "planning the payment",
+            &paying("RXQXEHraYWzrNy65Ni1fiEpd7bY1bqDmWt"),
+            Amount::from_sat(100_000_000),
+            FlowError::InsufficientFunds {
+                needed: Amount::from_sat(100_000_000),
+                available: Amount::from_sat(0),
+                address: "RXQXEHraYWzrNy65Ni1fiEpd7bY1bqDmWt".into(),
+                utxos: 0,
+            },
+        );
+        let AirgapError::Insufficient { address, advice } = refused else {
+            panic!("a shortfall is not a flow failure: {refused:?}");
+        };
+        assert_eq!(address, "RXQXEHraYWzrNy65Ni1fiEpd7bY1bqDmWt");
+        assert!(!advice.contains("doctor"), "{advice}");
+        assert!(!advice.contains("including fee"), "{advice}");
+        assert!(
+            advice.contains("There is nothing at this address to pay with"),
+            "{advice}"
+        );
+        // Where the fee sits explains nothing when there is nothing at all.
+        assert!(!advice.contains("charged on top"), "{advice}");
+        // Planning holds no key, so it cannot be the key's fault.
+        assert!(!advice.contains("this key"), "{advice}");
+    }
+
+    /// The remedy has to be runnable as printed. A bare `pecu wallet balance`
+    /// refuses as soon as the keystore holds more than one key, and a planned
+    /// address is watch-only and often no stored key at all.
+    #[test]
+    fn the_remedy_names_the_address_it_wants_looked_up() {
+        let refused = insufficient_or_flow(
+            "planning the payment",
+            &paying("RXQXEHraYWzrNy65Ni1fiEpd7bY1bqDmWt"),
+            Amount::from_sat(100_000_000),
+            FlowError::InsufficientFunds {
+                needed: Amount::from_sat(100_000_000),
+                available: Amount::from_sat(10_000_000),
+                address: "RXQXEHraYWzrNy65Ni1fiEpd7bY1bqDmWt".into(),
+                utxos: 1,
+            },
+        );
+        let AirgapError::Insufficient { advice, .. } = refused else {
+            panic!("a shortfall is not a flow failure: {refused:?}");
+        };
+        assert!(
+            advice.contains("`pecu wallet balance --address RXQXEHraYWzrNy65Ni1fiEpd7bY1bqDmWt`"),
+            "{advice}"
+        );
+    }
+
+    /// The pre-flight figure is an estimate, priced high, so the sentence built
+    /// on it must not claim to name a maximum — that is the "including fee"
+    /// mistake in a different sentence.
+    #[test]
+    fn an_estimated_fee_does_not_claim_to_name_the_ceiling() {
+        let refused = insufficient_or_flow(
+            "planning the payment",
+            &paying("RXQXEHraYWzrNy65Ni1fiEpd7bY1bqDmWt"),
+            Amount::from_sat(100_000_000),
+            FlowError::InsufficientFunds {
+                needed: Amount::from_sat(100_000_000),
+                available: Amount::from_sat(50_000_000),
+                address: "RXQXEHraYWzrNy65Ni1fiEpd7bY1bqDmWt".into(),
+                utxos: 2,
+            },
+        );
+        let AirgapError::Insufficient { advice, .. } = refused else {
+            panic!("a shortfall is not a flow failure: {refused:?}");
+        };
+        // Two inputs, so the estimate sits on the 10,000-satoshi floor.
+        assert!(
+            advice.contains("a payment of 0.49990000 will go through"),
+            "{advice}"
+        );
+        assert!(!advice.contains("the most that can move"), "{advice}");
+    }
+
+    /// Planning from a VerusID resolves, then finds nothing — and the old
+    /// closing sentence told the reader that VerusID-held value cannot be
+    /// planned from this address, which is the thing they had just asked for.
+    #[test]
+    fn planning_from_a_verusid_says_why_it_is_empty_and_what_moves_it() {
+        let identity = Address::new(AddressKind::Identity, [0x3f; 20]);
+        let refused = insufficient_or_flow(
+            "planning the payment",
+            &identity,
+            Amount::from_sat(100_000_000),
+            FlowError::InsufficientFunds {
+                needed: Amount::from_sat(100_000_000),
+                available: Amount::from_sat(0),
+                address: identity.to_string(),
+                utxos: 0,
+            },
+        );
+        let AirgapError::Insufficient { address, advice } = refused else {
+            panic!("a shortfall is not a flow failure: {refused:?}");
+        };
+        assert_eq!(address, identity.to_string());
+        assert!(!advice.contains("doctor"), "{advice}");
+        assert!(advice.contains("pay-to-identity outputs"), "{advice}");
+        assert!(advice.contains("--from-identity"), "{advice}");
+        // Adding coins to an i-address does not make a plan possible, so the
+        // message must not read as "top it up and try again".
+        assert!(
+            advice.contains("funding it would not change that"),
+            "{advice}"
+        );
+    }
+
+    #[test]
+    fn a_plan_the_fee_tips_over_names_the_amount_that_works() {
+        let refused = insufficient_or_flow(
+            "planning the payment",
+            &paying("RQC1EG3GhZ9pvT9YgCp3YvxyYBsdb4FYfH"),
+            Amount::from_sat(39_999_979_600),
+            FlowError::Tx(verus_sdk::verus_tx::TxError::InsufficientFunds {
+                required: 39_999_989_600,
+                available: 39_999_979_600,
+            }),
+        );
+        let AirgapError::Insufficient { address, advice } = refused else {
+            panic!("a shortfall is not a flow failure: {refused:?}");
+        };
+        assert_eq!(address, "RQC1EG3GhZ9pvT9YgCp3YvxyYBsdb4FYfH");
+        assert!(!advice.contains("doctor"), "{advice}");
+        assert!(advice.contains("0.00010000 fee"), "{advice}");
+        // The fee here priced the refused transaction, so this one is exact.
+        assert!(
+            advice.contains("the most that can move from here is 399.99969600"),
+            "{advice}"
+        );
+    }
+
+    /// Widening far enough to swallow a genuine failure would be the same
+    /// mistake as the one being fixed, pointing the other way.
+    #[test]
+    fn a_genuine_planning_failure_still_reaches_the_node_remedy() {
+        use verus_sdk::verus_tx::TxError;
+        let failures = [
+            FlowError::Tx(TxError::ValueOverflow),
+            FlowError::Tx(TxError::UnsupportedRecipient),
+            FlowError::Stalled("the node stopped answering".into()),
+        ];
+        for source in failures {
+            let described = source.to_string();
+            let refused = insufficient_or_flow(
+                "planning the payment",
+                &paying("RQC1EG3GhZ9pvT9YgCp3YvxyYBsdb4FYfH"),
+                Amount::from_sat(1),
+                source,
+            );
+            let AirgapError::Flow { advice, .. } = refused else {
+                panic!("{described} is not a shortfall, but was reported as one");
+            };
+            assert!(advice.contains("doctor"), "{described}: {advice}");
+        }
     }
 }
