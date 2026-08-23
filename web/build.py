@@ -224,13 +224,20 @@ def capture(name, command, caption):
                       "animation-iteration-count:1;animation-fill-mode:forwards")
     if "animation-iteration-count:1" not in svg:
         raise SystemExit(f"{name}: capture is not the looping shape this expects")
+    # Both halves are plain text and both get escaped here. `<txid>` was once
+    # written as `&lt;txid&gt;` to survive the HTML, went through escape() a
+    # second time and shipped as literal `&lt;txid&gt;` on the page. Write what
+    # the reader should see; the assertion below catches anyone helping.
+    if any(entity in command + caption for entity in ("&lt;", "&gt;", "&amp;", "&#")):
+        raise SystemExit(f"{name}: caption is pre-escaped — write the plain text instead")
+
     return f"""<figure class="term" data-term style="--term-end:{end_frame(svg)}px;--term-dur:{duration(svg)}s">
   <div class="term-screen">{svg}</div>
   <button class="term-replay" type="button" data-replay hidden>
     <svg viewBox="0 0 16 16" aria-hidden="true" width="13" height="13"><path fill="currentColor" d="M8 3V0.5L4.5 3.75 8 7V4.5a3.5 3.5 0 1 1-3.5 3.5H3a5 5 0 1 0 5-5Z"/></svg>
     Replay
   </button>
-  <figcaption><code>{html.escape(command)}</code> — {caption}</figcaption>
+  <figcaption><code>{html.escape(command)}</code> — {html.escape(caption)}</figcaption>
 </figure>"""
 
 
@@ -240,7 +247,7 @@ def capture(name, command, caption):
 DEMOS = {
     "doctor": ("pecu doctor", "where the files are, what the binary is, whether the node answers"),
     "id": ("pecu id show VRSCTEST@", "authorities, timelock state, and whether the identity can be revoked at all"),
-    "tx": ("pecu tx explain &lt;txid&gt;", "a real VRSCTEST currency launch, output by output"),
+    "tx": ("pecu tx explain <txid>", "a real VRSCTEST currency launch, output by output"),
     "wallet": ("pecu wallet balance", "spendable, withheld and token balances kept apart"),
     "register": ("pecu id register", "both phases of a VerusID registration, resumable in between"),
     "send": ("pecu send --dry-run", "built and signed, and stopped before anything is broadcast"),
