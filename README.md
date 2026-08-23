@@ -14,7 +14,7 @@ currency operations — from one binary.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/media/doctor-dark.svg">
-  <img alt="pecu doctor reporting profile, node, build and chain tip" src="docs/media/doctor-light.svg">
+  <img alt="pecu doctor reporting profile, node, build, chain tip and DeFi being switched off" src="docs/media/doctor-light.svg">
 </picture>
 
 ## No full node
@@ -45,7 +45,7 @@ cargo build --release
 
 | Command | Does |
 |---|---|
-| `pecu doctor` | Node reachability, chain tip, config paths, build info |
+| `pecu doctor` | Node reachability, chain tip, whether DeFi is switched off, config paths, build info |
 | `pecu key gen\|import\|list\|show\|export\|phrase` | Encrypted keystore |
 | `pecu wallet balance\|utxos\|history` | Spendable, withheld, token and unconfirmed balances |
 | `pecu tx explain` | Says what every output in a transaction actually *is* |
