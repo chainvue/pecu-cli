@@ -283,11 +283,36 @@ def flatten_toc(tokens, depth=0, out=None):
     return out
 
 
+DOC_SLUGS = {page["source"]: page["slug"] for page in PAGES if page["source"]}
+
+
 def rewrite_links(body, page_slug):
     for old, new in ANCHOR_MOVES.items():
         body = body.replace(f'href="{old}"', f'href="../{new}"')
-    # Every off-site link opens in place; only the repo/SDK chrome links get the
-    # new-tab treatment, and those are written by hand below.
+
+    # `[text](configuration.md#anchor)` is how one document links to another in
+    # Markdown, and it is what GitHub renders correctly — so it is what the docs
+    # are written with. The site serves those documents as directories, so the
+    # same link has to become `../configuration/#anchor` here.
+    #
+    # This was missing, and the failure mode was the bad one: the link checker
+    # rejected the built site rather than the site shipping a dead link, so two
+    # deploys failed on main before anyone looked. Correct, but only after the
+    # fact — hence the check below that no `.md` link survives at all.
+    def to_page(match):
+        source, anchor = match.group(1), match.group(2) or ""
+        slug = DOC_SLUGS.get(source)
+        if slug is None:
+            return match.group(0)
+        return f'href="../{slug}/{anchor}"'
+
+    body = re.sub(r'href="([a-z-]+\.md)(#[^"]*)?"', to_page, body)
+
+    stragglers = re.findall(r'href="([^"]*\.md[^"]*)"', body)
+    if stragglers:
+        raise SystemExit(
+            f"{page_slug or 'index'}: link to a .md file the site does not serve: "
+            f"{sorted(set(stragglers))}")
     return body
 
 
