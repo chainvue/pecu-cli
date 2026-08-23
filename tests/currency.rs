@@ -199,8 +199,77 @@ fn a_currency_nobody_defined_is_an_answer_not_a_crash() {
     pecu(&home)
         .args(["currency", "show", "nothing-is-called-this-surely@"])
         .assert()
-        .failure()
+        // The daemon read the name and said no. `1` is what that means, and it
+        // is the half of the pair below that needs a node to answer at all.
+        .code(1)
         .stderr(contains("nothing on this chain"));
+}
+
+/// The other half: a node that never answered has denied nothing. Reporting it
+/// as "no such currency" was wrong before and is worse now that the exit code
+/// carries the same claim — a script reading `1` would stop looking, and the
+/// currency may exist perfectly well.
+#[test]
+fn an_unreachable_node_is_not_a_currency_that_does_not_exist() {
+    let home = home();
+    let assertion = pecu(&home)
+        .args(["currency", "show", "tok@", "--node", DEAD_NODE, "--json"])
+        .assert()
+        .code(3);
+    let output = assertion.get_output();
+    let document: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("one json document");
+    assert_eq!(document["error"]["code"], "pecu::node_unreachable");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("reading the currency failed"),
+        "the report names the request, not the currency:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The same for the lookups behind the commands that spend. `mint` and
+/// `preconvert` each read a definition through a different call site, and each
+/// one used to flatten a dead node into "nothing on this chain is called that".
+#[test]
+fn a_spend_against_an_unreachable_node_does_not_deny_the_currency() {
+    let home = home();
+    generate(&home, "demo");
+    for args in [
+        vec![
+            "currency",
+            "mint",
+            "tok@",
+            "--to",
+            "RComfCn4wHHsGR8vWBAU7T1r3tHHyxN9Hm",
+            "--amount",
+            "1",
+            "--node",
+            DEAD_NODE,
+            "--json",
+            "--yes",
+        ],
+        vec![
+            "currency",
+            "preconvert",
+            "tok@",
+            "--amount",
+            "1",
+            "--to",
+            "RComfCn4wHHsGR8vWBAU7T1r3tHHyxN9Hm",
+            "--node",
+            DEAD_NODE,
+            "--json",
+            "--yes",
+        ],
+    ] {
+        let assertion = pecu(&home).args(&args).assert().code(3);
+        let document: serde_json::Value =
+            serde_json::from_slice(&assertion.get_output().stdout).expect("one json document");
+        assert_eq!(
+            document["error"]["code"], "pecu::node_unreachable",
+            "{args:?} still blames the currency"
+        );
+    }
 }
 
 /// `--supply` has to become a preallocation, because a token's supply is the

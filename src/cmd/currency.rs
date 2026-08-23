@@ -31,7 +31,7 @@ use verus_sdk::currency::{option, CurrencyDefinition, CurrencyId};
 use verus_sdk::money::{Amount, SATS_PER_COIN as SATOSHIDEN};
 use verus_sdk::network::{
     plan_conversion, prepare_conversion, prepare_launch, prepare_mint, spendable, ChainReader,
-    CurrencySummary, FlowError,
+    CurrencySummary, FlowError, RpcError,
 };
 use verus_sdk::verus_keys::{Address, AddressKind};
 
@@ -535,6 +535,7 @@ fn split_reserve(entry: &str) -> Result<(&str, i32), CurrencyError> {
 fn resolve_reserve(
     ui: &Ui,
     node: &crate::node::Node,
+    url: &str,
     name: &str,
 ) -> Result<CurrencyId, miette::Report> {
     let bad = || CurrencyError::BadReserve {
@@ -545,11 +546,20 @@ fn resolve_reserve(
         Err(_) => {
             let looked_up = name.strip_suffix('@').unwrap_or(name);
             ui.sdk(format!("node.currency_definition({looked_up:?})"));
-            let found =
-                node.currency_definition(looked_up)
-                    .map_err(|_| CurrencyError::NotFound {
+            // Only the daemon answering can mean the reserve does not exist;
+            // see `read_currency`.
+            let found = match node.currency_definition(looked_up) {
+                Ok(found) => found,
+                Err(RpcError::Node { .. }) => {
+                    return Err(CurrencyError::NotFound {
                         name: name.to_string(),
-                    })?;
+                    }
+                    .into())
+                }
+                Err(source) => {
+                    return Err(node::NodeError::request("reading the reserve", url, source).into())
+                }
+            };
             ui.sdk_result(found.currency_id.clone());
             CurrencyId::from_bytes(
                 found
@@ -721,7 +731,7 @@ pub fn show(ui: &Ui, settings: &Settings, name: &str) -> miette::Result<()> {
     // command here takes the `@` form, because that is how a VerusID is
     // written. A currency name cannot contain `@`, so stripping one is always
     // safe and saves the reader from knowing which command wants which.
-    let found = read_currency(ui, &node, name)?;
+    let found = read_currency(ui, &node, &settings.profile.node, name)?;
     ui.sdk_result(format!(
         "CurrencySummary {{ {}, options: {} }}",
         found.currency_id, found.options
@@ -1302,7 +1312,7 @@ pub fn launch(
     // Names to ids, which is the only part that needs the chain.
     let mut reserves = Vec::with_capacity(names.len());
     for name in &names {
-        reserves.push(resolve_reserve(ui, &node, name)?);
+        reserves.push(resolve_reserve(ui, &node, &settings.profile.node, name)?);
     }
 
     // `--supply` is sugar for preallocating to the defining identity for a
@@ -1867,10 +1877,7 @@ fn choose_key(store: &Keystore, label: Option<&str>) -> Result<Envelope, miette:
 }
 
 fn emit(value: &serde_json::Value) {
-    println!(
-        "{}",
-        serde_json::to_string_pretty(value).expect("the report is plain data")
-    );
+    crate::failure::document(value);
 }
 
 /// `pecu currency mint`.
@@ -1940,11 +1947,25 @@ pub fn mint(
     let node = node::connect(&settings.profile)?;
     let looked_up = args.currency.strip_suffix('@').unwrap_or(&args.currency);
     ui.sdk(format!("node.currency_definition({looked_up:?})"));
-    let found = node
-        .currency_definition(looked_up)
-        .map_err(|_| CurrencyError::NotFound {
-            name: args.currency.clone(),
-        })?;
+    // Only the daemon answering can mean the currency does not exist; see
+    // `read_currency`.
+    let found = match node.currency_definition(looked_up) {
+        Ok(found) => found,
+        Err(RpcError::Node { .. }) => {
+            return Err(CurrencyError::NotFound {
+                name: args.currency.clone(),
+            }
+            .into())
+        }
+        Err(source) => {
+            return Err(node::NodeError::request(
+                "reading the currency",
+                &settings.profile.node,
+                source,
+            )
+            .into())
+        }
+    };
     ui.sdk_result(format!(
         "CurrencySummary {{ {}, proof_protocol: {} }}",
         found.currency_id, found.proof_protocol
@@ -2228,7 +2249,7 @@ pub fn preconvert(
     }
 
     let node = node::connect(&settings.profile)?;
-    let target = read_currency(ui, &node, &args.currency)?;
+    let target = read_currency(ui, &node, &settings.profile.node, &args.currency)?;
     ui.sdk_result(format!(
         "CurrencySummary {{ {}, start_block: {} }}",
         target.currency_id, target.start_block
@@ -2258,7 +2279,7 @@ pub fn preconvert(
         Some(name) => name.clone(),
         None => settings.profile.currency.clone(),
     };
-    let source_id = resolve_reserve(ui, &node, &spend)?;
+    let source_id = resolve_reserve(ui, &node, &settings.profile.node, &spend)?;
     let reserves: Vec<String> = target
         .definition
         .get("currencies")
@@ -2766,19 +2787,19 @@ pub fn convert(
     check_transparent(&recipient)?;
 
     let node = node::connect(&settings.profile)?;
-    let target = read_currency(ui, &node, &args.currency)?;
+    let target = read_currency(ui, &node, &settings.profile.node, &args.currency)?;
     let spend = match &args.spend {
         Some(name) => name.clone(),
         None => settings.profile.currency.clone(),
     };
-    let source = read_currency(ui, &node, &spend)?;
+    let source = read_currency(ui, &node, &settings.profile.node, &spend)?;
 
     // Which of the three shapes this is, and which currency is the basket doing
     // the work — they are not the same for all three, and every check below is
     // about the basket rather than about what the caller happened to name.
     let (kind, basket) = match &args.via {
         Some(via) => {
-            let routed = read_currency(ui, &node, via)?;
+            let routed = read_currency(ui, &node, &settings.profile.node, via)?;
             let kind = ConversionKind::ReserveToReserve {
                 via: currency_id_of(&routed)?,
                 target: currency_id_of(&target)?,
@@ -3091,11 +3112,20 @@ fn currency_id_of(found: &CurrencySummary) -> Result<CurrencyId, CurrencyError> 
         })
 }
 
+/// One currency's definition, or the reason there is none.
+///
+/// `url` is only for the report a failed request makes, and it is why this
+/// takes one at all: "nothing on this chain is called that" is an answer only
+/// the daemon can give. A node that never replied has denied nothing, and
+/// saying otherwise both misdiagnoses the outage and tells a script — through
+/// the exit code as well as the diagnostic — that the request was understood.
+/// The same distinction `pecu send`, `wallet balance` and `id show` draw (#44).
 fn read_currency(
     ui: &Ui,
     node: &crate::node::Node,
+    url: &str,
     name: &str,
-) -> Result<CurrencySummary, CurrencyError> {
+) -> Result<CurrencySummary, miette::Report> {
     let looked_up = name.strip_suffix('@').unwrap_or(name);
     ui.sdk(format!("node.currency_definition({looked_up:?})"));
     match node.currency_definition(looked_up) {
@@ -3108,12 +3138,17 @@ fn read_currency(
         // yet — which is the ordinary state of every identity, and exactly the
         // moment somebody reaches for `currency launch`. Costs one request, on
         // the failure path only.
-        Err(_) if node.identity(name).is_ok() => Err(CurrencyError::NotACurrencyYet {
-            name: name.trim_end_matches('@').to_string(),
-        }),
-        Err(_) => Err(CurrencyError::NotFound {
+        Err(RpcError::Node { .. }) if node.identity(name).is_ok() => {
+            Err(CurrencyError::NotACurrencyYet {
+                name: name.trim_end_matches('@').to_string(),
+            }
+            .into())
+        }
+        Err(RpcError::Node { .. }) => Err(CurrencyError::NotFound {
             name: name.to_string(),
-        }),
+        }
+        .into()),
+        Err(source) => Err(node::NodeError::request("reading the currency", url, source).into()),
     }
 }
 

@@ -17,13 +17,6 @@ pub fn gallery(ui: &Ui) {
     let glyphs = theme.glyphs;
     let ellipsis = glyphs.ellipsis;
 
-    if ui.is_json() {
-        // Honest rather than helpful: the gallery is about how things look, and
-        // there is no machine-readable form of that.
-        ui.warn("`dev ui` has no --json form; showing the rendered gallery");
-        ui.blank();
-    }
-
     // No version in the subtitle: this output is snapshotted, and a version
     // bump should not show up as a UI diff.
     ui.banner(&["verus wallet", "widget gallery"]);

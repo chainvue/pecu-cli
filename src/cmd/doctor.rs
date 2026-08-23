@@ -487,10 +487,12 @@ fn emit_json(settings: &Settings, report: &Result<NodeReport, NodeError>) {
         "node": node,
     });
 
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&document).expect("the report is plain data")
-    );
+    // `doctor` is one of the three commands that print a document *and* fail.
+    // The top-level `error` a script switches on is not added here: the
+    // document is handed over rather than printed, and `failure::finish` folds
+    // the failure into it on the way out. `node.error` above stays what it was
+    // — a sentence about reachability, one level down.
+    crate::failure::document(&document);
 }
 
 #[cfg(test)]

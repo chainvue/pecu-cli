@@ -140,14 +140,28 @@ pub enum SendError {
     },
 }
 
+impl SendError {
+    /// The SDK failure underneath, when this refusal came from one.
+    ///
+    /// `pecu::flow_failed` is one diagnostic code over every way a flow can
+    /// end, so the document's `broadcast` tri-state cannot be read off the code
+    /// — only off the SDK error the diagnostic wraps.
+    fn sdk_failure(&self) -> Option<&FlowError> {
+        match self {
+            SendError::Flow { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
 pub fn run(ui: &Ui, settings: &Settings, globals: &Globals, args: &SendArgs) -> miette::Result<()> {
     let outcome = attempt(ui, settings, globals, args);
     // Printed on the way out whatever happened. `--explain` earns its keep most
     // when something went wrong, and swallowing the record on the error path
-    // would hide the call that failed.
-    if !ui.is_json() {
-        ui.explain_panel();
-    }
+    // would hide the call that failed. Under `--json` it goes to stderr rather
+    // than being skipped — stdout belongs to the document, and `--explain` is
+    // documented as working on any command.
+    ui.explain_panel();
     outcome
 }
 
@@ -254,10 +268,14 @@ fn attempt(ui: &Ui, settings: &Settings, globals: &Globals, args: &SendArgs) -> 
         Ok(sent) => sent,
         Err(source) => {
             ui.sdk_result(format!("Err({source})"));
+            // Built before the document rather than after it: the document
+            // carries this failure's diagnostic code, and the diagnostic owns
+            // the SDK error it was built from.
+            let error = flow("broadcasting", source);
             if ui.is_json() {
-                emit_json(plan, Delivery::Failed(&source));
+                emit_json(plan, Delivery::Failed(&error));
             }
-            return Err(flow("broadcasting", source).into());
+            return Err(error.into());
         }
     };
     ui.sdk_result(format!("Sent {{ txid: {} }}", sent.txid));
@@ -1044,7 +1062,12 @@ enum Delivery<'a> {
     Accepted(&'a verus_sdk::network::Sent),
     /// The broadcast did not come back cleanly. Whether the node has it anyway
     /// is a separate question, answered in [`emit_json`].
-    Failed(&'a FlowError),
+    ///
+    /// Carries the finished [`SendError`] rather than the SDK's own failure, so
+    /// the document can embed the same `{code, message, help, causes}` object
+    /// that every other failing `--json` run prints. The SDK error is still
+    /// underneath it, and is what settles the tri-state below.
+    Failed(&'a SendError),
 }
 
 /// The signed transaction, before anything is known about delivering it.
@@ -1098,10 +1121,7 @@ fn plan_json(
 ///   same. Saying `false` on either would be a guess about money; `outcome`
 ///   and `hex` are what let you go and find out.
 fn emit_json(plan: serde_json::Value, delivery: Delivery<'_>) {
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&delivery_json(plan, delivery)).expect("plain data")
-    );
+    crate::failure::document(&delivery_json(plan, delivery));
 }
 
 /// The document [`emit_json`] prints, so every state can be asserted on without
@@ -1119,15 +1139,15 @@ fn delivery_json(mut plan: serde_json::Value, delivery: Delivery<'_>) -> serde_j
             (Some(true), "accepted")
         }
         Delivery::Failed(error) => {
-            document.insert("error".into(), serde_json::json!(error.to_string()));
+            document.insert("error".into(), crate::failure::object(error));
             // A daemon that answered with an outright rejection has read the
             // transaction and refused it. Anything else — a timeout, a dropped
             // connection, a reply this build could not parse, or a `-25` the
             // SDK hands back as `BroadcastUncertain` because it does not say
             // the transaction was refused — leaves the mempool's contents
             // genuinely unknown.
-            match error {
-                FlowError::Rpc(RpcError::Node { .. }) => (Some(false), "rejected"),
+            match error.sdk_failure() {
+                Some(FlowError::Rpc(RpcError::Node { .. })) => (Some(false), "rejected"),
                 _ => (None, "unknown"),
             }
         }
@@ -1402,18 +1422,29 @@ mod tests {
     fn a_daemon_that_refused_it_is_a_knowable_no() {
         // The daemon read the transaction and said no, so it is not in any
         // mempool and the document can say so outright.
-        let error = FlowError::Rpc(RpcError::Node {
-            code: -26,
-            message: "16: bad-txns-inputs-spent".into(),
-        });
+        let error = flow(
+            "broadcasting",
+            FlowError::Rpc(RpcError::Node {
+                code: -26,
+                message: "16: bad-txns-inputs-spent".into(),
+            }),
+        );
         let document = delivery_json(plan(), Delivery::Failed(&error));
         assert_eq!(document["broadcast"], false);
         assert_eq!(document["outcome"], "rejected");
+        // The same object every other failing `--json` run prints, so one
+        // consumer reads `.error.code` on every path rather than switching on
+        // whether a document happened to accompany the failure.
+        assert_eq!(document["error"]["code"], "pecu::flow_failed");
         assert!(
-            document["error"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("bad-txns-inputs-spent"),
+            document["error"]["causes"]
+                .as_array()
+                .expect("the SDK failure is carried under the diagnostic")
+                .iter()
+                .any(|cause| cause
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("bad-txns-inputs-spent")),
             "{document:#}"
         );
         // The one field that cannot be reconstructed afterwards.
@@ -1424,7 +1455,10 @@ mod tests {
     fn a_broadcast_that_did_not_come_back_is_unknown_not_false() {
         // A timed-out request may still have reached the mempool. `false` here
         // would tell someone their money is safe when it may already be moving.
-        let error = FlowError::Rpc(RpcError::Transport("timed out".into()));
+        let error = flow(
+            "broadcasting",
+            FlowError::Rpc(RpcError::Transport("timed out".into())),
+        );
         let document = delivery_json(plan(), Delivery::Failed(&error));
         assert!(
             document["broadcast"].is_null(),
