@@ -20,8 +20,8 @@ use thiserror::Error;
 use verus_sdk::decode::{decode_output_script, OutputKind};
 use verus_sdk::money::Amount;
 use verus_sdk::network::{
-    currency_names, history, native_currency, spendable, AddressUtxo, ChainReader, FlowError,
-    Funding, HistoryEntry, MempoolDelta, RpcError, SignedAmount, TokenBalances,
+    history, native_currency, spendable, AddressUtxo, ChainReader, FlowError, Funding,
+    HistoryEntry, MempoolDelta, RpcError, SignedAmount, TokenBalances,
 };
 use verus_sdk::send::CurrencyId;
 use verus_sdk::verus_keys::{Address, AddressKind};
@@ -33,6 +33,16 @@ use crate::ui::{fmt, Align, Column, Panel, Table, Text, Ui};
 
 /// How much of a node-supplied currency name is ever printed.
 const NAME_BUDGET: usize = 24;
+
+/// Whether a currency id is printed whole or shortened to fit.
+///
+/// Which one a table gets is not decided here and is not decided per row — see
+/// [`fitted`], which builds the table both ways and measures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdWidth {
+    Full,
+    Elided,
+}
 
 #[derive(Debug, Error, Diagnostic)]
 pub enum WalletError {
@@ -464,6 +474,108 @@ fn gather(ui: &Ui, node: Node, address: String) -> Result<(Node, Wallet), miette
     ))
 }
 
+/// What the node could tell us about one currency's name.
+///
+/// Three answers, not two. This was a `BTreeMap<CurrencyId, String>` where a
+/// missing key meant both "the chain has no name for this" and "asking blew
+/// up", and every render of it printed the same confident `(unnamed)`. A
+/// lookup that failed is an **unknown**, which is the rule this file already
+/// applies to a balance and to the mempool; a name is not exempt from it.
+#[derive(Debug)]
+enum CurrencyName {
+    /// The node answered, and this is the name it gave.
+    Known(String),
+    /// The node answered `-5` or `-8`: it knows no currency with this id. The
+    /// one refusal that really is a statement about the currency — and note
+    /// that it is a statement about the *currency*, not about its name. A node
+    /// that has no such currency has not told us this currency is nameless.
+    Absent,
+    /// No name was got, and that says nothing about the currency. Deliberately
+    /// not called "unreadable": this is the catch-all for every way the ask can
+    /// fail, and most of them are not a garbled answer. A timeout, a refused
+    /// connection or a node that does not serve the method all land here, and
+    /// in none of them did an answer arrive to be read. The string is the
+    /// reason, and it is carried rather than summarised so that `--json` can
+    /// say what actually happened instead of guessing at a cause.
+    Failed(String),
+}
+
+/// A verdict on each currency's name, asked one currency at a time.
+///
+/// `verus_sdk::network::currency_names` is the obvious call and is what this
+/// used to be. It returns one `Result` for the whole set, so a single currency
+/// the node describes in a way the SDK cannot parse discards every name already
+/// collected — a wallet holding five tokens lost all five, and the panel said
+/// `(unnamed)` about each of them. Underneath it is already one `getcurrency`
+/// per currency, so asking here costs exactly the same round trips and keeps
+/// the failures where they belong.
+///
+/// `currency_definition` rather than `currency`, which is what the SDK's
+/// version calls: the same RPC read as a *definition* instead of a
+/// registration policy, so it never parses the fee fields. A currency whose
+/// `idimportfees` the daemon prints as `1e-8` is refused outright by the strict
+/// number reader behind `currency`, and that one field is what blanked the
+/// names in the first place. Read this way the name comes back.
+fn look_up_names(node: &Node, wanted: &BTreeSet<CurrencyId>) -> BTreeMap<CurrencyId, CurrencyName> {
+    wanted
+        .iter()
+        .map(|currency| {
+            let id = Address::new(AddressKind::Identity, currency.to_bytes()).to_string();
+            let verdict = match node.currency_definition(&id) {
+                Ok(summary) if summary.currency_id == id => CurrencyName::Known(summary.name),
+                // Free consistency check, kept from the SDK's version: a node
+                // that answers about a different currency than the one asked
+                // about is confused or hostile, and either way its answer is
+                // not a name for this token.
+                Ok(other) => CurrencyName::Failed(format!(
+                    "the node answered about {} instead",
+                    other.currency_id
+                )),
+                // `-5` *and* `-8`, which is this repo's rule everywhere else
+                // it asks a node whether something exists. It matters here more
+                // than it looks: measured against api.verustest.net,
+                // `getcurrency` answers a miss with `-8` and only `getidentity`
+                // answers one with `-5`, so accepting `-5` alone would make
+                // this arm unreachable against a real daemon and file every
+                // genuinely unknown currency under a failed lookup instead.
+                Err(RpcError::Node { code: -5 | -8, .. }) => CurrencyName::Absent,
+                Err(error) => CurrencyName::Failed(error.to_string()),
+            };
+            (*currency, verdict)
+        })
+        .collect()
+}
+
+/// What `--explain` says a name lookup came back with.
+///
+/// `0 names` on its own reads as "the chain has no name for these", which is a
+/// confident answer to a question that failed. Anything that was not answered
+/// is counted out loud beside the names that were.
+fn name_result(names: &BTreeMap<CurrencyId, CurrencyName>) -> String {
+    let count = |wanted: fn(&CurrencyName) -> bool| names.values().filter(|n| wanted(n)).count();
+    let absent = count(|n| matches!(n, CurrencyName::Absent));
+    let failed = count(|n| matches!(n, CurrencyName::Failed(_)));
+    let mut summary = fmt::plural(
+        count(|n| matches!(n, CurrencyName::Known(_))),
+        "name",
+        "names",
+    );
+    if absent > 0 {
+        summary.push_str(&format!(", {absent} the node has no currency for"));
+    }
+    if failed > 0 {
+        summary.push_str(&format!(", {failed} the lookup failed for"));
+    }
+    summary
+}
+
+/// Whether any row on screen will be missing a name because the lookup failed.
+fn any_failed(names: &BTreeMap<CurrencyId, CurrencyName>) -> bool {
+    names
+        .values()
+        .any(|name| matches!(name, CurrencyName::Failed(_)))
+}
+
 pub fn balance(
     ui: &Ui,
     settings: &Settings,
@@ -503,9 +615,12 @@ pub fn balance(
     let names = if wanted.is_empty() {
         Default::default()
     } else {
-        ui.sdk("verus_sdk::network::currency_names(&node, …)");
-        let named = currency_names(&node, wanted).unwrap_or_default();
-        ui.sdk_result(fmt::plural(named.len(), "name", "names"));
+        ui.sdk(format!(
+            "node.currency_definition(…) for {}",
+            fmt::plural(wanted.len(), "currency", "currencies")
+        ));
+        let named = look_up_names(&node, &wanted);
+        ui.sdk_result(name_result(&named));
         named
     };
 
@@ -650,40 +765,45 @@ pub fn balance(
         ),
         Ok(pending) if pending.is_empty() => panel,
         Ok(pending) => {
-            let mut table =
-                Table::headerless([Align::Left, Align::Right, Align::Left, Align::Left]);
-            let mut movement = |label: &str, amount: Amount, style: anstyle::Style| {
-                if amount == Amount::ZERO {
-                    return;
+            // Four columns here against `TOKENS`' three, which is why the id
+            // cells cannot decide their own width: see `fitted`.
+            let table = fitted(&ui.theme, |ids| {
+                let mut table =
+                    Table::headerless([Align::Left, Align::Right, Align::Left, Align::Left]);
+                let mut movement = |label: &str, amount: Amount, style: anstyle::Style| {
+                    if amount == Amount::ZERO {
+                        return;
+                    }
+                    table.push(vec![
+                        Text::of(label, palette.label),
+                        Text::of(fmt::amount(amount), style),
+                        Text::of(currency, palette.muted),
+                        Text::new(),
+                    ]);
+                };
+                movement("INCOMING", pending.incoming, palette.ok);
+                movement("OUTGOING", pending.outgoing, palette.warn);
+                // Only when both directions are present. On its own, a net line
+                // repeats the single figure above it.
+                if pending.incoming != Amount::ZERO && pending.outgoing != Amount::ZERO {
+                    table.push(vec![
+                        Text::of("NET", palette.label),
+                        Text::of(fmt::signed(pending.net()), palette.accent),
+                        Text::of(currency, palette.muted),
+                        Text::new(),
+                    ]);
                 }
-                table.push(vec![
-                    Text::of(label, palette.label),
-                    Text::of(fmt::amount(amount), style),
-                    Text::of(currency, palette.muted),
-                    Text::new(),
-                ]);
-            };
-            movement("INCOMING", pending.incoming, palette.ok);
-            movement("OUTGOING", pending.outgoing, palette.warn);
-            // Only when both directions are present. On its own, a net line
-            // repeats the single figure above it.
-            if pending.incoming != Amount::ZERO && pending.outgoing != Amount::ZERO {
-                table.push(vec![
-                    Text::of("NET", palette.label),
-                    Text::of(fmt::signed(pending.net()), palette.accent),
-                    Text::of(currency, palette.muted),
-                    Text::new(),
-                ]);
-            }
-            for (currency, value) in &pending.tokens {
-                let [name, id] = currency_cells(ui, *currency, &names);
-                table.push(vec![
-                    Text::new(),
-                    Text::of(fmt::signed(value.to_sat()), palette.value),
-                    name,
-                    id,
-                ]);
-            }
+                for (currency, value) in &pending.tokens {
+                    let [name, id] = currency_cells(ui, *currency, &names, ids);
+                    table.push(vec![
+                        Text::new(),
+                        Text::of(fmt::signed(value.to_sat()), palette.value),
+                        name,
+                        id,
+                    ]);
+                }
+                table
+            });
 
             panel
                 .section("PENDING")
@@ -697,6 +817,17 @@ pub fn balance(
                 .table(table)
         }
     };
+
+    // Said out loud, because `(name unknown)` is a row about this wallet's
+    // reading of the node and not about the currency. Notes are printed
+    // unwrapped, so this is one clause and stops there; the reason itself
+    // varies per row and belongs in `--json`, which carries it.
+    if any_failed(&names) {
+        panel = panel.note(Text::of(
+            "(name unknown): the name lookup failed — `pecu currency show <id>` reads it directly",
+            palette.muted,
+        ));
+    }
 
     // Not called "immature". Coinbase maturity is the usual cause, but the SDK
     // routes *any* output the node reports as unspendable into this bucket,
@@ -1002,7 +1133,13 @@ pub fn history_command(
     let names = if wanted.is_empty() {
         Default::default()
     } else {
-        currency_names(&node, wanted).unwrap_or_default()
+        ui.sdk(format!(
+            "node.currency_definition(…) for {}",
+            fmt::plural(wanted.len(), "currency", "currencies")
+        ));
+        let named = look_up_names(&node, &wanted);
+        ui.sdk_result(name_result(&named));
+        named
     };
 
     if ui.is_json() {
@@ -1087,6 +1224,19 @@ pub fn history_command(
             palette.muted,
         ));
     }
+    // A currency shown as a bare id here is the documented fallback, so on its
+    // own it says nothing about why. Worth a line when the fallback was taken
+    // because the lookup failed — a name silently missing is how this hid
+    // before — but the note has to name *which* ids. The change column renders
+    // a currency the node denies and a currency nobody could ask about
+    // identically, so a note that only said "a currency shown as an id" would
+    // be a false statement about the rows it did not mean.
+    if let Some(failed) = failed_ids(ui, &names) {
+        panel = panel.note(Text::of(
+            format!("no name could be got for {failed} — `pecu currency show` reads it directly"),
+            palette.muted,
+        ));
+    }
     panel = panel.note(Text::of(
         "net effect per transaction, not gross: an output spent and mostly returned as \
          change counts as what actually moved",
@@ -1098,11 +1248,36 @@ pub fn history_command(
     Ok(())
 }
 
+/// The ids `change` fell back to because their lookup failed, elided and ready
+/// to drop into a sentence — or `None` when no lookup failed.
+///
+/// Listed rather than counted because the change column holds every leg of a
+/// transaction in one cell and cannot carry a second column saying why any one
+/// of them is a bare id. Naming them is the only way a note about them is true
+/// of the rows it means and silent about the rest. Capped at two, because a
+/// panel note is printed on one unwrapped line.
+fn failed_ids(ui: &Ui, names: &BTreeMap<CurrencyId, CurrencyName>) -> Option<String> {
+    let failed: Vec<String> = names
+        .iter()
+        .filter(|(_, name)| matches!(name, CurrencyName::Failed(_)))
+        .map(|(currency, _)| {
+            let id = Address::new(AddressKind::Identity, currency.to_bytes()).to_string();
+            fmt::address(&id, ui.theme.glyphs.ellipsis)
+        })
+        .collect();
+    let (shown, rest) = failed.split_at(failed.len().min(2));
+    match (shown, rest.len()) {
+        ([], _) => None,
+        (shown, 0) => Some(shown.join(", ")),
+        (shown, more) => Some(format!("{} and {more} more", shown.join(", "))),
+    }
+}
+
 /// The change column: the native leg, then any token legs.
 fn change(
     ui: &Ui,
     entry: &HistoryEntry,
-    names: &BTreeMap<CurrencyId, String>,
+    names: &BTreeMap<CurrencyId, CurrencyName>,
     native: &str,
 ) -> Text {
     let palette = ui.theme.palette;
@@ -1128,11 +1303,19 @@ fn change(
         if text.width() > 0 {
             text = text.push("  ", palette.muted);
         }
+        // No name, for whatever reason, falls back to the node's own key. The
+        // change column is one cell holding every leg of the transaction, so
+        // there is no room for a second column saying why — the id is a true
+        // answer in either case, and the panel's note names the ids whose
+        // lookup failed rather than tarring every bare id with the same cause.
         let label = currency
             .parse::<Address>()
             .ok()
             .map(|parsed| CurrencyId::from_bytes(parsed.hash()))
-            .and_then(|id| names.get(&id).cloned())
+            .and_then(|id| match names.get(&id) {
+                Some(CurrencyName::Known(name)) => Some(name.clone()),
+                _ => None,
+            })
             .map(|name| format!("{}@", fmt::untrusted(&name, NAME_BUDGET, glyphs.ellipsis)))
             .unwrap_or_else(|| fmt::address(currency, glyphs.ellipsis));
         text = text
@@ -1177,41 +1360,120 @@ fn outpoint(ui: &Ui, txid: &str, vout: u32) -> Text {
 fn currency_cells(
     ui: &Ui,
     currency: CurrencyId,
-    names: &BTreeMap<CurrencyId, String>,
+    names: &BTreeMap<CurrencyId, CurrencyName>,
+    ids: IdWidth,
 ) -> [Text; 2] {
     let palette = ui.theme.palette;
     let glyphs = ui.theme.glyphs;
     let id = Address::new(AddressKind::Identity, currency.to_bytes()).to_string();
-    let name = match names.get(&currency) {
-        Some(name) => Text::of(
+    let verdict = names.get(&currency);
+    let name = match verdict {
+        Some(CurrencyName::Known(name)) => Text::of(
             format!("{}@", fmt::untrusted(name, NAME_BUDGET, glyphs.ellipsis)),
             palette.accent,
         ),
-        None => Text::of("(unnamed)", palette.muted),
+        // Not `(unnamed)`. The node did not say this currency is nameless; it
+        // said it has no such currency at all — and this row is printing a
+        // balance in it, so "merely nameless" would have the panel contradict
+        // itself. Say the thing that was actually answered.
+        Some(CurrencyName::Absent) => Text::of("(no such currency)", palette.muted),
+        // Not `(name unreadable)` either, which would name a cause. Most of the
+        // ways this fails are not a garbled answer — a timeout is no answer at
+        // all — and inventing one is the same overconfidence as the `(unnamed)`
+        // this issue was filed about. `unknown` is exactly what is known.
+        //
+        // `None` renders here too, and truthfully: a currency nobody looked up
+        // has no known name either, and this wording claims nothing about why.
+        // In the warning colour, because a reader has to be able to tell this
+        // apart from a currency the node answered about.
+        Some(CurrencyName::Failed(_)) | None => Text::of("(name unknown)", palette.warn),
     };
-    [
-        name,
-        Text::of(fmt::address(&id, glyphs.ellipsis), palette.muted),
-    ]
+    // With no name beside it the id is the only handle the reader has left, and
+    // `iHBwQo7LU…dK9f` cannot be copied, pasted or looked up. A named row keeps
+    // the short form: there the name is the handle and the id is a check.
+    let id = match (verdict, ids) {
+        (Some(CurrencyName::Known(_)), _) | (_, IdWidth::Elided) => {
+            fmt::address(&id, glyphs.ellipsis)
+        }
+        (_, IdWidth::Full) => fmt::id(&id, glyphs.ellipsis),
+    };
+    [name, Text::of(id, palette.muted)]
 }
 
-fn token_table(ui: &Ui, held: &TokenBalances, names: &BTreeMap<CurrencyId, String>) -> Table {
-    let palette = ui.theme.palette;
-    let mut table = Table::headerless([Align::Right, Align::Left, Align::Left]);
-    for (currency, amount) in held {
-        let [name, id] = currency_cells(ui, *currency, names);
-        table.push(vec![
-            Text::of(fmt::amount(*amount), palette.value),
-            name,
-            id,
-        ]);
+/// Build a table with whole currency ids, or with elided ones if that is what
+/// it takes to keep the frame square.
+///
+/// Whether there is room for a 34-character id cannot be decided one row at a
+/// time, which is what a width constant here used to assume. [`Table`] sizes
+/// each column to the widest cell in it, so a *sibling* row's long name pushes
+/// the id column right; and the same two cells are laid out against four
+/// columns under `PENDING` and three under `TOKENS`, which is another ten
+/// characters. [`Panel`] pads a content line without cutting it and clamps only
+/// its own width, so a line wider than the theme runs out through the
+/// right-hand border and the box comes out ragged — measured at an ordinary
+/// eighty columns, not some pathological width.
+///
+/// So the only honest test is to build the wide version and measure it. The
+/// table is cheap and this runs once per panel section.
+fn fitted(theme: &crate::ui::Theme, build: impl Fn(IdWidth) -> Table) -> Table {
+    let wide = build(IdWidth::Full);
+    if wide
+        .lines(theme)
+        .iter()
+        .all(|line| line.width() <= theme.width)
+    {
+        wide
+    } else {
+        build(IdWidth::Elided)
     }
-    table
+}
+
+fn token_table(ui: &Ui, held: &TokenBalances, names: &BTreeMap<CurrencyId, CurrencyName>) -> Table {
+    let palette = ui.theme.palette;
+    fitted(&ui.theme, |ids| {
+        let mut table = Table::headerless([Align::Right, Align::Left, Align::Left]);
+        for (currency, amount) in held {
+            let [name, id] = currency_cells(ui, *currency, names, ids);
+            table.push(vec![
+                Text::of(fmt::amount(*amount), palette.value),
+                name,
+                id,
+            ]);
+        }
+        table
+    })
+}
+
+/// One currency's name, as JSON.
+///
+/// An object rather than a bare string because there are three answers and not
+/// two. `"name": null` said "this currency has no name" for a lookup that never
+/// managed to ask, which is the same confident nothing the panel used to print;
+/// the `known` here is about the *name*, the way the `known` around it is about
+/// the balance.
+fn name_json(
+    currency: &CurrencyId,
+    names: &BTreeMap<CurrencyId, CurrencyName>,
+) -> serde_json::Value {
+    match names.get(currency) {
+        Some(CurrencyName::Known(name)) => serde_json::json!({ "known": true, "name": name }),
+        // `name: null` on its own reads as "this currency has no name", which
+        // is not what the node said and is not true of a currency someone is
+        // holding a balance in. The reason is carried so a consumer prints the
+        // answer that was actually given.
+        Some(CurrencyName::Absent) => serde_json::json!({
+            "known": true,
+            "name": null,
+            "reason": "the node has no currency with this id",
+        }),
+        Some(CurrencyName::Failed(error)) => serde_json::json!({ "known": false, "error": error }),
+        None => serde_json::json!({ "known": false, "error": "the name was not looked up" }),
+    }
 }
 
 fn tokens_json(
     balances: &Result<TokenBalances, verus_sdk::network::FlowError>,
-    names: &BTreeMap<CurrencyId, String>,
+    names: &BTreeMap<CurrencyId, CurrencyName>,
 ) -> serde_json::Value {
     match balances {
         // An error here means "unknown", never zero, and the JSON has to say so
@@ -1222,7 +1484,7 @@ fn tokens_json(
             "balances": held.iter().map(|(currency, amount)| {
                 serde_json::json!({
                     "currency": Address::new(AddressKind::Identity, currency.to_bytes()).to_string(),
-                    "name": names.get(currency),
+                    "name": name_json(currency, names),
                     "satoshis": amount.to_sat(),
                 })
             }).collect::<Vec<_>>(),
@@ -1232,7 +1494,7 @@ fn tokens_json(
 
 fn pending_json(
     pending: &Result<Pending, RpcError>,
-    names: &BTreeMap<CurrencyId, String>,
+    names: &BTreeMap<CurrencyId, CurrencyName>,
 ) -> serde_json::Value {
     match pending {
         // Same shape as `tokens_json`, for the same reason: a failed read means
@@ -1254,7 +1516,7 @@ fn pending_json(
             "tokens": pending.tokens.iter().map(|(currency, value)| {
                 serde_json::json!({
                     "currency": Address::new(AddressKind::Identity, currency.to_bytes()).to_string(),
-                    "name": names.get(currency),
+                    "name": name_json(currency, names),
                     "satoshis": value.to_sat(),
                 })
             }).collect::<Vec<_>>(),
@@ -1286,9 +1548,16 @@ fn emit_json(value: &serde_json::Value) {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
     use verus_sdk::money::{Txid, Utxo};
 
     use super::*;
+    use crate::config::Profile;
+    use crate::ui::text::strip_ansi;
+    use crate::ui::theme::Skin;
+    use crate::ui::Theme;
 
     fn utxo(script: Vec<u8>, satoshis: u64) -> AddressUtxo {
         AddressUtxo {
@@ -1498,5 +1767,450 @@ mod tests {
         let pending = summarise(&[row], Some(currency(NATIVE)));
         assert_eq!(pending.incoming.to_sat(), 100);
         assert!(pending.tokens.is_empty());
+    }
+
+    /// The currency from issue #46. Real, and the reason the issue exists: the
+    /// daemon prints its `idimportfees` as `1e-8`, and reading its reply as a
+    /// registration policy refuses that outright.
+    const KAIJU: &str = "iHBwQo7LUmb7QKKqbsd8Kw9BxdQvgTdK9f";
+
+    /// A `getcurrency` reply, trimmed to the fields the SDK reads plus the one
+    /// that used to break it. `idimportfees` is `1e-8` verbatim from
+    /// `api.verustest.net`, so a definition that parses here is one that really
+    /// does come off the wire.
+    fn definition(id: &str, name: &str) -> String {
+        format!(
+            r#"{{"result":{{"currencyid":"{id}","name":"{name}","fullyqualifiedname":"{name}",
+               "parent":"{NATIVE}","systemid":"{NATIVE}","startblock":0,"endblock":0,
+               "options":33,"proofprotocol":1,"idimportfees":1e-8}},"id":1}}"#
+        )
+    }
+
+    /// The same reply with its `name` missing: an answer this build cannot read,
+    /// standing in for whatever the next unparseable field turns out to be.
+    fn unreadable_definition(id: &str) -> String {
+        format!(
+            r#"{{"result":{{"currencyid":"{id}","fullyqualifiedname":"?","systemid":"{NATIVE}",
+               "startblock":0,"endblock":0,"options":33,"proofprotocol":1}},"id":1}}"#
+        )
+    }
+
+    fn refusal(code: i64, message: &str) -> String {
+        format!(r#"{{"error":{{"code":{code},"message":"{message}"}},"id":1}}"#)
+    }
+
+    /// A loopback node that answers each request with whichever scripted reply
+    /// names a currency the request asked about.
+    ///
+    /// One reply per connection and `connection: close`, because the whole
+    /// point is to answer several *different* requests: `ureq` pools
+    /// connections, and a handler that served one and hung up would strand the
+    /// next lookup on a dead socket. Plaintext is accepted because loopback is
+    /// the one place it is not refused.
+    /// A loopback node that answers from a script.
+    ///
+    /// The accept loop is deliberately not shut down or joined: it owns nothing
+    /// but a port and is reaped at process exit. Plumbing a shutdown through it
+    /// would mean unblocking `accept` from another thread, which is more moving
+    /// parts than the leak costs in a test binary that runs for two seconds.
+    fn scripted_node(replies: Vec<(String, String)>) -> Node {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let url = format!("http://{}", listener.local_addr().expect("a bound address"));
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let Some(request) = read_request(&mut stream) else {
+                    continue;
+                };
+                let body = replies
+                    .iter()
+                    .find(|(asked, _)| request.contains(asked.as_str()))
+                    .map(|(_, reply)| reply.clone())
+                    .unwrap_or_else(|| refusal(-5, "no currency scripted for that request"));
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\n\
+                     content-length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(reply.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        node::connect(&Profile {
+            name: "stub".into(),
+            node: url,
+            explorer: String::new(),
+            currency: "VRSCTEST".into(),
+            allow_spend: false,
+            max_response_mb: 8,
+            timeout_secs: 5,
+        })
+        .expect("a client for a loopback url")
+    }
+
+    /// Drained until the request is whole rather than after one read: headers
+    /// and body can land in separate segments, and answering half a request
+    /// reads as a transport failure instead of the reply this is here to send.
+    fn read_request(stream: &mut std::net::TcpStream) -> Option<String> {
+        let mut request = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let head = match request
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .map(|start| start + 4)
+            {
+                Some(head) => head,
+                None => match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => return None,
+                    Ok(read) => {
+                        request.extend_from_slice(&chunk[..read]);
+                        continue;
+                    }
+                },
+            };
+            let declared = String::from_utf8_lossy(&request[..head])
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())?
+                })
+                .unwrap_or(0);
+            if request.len() - head >= declared {
+                return Some(String::from_utf8_lossy(&request).into_owned());
+            }
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => return None,
+                Ok(read) => request.extend_from_slice(&chunk[..read]),
+            }
+        }
+    }
+
+    fn asked_about(ids: &[&str]) -> BTreeSet<CurrencyId> {
+        ids.iter().map(|id| currency(id)).collect()
+    }
+
+    #[test]
+    fn one_currency_the_node_describes_badly_leaves_the_others_named() {
+        // The regression this exists for. The lookup used to be one call
+        // returning one `Result` for the whole set, so a single currency this
+        // build could not read discarded every name already collected — and a
+        // wallet holding three tokens printed `(unnamed)` beside all three.
+        let node = scripted_node(vec![
+            (KAIJU.into(), definition(KAIJU, "Kaiju")),
+            (TOKEN.into(), unreadable_definition(TOKEN)),
+            (NATIVE.into(), definition(NATIVE, "VRSCTEST")),
+        ]);
+
+        let names = look_up_names(&node, &asked_about(&[KAIJU, TOKEN, NATIVE]));
+
+        assert!(
+            matches!(names.get(&currency(KAIJU)), Some(CurrencyName::Known(name)) if name == "Kaiju"),
+            "{:?}",
+            names.get(&currency(KAIJU))
+        );
+        assert!(
+            matches!(names.get(&currency(NATIVE)), Some(CurrencyName::Known(name)) if name == "VRSCTEST"),
+            "{:?}",
+            names.get(&currency(NATIVE))
+        );
+        // And the one that failed fails alone, with something to say.
+        assert!(
+            matches!(names.get(&currency(TOKEN)), Some(CurrencyName::Failed(_))),
+            "{:?}",
+            names.get(&currency(TOKEN))
+        );
+    }
+
+    #[test]
+    fn a_node_that_knows_no_such_currency_is_not_a_lookup_that_failed() {
+        // `-8` is what a daemon actually answers a `getcurrency` miss with —
+        // measured against api.verustest.net, where `getidentity` answers `-5`
+        // and `getcurrency` answers `-8` — and both are accepted, which is this
+        // repo's rule at every other place it asks a node whether something
+        // exists. Reading only `-5` here would file every currency the chain
+        // genuinely does not have under "the lookup failed" instead.
+        let node = scripted_node(vec![
+            (
+                KAIJU.into(),
+                refusal(-8, "Invalid currency or currency not found"),
+            ),
+            (TOKEN.into(), refusal(-1, "internal error")),
+        ]);
+
+        let names = look_up_names(&node, &asked_about(&[KAIJU, TOKEN]));
+
+        assert!(
+            matches!(names.get(&currency(KAIJU)), Some(CurrencyName::Absent)),
+            "{:?}",
+            names.get(&currency(KAIJU))
+        );
+        assert!(
+            matches!(names.get(&currency(TOKEN)), Some(CurrencyName::Failed(_))),
+            "{:?}",
+            names.get(&currency(TOKEN))
+        );
+    }
+
+    fn plain_ui(terminal_width: usize) -> Ui {
+        let mut ui = Ui::new(crate::cli::Theme::Plain, false, false);
+        // Set rather than resolved, so the assertion does not depend on the
+        // terminal the tests happen to run in.
+        ui.theme = Theme::with_skin(Skin::Plain, terminal_width);
+        ui
+    }
+
+    /// The framed skin, which is the one with a border to run out through.
+    fn framed_ui(terminal_width: usize) -> Ui {
+        let mut ui = Ui::new(crate::cli::Theme::Phosphor, false, false);
+        ui.theme = Theme::with_skin(Skin::Phosphor, terminal_width);
+        ui
+    }
+
+    fn cells(ui: &Ui, id: &str, names: &BTreeMap<CurrencyId, CurrencyName>) -> [String; 2] {
+        let [name, address] = currency_cells(ui, currency(id), names, IdWidth::Full);
+        [strip_ansi(&name.render()), strip_ansi(&address.render())]
+    }
+
+    /// Every framed line of a panel, by visible width.
+    fn frame_widths(rendered: &str) -> Vec<usize> {
+        rendered
+            .lines()
+            .map(strip_ansi)
+            .filter(|line| line.starts_with(['\u{250c}', '\u{2502}', '\u{251c}', '\u{2514}']))
+            .map(|line| unicode_width::UnicodeWidthStr::width(line.as_str()))
+            .collect()
+    }
+
+    fn holding(rows: Vec<(&str, u64)>) -> TokenBalances {
+        rows.into_iter()
+            .map(|(id, satoshis)| (currency(id), Amount::from_sat(satoshis)))
+            .collect()
+    }
+
+    fn verdicts(rows: Vec<(&str, CurrencyName)>) -> BTreeMap<CurrencyId, CurrencyName> {
+        rows.into_iter()
+            .map(|(id, verdict)| (currency(id), verdict))
+            .collect()
+    }
+
+    #[test]
+    fn a_name_that_could_not_be_read_never_prints_as_unnamed() {
+        let ui = plain_ui(80);
+        let names = verdicts(vec![
+            (KAIJU, CurrencyName::Failed("idimportfees: 1e-8".into())),
+            (TOKEN, CurrencyName::Absent),
+        ]);
+        // Neither of these says "unnamed", and neither names a cause it does
+        // not know: one lookup failed, and the other came back with a node
+        // saying it holds no such currency at all.
+        assert_eq!(cells(&ui, KAIJU, &names)[0], "(name unknown)");
+        assert_eq!(cells(&ui, TOKEN, &names)[0], "(no such currency)");
+    }
+
+    #[test]
+    fn a_row_with_no_name_shows_the_whole_id_when_the_frame_has_room() {
+        let names = verdicts(vec![
+            (KAIJU, CurrencyName::Failed("idimportfees: 1e-8".into())),
+            (TOKEN, CurrencyName::Known("Kaiju".into())),
+        ]);
+        let ui = framed_ui(80);
+        let held = holding(vec![(KAIJU, 100_000_000), (TOKEN, 100_000_000)]);
+        let rows: Vec<String> = token_table(&ui, &held, &names)
+            .lines(&ui.theme)
+            .iter()
+            .map(|line| strip_ansi(&line.render()))
+            .collect();
+        // The thirty-four characters that are the only handle this row has
+        // left, whole rather than elided: `iHBwQo7LU…dK9f` cannot be copied.
+        assert!(
+            rows.iter().any(|row| row.contains(KAIJU)),
+            "the id should be whole: {rows:?}"
+        );
+        // A named row keeps the short form. The name is the handle there.
+        assert!(
+            rows.iter().any(|row| row.contains("iK2k8YH1j\u{2026}bMqg")),
+            "a named row should keep the elided id: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn widening_an_id_never_pushes_a_row_out_through_the_frame() {
+        // The regression this exists for, at the width most people run. The id
+        // was widened on a per-row guess at the columns beside it — a constant
+        // measured against one three-column row with a seventeen-character name
+        // — and both assumptions are wrong in the panel it is drawn in. Here a
+        // *sibling* row's name widens the shared name column, and the frame
+        // came out one column ragged.
+        let ui = framed_ui(80);
+        let names = verdicts(vec![
+            (KAIJU, CurrencyName::Failed("idimportfees: 1e-8".into())),
+            (
+                TOKEN,
+                CurrencyName::Known("a-name-of-twentyfour-chr".into()),
+            ),
+        ]);
+        let held = holding(vec![(KAIJU, 1_000_000_000_000), (TOKEN, 100_000_000)]);
+        let panel = Panel::new("WALLET")
+            .section("TOKENS")
+            .table(token_table(&ui, &held, &names));
+        let widths = frame_widths(&panel.render(&ui.theme));
+        assert!(!widths.is_empty(), "nothing was framed");
+        assert!(
+            widths.windows(2).all(|pair| pair[0] == pair[1]),
+            "ragged frame, widths {widths:?}:\n{}",
+            panel.render(&ui.theme)
+        );
+        // And it stayed square by shortening the id rather than by dropping the
+        // row: whichever way `fitted` went, the id is still on screen.
+        assert!(panel.render(&ui.theme).contains("iHBwQo7LU"));
+    }
+
+    #[test]
+    fn a_narrow_frame_shortens_the_id_rather_than_running_past_the_border() {
+        // Same property from the other end. Sixty columns leaves no room for
+        // thirty-four characters of id, and the honest fit is the elided form.
+        for terminal in [40, 60, 78, 80, 120] {
+            let ui = framed_ui(terminal);
+            let names = verdicts(vec![(KAIJU, CurrencyName::Failed("boom".into()))]);
+            let held = holding(vec![(KAIJU, 927_249_511_041)]);
+            let panel = Panel::new("WALLET")
+                .section("TOKENS")
+                .table(token_table(&ui, &held, &names));
+            let widths = frame_widths(&panel.render(&ui.theme));
+            assert!(
+                widths.windows(2).all(|pair| pair[0] == pair[1]),
+                "ragged frame at {terminal} columns, widths {widths:?}:\n{}",
+                panel.render(&ui.theme)
+            );
+        }
+    }
+
+    #[test]
+    fn json_says_a_name_is_unknown_rather_than_absent_when_the_lookup_failed() {
+        let names = verdicts(vec![
+            (KAIJU, CurrencyName::Failed("idimportfees: 1e-8".into())),
+            (TOKEN, CurrencyName::Absent),
+        ]);
+
+        let failed = name_json(&currency(KAIJU), &names);
+        assert_eq!(failed["known"], serde_json::json!(false));
+        assert!(
+            failed.get("name").is_none(),
+            "a lookup that failed must not answer the question: {failed}"
+        );
+
+        // The other direction: a node that said "no such currency" answered, so
+        // that row keeps the affirmative shape it always had.
+        let absent = name_json(&currency(TOKEN), &names);
+        assert_eq!(absent["known"], serde_json::json!(true));
+        assert_eq!(absent["name"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn explain_says_a_lookup_failed_rather_than_reporting_no_names() {
+        // `0 names` on its own reads as "the chain has no name for these",
+        // which is a confident answer to a question that was never answered.
+        assert_eq!(
+            name_result(&verdicts(vec![(
+                KAIJU,
+                CurrencyName::Failed("idimportfees: 1e-8".into())
+            )])),
+            "0 names, 1 the lookup failed for"
+        );
+        assert_eq!(
+            name_result(&verdicts(vec![(KAIJU, CurrencyName::Absent)])),
+            "0 names, 1 the node has no currency for"
+        );
+        assert_eq!(
+            name_result(&verdicts(vec![(
+                KAIJU,
+                CurrencyName::Known("Kaiju".into())
+            )])),
+            "1 name"
+        );
+    }
+
+    #[test]
+    fn the_history_note_names_the_ids_it_means_and_stays_silent_about_the_rest() {
+        // The change column renders a currency the node denies and a currency
+        // nobody could ask about identically, as a bare id. A note saying "a
+        // currency shown as an id" would therefore be a false statement about
+        // the row it did not mean — the node answered that one perfectly well.
+        let ui = plain_ui(80);
+        let names = verdicts(vec![
+            (KAIJU, CurrencyName::Absent),
+            (TOKEN, CurrencyName::Failed("timed out".into())),
+        ]);
+        let note = failed_ids(&ui, &names).expect("one lookup failed");
+        assert!(note.contains("iK2k8YH1j"), "{note}");
+        assert!(
+            !note.contains("iHBwQo7LU"),
+            "the denied currency is not a failed lookup: {note}"
+        );
+        // And nothing at all to say when nothing failed.
+        assert!(failed_ids(&ui, &verdicts(vec![(KAIJU, CurrencyName::Absent)])).is_none());
+    }
+
+    #[test]
+    fn a_currency_the_node_denies_is_not_reported_as_merely_nameless() {
+        // `"name": null` on its own reads as "this currency has no name". The
+        // node said something narrower and more surprising: it has no such
+        // currency, while this wallet is holding a balance in it.
+        let names = verdicts(vec![(KAIJU, CurrencyName::Absent)]);
+        let absent = name_json(&currency(KAIJU), &names);
+        assert_eq!(absent["known"], serde_json::json!(true));
+        assert_eq!(absent["name"], serde_json::Value::Null);
+        assert!(
+            absent["reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no currency"),
+            "{absent}"
+        );
+    }
+
+    #[test]
+    fn the_pending_table_stays_square_though_it_has_a_column_the_token_table_has_not() {
+        // The other half of the same regression, and the half a per-row width
+        // constant cannot see at all: these are the same two cells, but laid
+        // out against four columns rather than three. The label column and its
+        // gutter are ten more characters, and the frame came out three columns
+        // ragged at every terminal width — eighty included.
+        for terminal in [60, 80, 100, 200] {
+            let ui = framed_ui(terminal);
+            let palette = ui.theme.palette;
+            let names = verdicts(vec![(
+                KAIJU,
+                CurrencyName::Failed("idimportfees: 1e-8".into()),
+            )]);
+            let table = fitted(&ui.theme, |ids| {
+                let mut table =
+                    Table::headerless([Align::Left, Align::Right, Align::Left, Align::Left]);
+                table.push(vec![
+                    Text::of("INCOMING", palette.label),
+                    Text::of(fmt::amount(Amount::from_sat(150_000_000)), palette.ok),
+                    Text::of("VRSCTEST", palette.muted),
+                    Text::new(),
+                ]);
+                let [name, id] = currency_cells(&ui, currency(KAIJU), &names, ids);
+                table.push(vec![
+                    Text::new(),
+                    // The figure from the issue itself.
+                    Text::of(fmt::signed(927_249_511_041), palette.value),
+                    name,
+                    id,
+                ]);
+                table
+            });
+            let panel = Panel::new("WALLET").section("PENDING").table(table);
+            let widths = frame_widths(&panel.render(&ui.theme));
+            assert!(
+                widths.windows(2).all(|pair| pair[0] == pair[1]),
+                "ragged frame at {terminal} columns, widths {widths:?}:\n{}",
+                panel.render(&ui.theme)
+            );
+        }
     }
 }
