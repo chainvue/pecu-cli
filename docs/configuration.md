@@ -121,6 +121,18 @@ a `sendrawtransaction` goes out is not a node that was never reached: the
 transaction may already be in a mempool, and a blind retry is a second payment.
 The SDK reports that case separately and so does this.
 
+`2` is narrower than "the command line was wrong". A flag that names something
+`pecu` understands and cannot do is declared and refused here rather than left
+unknown to clap, so it exits `1` with a `pecu::…` code and a JSON document —
+`unexpected argument '--currency' found` reads as a misspelling and carries
+neither. `pecu plan send --currency` and `pecu plan send --from-identity` moved
+from `2` to `1` for that reason.
+
+`2` still covers everything clap settles before a command runs: a flag the
+parser has never heard of, and a flag it has — these two included — given no
+value. `pecu plan send -c` exits `2` with `a value is required for
+'--currency'`, because there is nothing yet to refuse by name.
+
 The status and `.error.code` answer different questions, and on one diagnostic
 they look like they disagree. `pecu::node_unreachable` is a single diagnostic
 over every failed node request, including the ones the node *answered* — a

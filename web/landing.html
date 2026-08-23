@@ -171,6 +171,15 @@ pecu sign @plan.hex --key cold --out signed.hex
 
 # 3. back where the node is. Carries no key.
 pecu broadcast @signed.hex</code></pre>
+        <p class="note">
+          <strong>The gap carries the chain's own coins, and nothing else.</strong>
+          <code>pecu plan send</code> takes <code>--currency</code> and
+          <code>--from-identity</code> and refuses each by name, before it opens a
+          socket: a token rides in an output's script and a VerusID's funds sit in
+          pay-to-identity outputs, and the SDK builds an unsigned form of neither.
+          <code>pecu send</code> moves both, and it signs on the machine that talks
+          to the node.
+        </p>
       </div>
       <div>
         <ul class="guards">

@@ -53,7 +53,7 @@ cargo build --release
 | `pecu wallet balance\|utxos\|history` | Spendable, withheld, token and unconfirmed balances |
 | `pecu tx explain` | Says what every output in a transaction actually *is* |
 | `pecu send` | Transparent sends: native, token, or out of a VerusID's own funds |
-| `pecu plan send` · `sign` · `broadcast` | The air-gap trio, over files or QR codes |
+| `pecu plan send` · `sign` · `broadcast` | The air-gap trio, over files or QR codes — the chain's own coins only |
 | `pecu id show\|register\|update\|revoke\|recover\|unlock` | The VerusID lifecycle, including timelocks |
 | `pecu currency show\|launch\|mint\|preconvert\|convert` | Currency definitions, launches, minting, conversions |
 
@@ -151,6 +151,14 @@ pecu broadcast @signed.hex                                      # online, no key
 ```
 
 Each step also speaks QR codes, so the offline machine needs no cable.
+
+**The gap carries the chain's own coins, and nothing else.** `pecu plan send`
+takes `--currency` and `--from-identity` and refuses each by name, before it
+opens a socket: a token rides in an output's script and a VerusID's funds sit in
+pay-to-identity outputs, and the SDK builds an unsigned form of neither — every
+token and identity builder signs as it builds, so there is no partial to carry
+offline. `pecu send` moves both, and it signs on the machine that talks to the
+node.
 
 ## Spending is guarded
 

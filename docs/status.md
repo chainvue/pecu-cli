@@ -45,6 +45,24 @@ claimed as working:
   with one key and refuse an m-of-n identity by name. The air-gap trio is the
   natural home for this, once it learns identity inputs.
 
+### Refused because nothing has built it
+
+Different in kind from the upstream-gap table further up: nothing closed
+upstream, and no chain evidence is pending. The code was simply never written, and deliberately is not
+being written now.
+
+* **Tokens and identity-held funds through the air gap.** `pecu send` has three
+  modes and `pecu plan send` carries one of them. It accepts `--currency` and
+  `--from-identity` and refuses each by name — `pecu::plan_has_no_token_path`
+  and `pecu::plan_has_no_identity_path` — before it opens a socket.
+  `prepare_unsigned_send` is the only SDK builder that returns a partial
+  transaction; every token and identity builder signs as it builds, so there is
+  no unsigned form of either payment to carry to the offline machine. The
+  partial format is not the blocker — a partial is started with whatever
+  outputs it is handed, and it has an input kind for a pay-to-identity input
+  already. What is missing is a builder, not a byte shape. `pecu send` moves both, signing on the machine
+  that talks to the node.
+
 ### Parked
 
 * **`feat/m8-login-vdxf`** — `id login` and VDXF publish/read, deliberately kept

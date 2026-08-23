@@ -45,3 +45,21 @@ jobs:
 
       - name: Build
         run: cargo build --release
+
+      # The site is generated from docs/*.md, so a documentation change can
+      # break it while every Rust check stays green. That is not hypothetical:
+      # a cross-reference written the way GitHub wants it failed two deploys on
+      # main before anyone looked, because the deploy workflow only runs after
+      # a merge and nobody was watching it. Building here means a PR that would
+      # break the site cannot be green.
+      #
+      # build.py refuses a dangling internal link and a capture it could not
+      # namespace, so this is a real check rather than a smoke test.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Website
+        run: |
+          pip install --disable-pip-version-check markdown==3.7
+          python web/build.py

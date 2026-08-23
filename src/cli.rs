@@ -322,6 +322,19 @@ pub struct PlanSendArgs {
     #[command(flatten)]
     pub target: WalletTarget,
 
+    /// Refused: a token rides in an output's script, and the SDK builds no
+    /// unsigned form of one — every token builder signs as it builds, so there
+    /// is no partial to carry offline. `pecu send --currency` is what moves a
+    /// token, and it signs where the node is
+    #[arg(long, short = 'c', value_name = "NAME@|i-ADDRESS")]
+    pub currency: Option<String>,
+
+    /// Refused: what a VerusID holds sits in pay-to-identity outputs, and an
+    /// unsigned plan can spend only the plain P2PKH kind. `pecu send
+    /// --from-identity` moves those funds, and it signs where the node is
+    #[arg(long, value_name = "NAME@|i-ADDRESS")]
+    pub from_identity: Option<String>,
+
     /// Also write the plan here
     #[arg(long, short = 'o', value_name = "FILE")]
     pub out: Option<std::path::PathBuf>,

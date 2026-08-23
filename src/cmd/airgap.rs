@@ -58,6 +58,35 @@ pub enum AirgapError {
     )]
     BadAmount { amount: String },
 
+    /// Fieldless, with the help inline, because every word of it is the same
+    /// on every run — matching the `--contribute` and `--conversion` refusals
+    /// rather than the `{detail}` variants around it, which carry a value.
+    ///
+    /// The layer matters in the wording: nothing about the partial *format* is
+    /// in the way, so "not supported" would send someone looking for a flag
+    /// that turns it on. `prepare_unsigned_send` is the only builder in the SDK
+    /// that hands back a `PartialTransaction`; the token builders hand back an
+    /// `Unsent<Sent>` at the earliest, which is already signed, because each
+    /// one signs as it builds.
+    #[error("--currency plans a token payment, and there is no unsigned form of one")]
+    #[diagnostic(
+        code(pecu::plan_has_no_token_path),
+        help(
+            "this is an SDK gap, not a mistake in what you asked for. The partial format is not \
+             the blocker — it is started with whatever outputs it is handed. What is missing is a \
+             builder: the SDK's token builders each sign as they build, so there is no unsigned \
+             token payment to carry to the offline machine. `pecu send --currency NAME@ --amount \
+             N --to ADDRESS --from LABEL` moves one, but it signs on the machine that talks to \
+             the node, which is the thing the air gap exists to avoid — a real limit, not a \
+             longer way round. Plan without --currency"
+        )
+    )]
+    CannotPlanAToken,
+
+    #[error("--from-identity spends what {identity} holds, and a plan cannot reach it")]
+    #[diagnostic(code(pecu::plan_has_no_identity_path), help("{advice}"))]
+    CannotPlanFromIdentity { identity: String, advice: String },
+
     #[error("that is not a partial transaction")]
     #[diagnostic(code(pecu::bad_plan), help("{detail}"))]
     BadPlan { detail: String },
@@ -174,12 +203,82 @@ fn rest_is_elsewhere(address: &str) -> String {
 /// help.
 fn a_verusid_holds_it_differently(address: &str) -> String {
     format!(
-        "{address} is a VerusID, and what a VerusID holds sits in pay-to-identity outputs. An \
-         unsigned plan can spend only the plain P2PKH kind, so planning finds none of it, \
+        "{address} is a VerusID, and {WHAT_AN_IDENTITY_HOLDS}, so planning finds none of it, \
          however much the identity is worth — funding it would not change that. `pecu send \
          --from-identity` moves those funds instead, signing with one of the identity's primary \
          keys; `pecu wallet balance --address {address}` shows what it holds."
     )
+}
+
+/// The one fact both identity-shaped refusals here turn on, written once
+/// because they are the same limit reached from two directions: `--address
+/// bob@` walks into it as a shortfall after the node has been asked, and
+/// `--from-identity` asks for it outright. `prepare_unsigned_send` funds
+/// through `funding::spendable`, which separates out every output that is not
+/// plain P2PKH before selection ever sees it.
+const WHAT_AN_IDENTITY_HOLDS: &str = "what a VerusID holds sits in pay-to-identity outputs, and \
+                                      an unsigned plan can spend only the plain P2PKH kind";
+
+/// The identity to name in the refusal, if there is one worth naming.
+///
+/// An empty or all-blank `--from-identity` is refused for exactly the same
+/// reason as any other value, but it cannot be quoted back: it would leave a
+/// pair of empty backticks in the sentence, and a remedy built around it —
+/// `pecu wallet balance --address` with nothing after it — is a command that
+/// does not run, which is the one thing every refusal here has to avoid.
+/// Nothing else validates the value: a flag that is always refused has nothing
+/// to validate it against, so this is only about the sentence staying true.
+fn identity_worth_naming(identity: &str) -> Option<&str> {
+    Some(identity.trim()).filter(|name| !name.is_empty())
+}
+
+/// Why `--from-identity` cannot be planned. Shares its middle sentence with the
+/// shortfall a VerusID `--address` reports, because it is the same limit.
+fn an_identity_spend_has_no_unsigned_form(identity: Option<&str>) -> String {
+    // Named, these two are commands the reader can paste. Unnamed, they would
+    // be commands missing an argument, so the shapes go instead.
+    let (moves_them, shows_them) = match identity {
+        Some(name) => (
+            format!("`pecu send --from-identity {name} --amount N --to ADDRESS --from LABEL`"),
+            format!("; `pecu wallet balance --address {name}` shows what the identity holds"),
+        ),
+        None => (
+            "`pecu send --from-identity NAME@ --amount N --to ADDRESS --from LABEL`".to_string(),
+            String::new(),
+        ),
+    };
+    format!(
+        "this is an SDK gap, not a mistake in what you asked for: {WHAT_AN_IDENTITY_HOLDS}, and \
+         those inputs are unlocked by a fulfillment rather than by a signature and public key. \
+         The builders that reach them each sign as they build. {moves_them} moves those funds, \
+         signing on the machine that talks to the node{shows_them}. Plan without --from-identity, \
+         from an address that holds its own coins"
+    )
+}
+
+/// The two flags `pecu send` takes that no partial transaction can carry.
+///
+/// They are declared and parsed rather than left unknown on purpose: clap's
+/// vocabulary can only say `unexpected argument '--currency'`, which reads as a
+/// misspelling and sends the reader hunting for the right spelling of something
+/// that does not exist. What they cost is nothing — refused here, ahead of the
+/// node, for the reason the launch guards give: a flag that can never be
+/// honoured should cost neither a prompt nor a round trip.
+fn refuse_what_no_partial_can_carry(args: &PlanSendArgs) -> Result<(), AirgapError> {
+    // Order shows only when both are passed, and either sentence is true then.
+    // `--currency` goes first because it is the likelier thing to have copied
+    // across from a working `pecu send`.
+    if args.currency.is_some() {
+        return Err(AirgapError::CannotPlanAToken);
+    }
+    if let Some(identity) = &args.from_identity {
+        let named = identity_worth_naming(identity);
+        return Err(AirgapError::CannotPlanFromIdentity {
+            identity: named.map_or_else(|| "a VerusID".to_string(), |name| format!("`{name}`")),
+            advice: an_identity_spend_has_no_unsigned_form(named),
+        });
+    }
+    Ok(())
 }
 
 /// A shortfall is not a node problem, and `pecu plan send` used to report every
@@ -275,6 +374,12 @@ fn plan_send_inner(
     _globals: &Globals,
     args: &PlanSendArgs,
 ) -> miette::Result<()> {
+    // Ahead of the spending gate, because this refusal is true on every profile
+    // and the other is true only on this one: a reader told to edit
+    // `allow_spend` first, and told the flag can never work afterwards, has
+    // been sent on an errand for nothing.
+    refuse_what_no_partial_can_carry(args)?;
+
     // Planning is where a mainnet spend is chosen, even though it is broadcast
     // two machines later. Every other command gates before it builds, and a
     // plan that may never legally be broadcast is not worth the round trip.
