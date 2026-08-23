@@ -79,6 +79,37 @@ fn export_refuses_to_print_a_key_without_yes() {
         .stdout(contains("in the clear"));
 }
 
+/// The refusal above writes its warning to **stdout**, which under `--json` put
+/// 221 bytes of prose in front of the document and broke `| jq` on garbage
+/// rather than on emptiness (#49). The warning is worth having and stdout is
+/// the wrong place for it in machine-readable mode, so it is not written there
+/// at all — the refusal arrives as the same error object every other failing
+/// `--json` run prints.
+#[test]
+fn export_refused_under_json_prints_json_and_no_prose() {
+    let home = home();
+    generate(&home, "demo");
+    let assertion = pecu(&home)
+        .args(["key", "export", "demo", "--json"])
+        .assert()
+        .code(1);
+    let output = assertion.get_output();
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+
+    let document: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("not json: {error}\n{stdout}"));
+    assert_eq!(document["error"]["code"], "pecu::export_refused");
+    assert!(
+        !stdout.contains("in the clear"),
+        "prose leaked onto the parsed stream:\n{stdout}"
+    );
+
+    // The warning is not lost — the reader still gets the refusal, on the
+    // stream that is not being parsed.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("pecu::export_refused"), "{stderr}");
+}
+
 #[test]
 fn the_wrong_passphrase_cannot_export() {
     let home = home();

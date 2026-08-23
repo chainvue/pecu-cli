@@ -264,9 +264,8 @@ pub fn plan_send(
     args: &PlanSendArgs,
 ) -> miette::Result<()> {
     let outcome = plan_send_inner(ui, settings, globals, args);
-    if !ui.is_json() {
-        ui.explain_panel();
-    }
+    // On stderr under `--json`; see `pecu send`.
+    ui.explain_panel();
     outcome
 }
 
@@ -838,10 +837,7 @@ fn from_qr(paths: &[std::path::PathBuf]) -> Result<Vec<u8>, miette::Report> {
 }
 
 fn emit(value: &serde_json::Value) {
-    println!(
-        "{}",
-        serde_json::to_string_pretty(value).expect("plain data")
-    );
+    crate::failure::document(value);
 }
 
 #[cfg(test)]

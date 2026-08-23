@@ -283,7 +283,17 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
     match &cli.command {
         Command::Dev { command } => match command {
             DevCommand::Ui => {
-                dev::gallery(&ui);
+                // The one command that ignores `--json`. Everywhere else the
+                // flag means stdout carries a document and nothing else, which
+                // `Ui` now enforces for every rendered thing; here the rendered
+                // thing *is* the output, and there is no machine-readable form
+                // of how something looks. So the gallery is drawn anyway and
+                // the note about it goes to stderr, which is not the stream
+                // anybody would be parsing.
+                if cli.globals.json {
+                    eprintln!("`dev ui` has no --json form; showing the rendered gallery");
+                }
+                dev::gallery(&Ui::new(cli.globals.theme, false, cli.globals.explain));
                 Ok(())
             }
         },
@@ -306,6 +316,13 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
         }
 
         Command::Completions { shell } => {
+            // The other command that ignores `--json`: a completion script is
+            // not a document, and wrapping one in JSON would only mean nobody
+            // could `source` it. Said on stderr, the way `dev ui` does, so the
+            // script on stdout stays usable either way.
+            if cli.globals.json {
+                eprintln!("`completions` has no --json form; printing the shell script");
+            }
             let mut command = Cli::command();
             let name = command.get_name().to_string();
             clap_complete::generate(*shell, &mut command, name, &mut std::io::stdout());

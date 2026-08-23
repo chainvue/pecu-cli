@@ -330,6 +330,42 @@ fn a_currency_without_its_at_sign_blames_the_currency_not_the_recipient() {
         .stderr(contains("unknown_recipient").not());
 }
 
+/// The other half of the exit-code split (#49): a daemon that read the request
+/// and refused it has *answered*, however unwelcome the answer, so this is a
+/// `1` and not the `3` an unreachable node gets. `tests/failure.rs` holds the
+/// unreachable side; this side needs a node that can say no.
+#[test]
+fn a_daemon_that_answered_no_exits_one_with_its_code_on_stdout() {
+    let home = home();
+    generate(&home, "demo");
+    let node = refusing_node(-5, "Identity not found");
+    let assertion = pecu(&home)
+        .args([
+            "send",
+            "--to",
+            CHAIN_IDENTITY,
+            "--amount",
+            "5",
+            "--currency",
+            "ghost@",
+            "--node",
+            &node,
+            "--json",
+        ])
+        .assert()
+        .code(1);
+    let output = assertion.get_output();
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+
+    let document: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("not json: {error}\n{stdout}"));
+    assert_eq!(document["error"]["code"], "pecu::unknown_currency");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("pecu::unknown_currency"),
+        "the report is still on stderr"
+    );
+}
+
 #[test]
 fn a_currency_name_that_already_ends_in_at_is_not_suggested_twice() {
     let home = home();
@@ -661,10 +697,22 @@ fn json_output_is_not_consent_to_spend() {
         .failure()
         .stderr(contains("--yes"));
 
-    // Nothing was built and nothing was printed to be parsed: this has to fail
-    // before the money moves, not after.
+    // The transaction *was* built and signed — consent is checked last, so the
+    // plan and its `hex` exist by now — and none of it is printed. Handing a
+    // script the signed bytes on the one path whose point is that nobody agreed
+    // to spend would make `--json` a spending flag by another route.
+    //
+    // The refusal itself is machine-readable, which is the whole point of
+    // having asked for JSON. An empty stdout used to be the answer here, and
+    // `jq` reads that as a silent success.
     let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
-    assert!(stdout.trim().is_empty(), "unexpected output:\n{stdout}");
+    let document: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("not json: {error}\n{stdout}"));
+    assert_eq!(document["error"]["code"], "pecu::needs_yes");
+    assert!(
+        document.get("hex").is_none(),
+        "the signed bytes exist by now and must not be handed out:\n{stdout}"
+    );
 }
 
 /// Exactly one JSON document on the dry-run path, which is the one reachable

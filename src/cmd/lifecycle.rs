@@ -940,10 +940,7 @@ fn choose_key(store: &Keystore, label: Option<&str>) -> Result<Envelope, miette:
 }
 
 fn emit(value: &serde_json::Value) {
-    println!(
-        "{}",
-        serde_json::to_string_pretty(value).expect("the report is plain data")
-    );
+    crate::failure::document(value);
 }
 
 #[cfg(test)]

@@ -418,11 +418,23 @@ confirmation prompt writes to the stream you are parsing and there is nobody to
 answer it, so consent has to be passed in rather than assumed from the fact that
 you asked for machine-readable output.
 
-`send --json` prints **exactly one document**, on every path including the one
-where the broadcast fails — that path is where the signed `hex` matters most,
-since it is the only field that cannot be recovered afterwards. `broadcast` is a
-tri-state, because a broadcast that did not come back is not the same as one that
-was refused:
+`send --json` prints **at most one document**, and never more than one. There is
+a plan on every path that reached the broadcast, including the one where the
+broadcast fails — that path is where the signed `hex` matters most, since it is
+the only field that cannot be recovered afterwards.
+
+The paths that refuse before then print the bare error object instead: no key
+was named, the profile is not allowed to spend, the amount does not parse.
+`--json` without `--yes` is in that group too, and deliberately so — the
+transaction *has* been built and signed by the time consent is checked, and the
+`hex` is withheld rather than absent. Printing it would hand a script the one
+artefact it could broadcast itself, on the path whose whole purpose is that
+nobody agreed to spend. See [Failures, in
+`--json`](configuration.md#failures-in-json); either way `.error.code` is there
+to switch on.
+
+`broadcast` is a tri-state, because a broadcast that did not come back is not the
+same as one that was refused:
 
 | `outcome` | `broadcast` | What it means |
 |---|---|---|
@@ -435,6 +447,19 @@ was refused:
 broadcast that is reported as "not sent" invites a second payment, and telling
 someone their money is safe when it may already be moving is the wrong answer to
 be confident about.
+
+On the two failing rows the document also carries `error`, the same object every
+other failing `--json` run prints. In releases before this one that field was a
+sentence; it is now the object described under [Failures, in
+`--json`](configuration.md#failures-in-json), so a consumer that read `.error`
+as text wants `.error.message` now.
+
+The exit code answers a narrower question than `outcome` does — whether anything
+may be in flight. `rejected` exits **1**. An `unknown` whose bytes may already be
+propagating exits **4**; an `unknown` that never reached the wire, because the
+endpoint would not serve `sendrawtransaction` at all, exits **3**. So `3` here
+still means nothing was sent, and the `unknown` beside it is the document being
+careful rather than the exit code being wrong.
 
 ### The air gap
 
@@ -483,6 +508,9 @@ sign. `sign` refuses without `--yes` when that check fails.
 
 **A partial that still needs another signature is never dressed up as finished.**
 It comes back as a partial, with a non-zero exit and instructions to pass it on.
+Under `--json` that is one document carrying both the `partial` to hand on and
+the `error` saying why it is not done — see [Failures, in
+`--json`](configuration.md#failures-in-json).
 
 **The guards sit on the two commands that touch the chain.** `plan send` and
 `broadcast` both read `allow_spend`, and `broadcast` also honours `--dry-run` and

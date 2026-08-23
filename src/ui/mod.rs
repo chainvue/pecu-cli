@@ -51,11 +51,22 @@ impl Ui {
     }
 
     /// Print the recorded calls, if there are any and the flag is on.
+    ///
+    /// Under `--json` it goes to stderr instead of being dropped. `--explain`
+    /// is documented as working on any command, and stdout belongs to the
+    /// document — but the panel is prose for a person, and stderr is where the
+    /// prose on a `--json` run already lives.
     pub fn explain_panel(&self) {
-        if let Some(panel) = self.explain.panel(&self.theme) {
-            self.blank();
-            self.panel(&panel);
+        let Some(panel) = self.explain.panel(&self.theme) else {
+            return;
+        };
+        if self.json {
+            anstream::eprintln!();
+            anstream::eprint!("{}", panel.render(&self.theme));
+            return;
         }
+        self.blank();
+        self.panel(&panel);
     }
 
     /// Whether the caller wants machine-readable output. Commands check this
@@ -65,20 +76,44 @@ impl Ui {
         self.json
     }
 
+    /// In `--json` mode stdout belongs to the document and nothing else.
+    ///
+    /// Checked here rather than at every call site, which is how `key export
+    /// --json` came to print 221 bytes of prose ahead of its refusal and break
+    /// `| jq` on garbage instead of on emptiness (#49). Call sites still ask
+    /// [`Ui::is_json`] to decide *what* to compute; this decides whether a
+    /// rendered thing may be written at all, so the next `ui.note` before an
+    /// `Err` cannot reintroduce the same leak.
+    fn renders(&self) -> bool {
+        !self.json
+    }
+
     pub fn banner(&self, subtitle: &[&str]) {
+        if !self.renders() {
+            return;
+        }
         anstream::print!("{}", banner::render(&self.theme, subtitle));
     }
 
     pub fn panel(&self, panel: &Panel) {
+        if !self.renders() {
+            return;
+        }
         anstream::print!("{}", panel.render(&self.theme));
     }
 
     pub fn blank(&self) {
+        if !self.renders() {
+            return;
+        }
         anstream::println!();
     }
 
     /// A line of prose outside any frame.
     pub fn line(&self, text: Text) {
+        if !self.renders() {
+            return;
+        }
         anstream::println!("{}", text.render());
     }
 
@@ -99,6 +134,9 @@ impl Ui {
     }
 
     fn status(&self, glyph: &str, style: anstyle::Style, message: impl AsRef<str>) {
+        if !self.renders() {
+            return;
+        }
         anstream::println!(
             "  {} {}",
             Text::of(glyph, style).render(),

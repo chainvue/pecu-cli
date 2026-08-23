@@ -96,6 +96,39 @@ fn plan_paying_from(key: &PrivateKey) -> String {
     hex::encode(partial.to_bytes().expect("serialisable"))
 }
 
+/// A plan spending one output from each of two owners, so one signature
+/// finishes nothing. The shape a multisig hand-off has: `sign` signs what it
+/// can, prints the partial for the next signer, and fails.
+fn plan_paying_from_both(first: &PrivateKey, second: &PrivateKey) -> String {
+    let funding = [
+        Utxo {
+            txid: Txid::from_internal([9u8; 32]),
+            vout: 0,
+            satoshis: Amount::from_sat(300_000_000),
+            script_pubkey: p2pkh(&first.address()),
+        },
+        Utxo {
+            txid: Txid::from_internal([10u8; 32]),
+            vout: 1,
+            satoshis: Amount::from_sat(200_000_000),
+            script_pubkey: p2pkh(&second.address()),
+        },
+    ];
+    let outputs = vec![TxOut {
+        value: 499_990_000,
+        script_pubkey: p2pkh(&ELSEWHERE.parse::<Address>().expect("a valid address")),
+    }];
+    let partial = PartialTransaction::start(
+        &funding,
+        &[InputKind::PubKeyHash, InputKind::PubKeyHash],
+        outputs,
+        Expiry::from_height(1_200_000),
+        0,
+    )
+    .expect("a valid partial");
+    hex::encode(partial.to_bytes().expect("serialisable"))
+}
+
 fn p2pkh(address: &Address) -> Vec<u8> {
     assert_eq!(address.kind(), AddressKind::PubKeyHash);
     let mut script = vec![0x76, 0xa9, 0x14];
@@ -506,4 +539,88 @@ fn a_finished_transaction_still_goes_to_the_node_when_told_to() {
         .failure()
         .stderr(contains("broadcasting"))
         .stderr(contains(FINISHED_TXID));
+}
+
+/// The third command that prints a document and *then* fails — and the one
+/// whose output a script has to feed back in, since the `partial` is what the
+/// co-signer is handed. It printed the document and then a second one carrying
+/// the error, which `json.loads` and `JSON.parse` refuse outright (#49).
+///
+/// Exactly one document, with the failure inside it, and the partial intact.
+#[test]
+fn a_partial_signature_prints_one_document_with_the_failure_inside_it() {
+    let home = home();
+    let key = signer(7);
+    import(&home, "cold", &key);
+
+    let assertion = pecu(&home)
+        .args([
+            "sign",
+            &plan_paying_from_both(&key, &signer(8)),
+            "--key",
+            "cold",
+            "--yes",
+            "--node",
+            DEAD_NODE,
+            "--json",
+        ])
+        .assert()
+        // A partial is not a failure of the node's: nothing was asked of it.
+        .code(1);
+    let output = assertion.get_output();
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+
+    let documents: Vec<serde_json::Value> = serde_json::Deserializer::from_str(&stdout)
+        .into_iter::<serde_json::Value>()
+        .map(|document| document.unwrap_or_else(|error| panic!("not json: {error}\n{stdout}")))
+        .collect();
+    assert_eq!(documents.len(), 1, "one document, not two:\n{stdout}");
+
+    let document = &documents[0];
+    assert_eq!(document["kind"], "partially_signed");
+    assert_eq!(document["signed_inputs"], 1);
+    // The thing the next signer needs. Losing it to the failure would make the
+    // hand-off impossible in the mode built for hand-offs.
+    assert_eq!(
+        document["partial"].as_str().expect("the partial hex").len() % 2,
+        0
+    );
+    assert!(!document["partial"].as_str().expect("hex").is_empty());
+    assert_eq!(document["error"]["code"], "pecu::incomplete");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("pecu::incomplete"),
+        "the report is still on stderr"
+    );
+}
+
+/// The exit code #49 added for a broadcast whose outcome nobody knows. The
+/// bytes went out and the connection did not come back, so the transaction may
+/// or may not be propagating — `3` would invite a blind resend, and `1` would
+/// claim it was refused.
+#[test]
+fn a_broadcast_that_did_not_come_back_exits_four() {
+    let home = home();
+    let assertion = pecu(&home)
+        .args([
+            "broadcast",
+            FINISHED,
+            "--yes",
+            "--json",
+            "--node",
+            DEAD_NODE,
+        ])
+        .assert()
+        .code(4);
+    let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+    let document: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("not json: {error}\n{stdout}"));
+    assert_eq!(document["error"]["code"], "pecu::flow_failed");
+    // What the help tells you to check with, and what says why this is not a 3.
+    assert!(
+        document["error"]["help"]
+            .as_str()
+            .expect("help")
+            .contains(FINISHED_TXID),
+        "{document:#}"
+    );
 }

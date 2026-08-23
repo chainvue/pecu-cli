@@ -650,8 +650,5 @@ fn tokens_json(tokens: &[(CurrencyId, u64)]) -> Vec<serde_json::Value> {
 }
 
 fn emit_json(value: &serde_json::Value) {
-    println!(
-        "{}",
-        serde_json::to_string_pretty(value).expect("the report is plain data")
-    );
+    crate::failure::document(value);
 }
