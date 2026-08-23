@@ -26,6 +26,7 @@ use verus_sdk::verus_wire::TxV4;
 
 use crate::cli::{Globals, SendArgs};
 use crate::cmd::tx;
+use crate::cmd::uncertain_broadcast_advice;
 use crate::config::Settings;
 use crate::keystore::{self, Envelope, Keystore};
 use crate::node::{self, Node};
@@ -795,6 +796,11 @@ fn flow(what: &'static str, source: FlowError) -> SendError {
          holdings yet. Paying one of its primary addresses instead is not the same thing: those \
          coins belong to whoever holds that key, not to the identity"
             .to_string()
+    // The node answered, or the connection broke — either way `pecu doctor`
+    // blames a node that is not the problem, and the retry it invites is how
+    // the payment gets made twice.
+    } else if let FlowError::BroadcastUncertain { txid, hex, .. } = &source {
+        uncertain_broadcast_advice(txid, hex)
     } else {
         "run `pecu doctor`, or point somewhere else with --node".to_string()
     };
@@ -881,11 +887,14 @@ fn plan_json(
 ///
 /// * `true` — the node accepted it.
 /// * `false` — it definitely was not accepted: a dry run, or a daemon that
-///   answered with a rejection.
-/// * `null` — unknown. The request did not complete, and a transaction whose
-///   broadcast timed out may still be sitting in the mempool. Saying `false`
-///   there would be a guess about money; `outcome` and `hex` are what let you
-///   go and find out.
+///   answered with an outright rejection.
+/// * `null` — unknown. Either the request did not complete, or the node
+///   answered without settling the outcome: a `-25` says a check failed, not
+///   that the transaction was refused, so the SDK reports it as
+///   `BroadcastUncertain` and it lands here rather than under `rejected`. A
+///   broadcast that timed out may still be sitting in the mempool just the
+///   same. Saying `false` on either would be a guess about money; `outcome`
+///   and `hex` are what let you go and find out.
 fn emit_json(plan: serde_json::Value, delivery: Delivery<'_>) {
     println!(
         "{}",
@@ -909,9 +918,11 @@ fn delivery_json(mut plan: serde_json::Value, delivery: Delivery<'_>) -> serde_j
         }
         Delivery::Failed(error) => {
             document.insert("error".into(), serde_json::json!(error.to_string()));
-            // A daemon that answered with an error has read the transaction and
-            // refused it. Anything else — a timeout, a dropped connection, a
-            // reply this build could not parse — leaves the mempool's contents
+            // A daemon that answered with an outright rejection has read the
+            // transaction and refused it. Anything else — a timeout, a dropped
+            // connection, a reply this build could not parse, or a `-25` the
+            // SDK hands back as `BroadcastUncertain` because it does not say
+            // the transaction was refused — leaves the mempool's contents
             // genuinely unknown.
             match error {
                 FlowError::Rpc(RpcError::Node { .. }) => (Some(false), "rejected"),
@@ -1490,5 +1501,38 @@ mod tests {
             widths.windows(2).all(|pair| pair[0] == pair[1]),
             "ragged frame {widths:?}:\n{out}"
         );
+    }
+
+    #[test]
+    fn an_uncertain_send_broadcast_does_not_send_the_reader_to_the_doctor() {
+        // The advice saves the signed bytes, so it needs somewhere that is not the
+        // real keystore root to save them into.
+        let _unsent = crate::cmd::UnsentRoot::temporary();
+        let refused = flow(
+            "broadcasting",
+            FlowError::BroadcastUncertain {
+                txid: "9c1d55".into(),
+                hex: "0400008085202f89".into(),
+                reason: "node returned error -25: bad-txns-failed-precheck".into(),
+            },
+        );
+        let SendError::Flow { advice, .. } = refused else {
+            panic!("a flow refusal is a SendError::Flow");
+        };
+        assert!(advice.contains("tx explain 9c1d55"));
+        assert!(!advice.contains("doctor"));
+    }
+
+    /// Arm ordering: the token-recipient refusal comes first and has to stay
+    /// there, since being swallowed by the new branch is the only way this
+    /// change could regress it.
+    #[test]
+    fn a_token_recipient_keeps_its_own_advice_ahead_of_the_uncertain_arm() {
+        use verus_sdk::verus_tx::TxError;
+        let refused = flow("building", FlowError::Tx(TxError::UnsupportedRecipient));
+        let SendError::Flow { advice, .. } = refused else {
+            panic!("a flow refusal is a SendError::Flow");
+        };
+        assert!(advice.contains("a token payment can only name an R-address"));
     }
 }

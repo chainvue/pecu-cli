@@ -55,6 +55,7 @@ use verus_sdk::verus_keys::{Address, AddressKind, PrivateKey};
 use verus_sdk::verus_tx::Destination;
 
 use crate::cli::{Globals, IdAuthorityArgs, IdRecoverArgs, IdUnlockArgs, IdUpdateArgs};
+use crate::cmd::uncertain_broadcast_advice;
 use crate::config::Settings;
 use crate::keystore::{self, Envelope, Keystore};
 use crate::node::{self, Node};
@@ -220,6 +221,10 @@ fn flow(what: &'static str, source: FlowError) -> LifecycleError {
         FlowError::Content(_) => {
             "the identity was read, but the change could not be built from it".to_string()
         }
+        // The node answered, or the connection broke — either way `pecu doctor`
+        // blames a node that is not the problem, and the retry it invites is
+        // how the fee gets paid twice.
+        FlowError::BroadcastUncertain { txid, hex, .. } => uncertain_broadcast_advice(txid, hex),
         _ => "run `pecu doctor`, or point somewhere else with --node".to_string(),
     };
     LifecycleError::Flow {
@@ -939,4 +944,31 @@ fn emit(value: &serde_json::Value) {
         "{}",
         serde_json::to_string_pretty(value).expect("the report is plain data")
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `revoke`, `recover`, `update` and `unlock` all broadcast through this
+    /// mapper, and none of them is a retry anybody should make blind.
+    #[test]
+    fn an_uncertain_broadcast_does_not_blame_the_node() {
+        // The advice saves the signed bytes, so it needs somewhere that is not the
+        // real keystore root to save them into.
+        let _unsent = crate::cmd::UnsentRoot::temporary();
+        let refused = flow(
+            "broadcasting the revocation",
+            FlowError::BroadcastUncertain {
+                txid: "9c1d55".into(),
+                hex: "0400008085202f89".into(),
+                reason: "node returned error -25: bad-txns-failed-precheck".into(),
+            },
+        );
+        let LifecycleError::Flow { advice, .. } = refused else {
+            panic!("a flow refusal is a LifecycleError::Flow");
+        };
+        assert!(advice.contains("tx explain 9c1d55"));
+        assert!(!advice.contains("doctor"));
+    }
 }

@@ -597,19 +597,25 @@ fn an_uneven_basket_keeps_its_ratios_exactly() {
     );
 }
 
-/// An NFT is refused by consensus, and the diagnostic has to say why rather
-/// than repeat `bad-txns-failed-precheck` and send the reader to `pecu doctor`.
+/// An NFT launch refused at `bad-txns-failed-precheck` has to come back with the
+/// candidate causes rather than the reject code and `pecu doctor`.
 ///
-/// Broadcasting this costs nothing — the fee is not paid and the identity's one
-/// currency slot is untouched — so the test really does try it. It is the only
-/// way to prove the mapping fires on the error consensus actually returns.
+/// It must not come back with one cause either. Currency launches are switched
+/// off chain-wide on VRSCTEST, so this is what any launch is answered with at
+/// the moment, and the SDK gap this diagnostic was originally written for
+/// closed upstream — naming it would be wrong twice over.
 ///
-/// Delete this the day the SDK emits the tokenized-control recovery
-/// destination: the launch will start succeeding and the test will fail loudly,
-/// which is the correct way to find out.
+/// This one really does broadcast, because a `-25` is only produced by a chain
+/// and no offline fixture can prove the mapping fires on the answer consensus
+/// actually returns. What it no longer claims is that the attempt is free: a
+/// `-25` says a check failed, not that the transaction was refused, so it does
+/// not settle whether the 200 VRSCTEST went. That is exactly why the assertions
+/// below are on the candidate wording and on the sentence telling the reader to
+/// check before resending — the ones that would have to be true for someone
+/// reading this output to work out what happened to their fee.
 #[test]
-#[ignore = "spends nothing, but broadcasts to api.verustest.net"]
-fn an_nft_is_refused_with_the_reason_rather_than_the_reject_code() {
+#[ignore = "broadcasts a real launch to api.verustest.net, and a -25 does not settle what it cost"]
+fn an_nft_is_refused_with_the_candidates_rather_than_the_reject_code() {
     let Ok(funded) = std::env::var("PECU_FUNDED_HOME") else {
         eprintln!("PECU_FUNDED_HOME is not set — skipping");
         return;
@@ -634,9 +640,10 @@ fn an_nft_is_refused_with_the_reason_rather_than_the_reject_code() {
         return;
     }
     assertion
-        .stderr(contains("nft_unsupported"))
-        .stderr(contains("SDK gap"))
-        .stderr(contains("Nothing was spent"));
+        .stderr(contains("more than one plausible cause"))
+        .stderr(contains("switched off chain-wide"))
+        .stderr(contains("EVAL_IDENTITY_RECOVER"))
+        .stderr(contains("check before resending").or(contains("may already be propagating")));
 }
 
 /// The one satoshi is what makes it non-fungible, and it has to survive all the

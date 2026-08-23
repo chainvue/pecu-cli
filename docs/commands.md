@@ -467,6 +467,99 @@ rather than byte mode at 8.
 
 `--qr` draws in the terminal; `--qr-out <stem>` writes `<stem>-1.png`, `-2.png`, …
 
+**On the human path the bytes are written to a file, not to the screen.** An
+unsettled broadcast is diagnosed with the same sentence everywhere — never `run
+pecu doctor`, because the node is not what went wrong — and it names
+`<config>/unsent/<txid>.hex`, where the signed transaction has just been saved.
+`pecu tx explain <txid>` only answers while some node still holds the
+transaction, and a `-25` usually means it was refused before reaching any
+mempool, so the txid alone is often a dead end at exactly the moment the advice
+is printed. *Often*, not always — a `-25` does not say the transaction was
+refused, which is why the check comes first and the bytes are kept rather than
+resent. The file is what makes both possible: `pecu tx explain - < …` decodes it
+with no node at all, and `pecu broadcast @…` resends precisely those bytes once
+the check says nothing landed. It is a file rather than part of the message
+because a launch is kilobytes of hex and every terminal renderer wraps it into
+something that cannot be copied.
+
+Nothing prunes `unsent/`. A file there is a transaction whose fate somebody has
+not established yet, and deleting it on a schedule would throw away the only
+copy of the bytes at the point they are still needed; `pecu doctor` does not
+report on it either. Clear it out by hand once the check has answered.
+
+### The air gap
+
+Three commands, because there are three machines' worth of trust.
+
+```sh
+# 1. where the node is. No key on this machine at all.
+pecu plan send --address RComf…N9Hm --to RJ7gs…w5hp --amount 0.4 --qr-out plan.png
+
+# 2. where the key is. This one opens no socket.
+pecu sign --qr-in plan-1.png --key cold --qr-out signed.png
+
+# 3. back where the node is. Carries no key.
+pecu broadcast --qr-in signed-1.png
+```
+
+Files and pipes work just as well — `--out plan.hex`, then `pecu sign @plan.hex`,
+then `pecu broadcast @signed.hex`. Everything accepts hex as an argument, `@file`,
+or `-` for stdin.
+
+```
+┌─ PLAN ─────────────────────────────────────────────────────────┐
+│ from           RComfCn4wHHsGR8vWBAU7T1r3tHHyxN9Hm              │
+│ spending       449.74990000 VRSCTEST across 1 input            │
+│ paying out     449.74980000 VRSCTEST                           │
+│ fee and burn   0.00010000 VRSCTEST                             │
+│ expiry         height 1,176,653                                │
+│ commits        ✓ every input covers every output (SIGHASH_ALL) │
+├─ OUTPUTS ──────────────────────────────────────────────────────┤
+│ #0 0.30000000 VRSCTEST                                         │
+│      → RJ7gsKDjUjPS8XZzENqmQMmWJRLuTnw5hp                      │
+│ #1 449.44980000 VRSCTEST                                       │
+│      → RComfCn4wHHsGR8vWBAU7T1r3tHHyxN9Hm                      │
+└────────────────────────────────────────────────────────────────┘
+```
+
+**`sign` genuinely needs no network.** Not "does not usually use one" — there is
+a test that signs a plan with `--node https://127.0.0.1:1` and succeeds. If that
+ever stops being true, the suite fails.
+
+**`commits` is the row to read.** Whoever planned the transaction chose the
+outputs, and a signature is the irreversible step. Outputs are only binding on
+your input if your input commits to them: under `SIGHASH_NONE` they are not
+covered at all, and whoever holds the partial can redirect the money after you
+sign. `sign` refuses without `--yes` when that check fails.
+
+**A partial that still needs another signature is never dressed up as finished.**
+It comes back as a partial, with a non-zero exit and instructions to pass it on.
+
+**The guards sit on the two commands that touch the chain.** `plan send` and
+`broadcast` both read `allow_spend`, and `broadcast` also honours `--dry-run` and
+refuses `--json` without `--yes` — the same three rules `pecu send` follows,
+because between them these two *are* `send` taken apart. A plan cannot be
+broadcast, so `plan send` has nothing to stop short of. `sign` is exempt on
+purpose: it opens no socket and a signature alone moves nothing, so the machine
+holding the key needs no profile that is allowed to spend.
+
+#### QR framing
+
+A QR code holds at most 4296 alphanumeric characters, so payloads are split into
+numbered frames:
+
+```
+PECU1:2/5:A1B2C3…
+```
+
+They reassemble in any order and duplicates are ignored — a stack of photographs
+is rarely tidy — but a *missing* frame is refused by number, because a payload
+silently short by one is a transaction that fails at the daemon for no visible
+reason. Hex is upper-cased so QR uses alphanumeric mode at 5.5 bits per character
+rather than byte mode at 8.
+
+`--qr` draws in the terminal; `--qr-out <stem>` writes `<stem>-1.png`, `-2.png`, …
+
 ### `pecu id`
 
 ```sh
@@ -1195,7 +1288,7 @@ a slot is one-shot:
 | **preconvert** — 5 VRSCTEST into a pre-launch basket | `pecubask1@` | `0bb8a7ae…` |
 | **convert** — 1 VRSCTEST into a live basket, `--min-out` floor honoured | `triccrypto2` | `68c8363c…` |
 
-**`--nft` is built but consensus refuses it, and that is upstream.** An NFT is a
+**`--nft` is built, and the chain has not accepted one yet.** An NFT is a
 *currency-mapped* token: `options 2080`, one satoshi of supply preallocated to
 the defining identity, and — non-obviously — `currencies = [parent]` despite not
 being fractional, because consensus requires `maxPreconvert.size() == 1` and the
@@ -1203,19 +1296,27 @@ per-reserve vectors are indexed by the reserve list. `pecu` builds all of that,
 and the transaction decodes field-for-field identical to a working on-chain NFT
 across all seven outputs.
 
-It was refused by one missing destination. An identity with tokenized control
-carries a *second* destination on its recovery condition — the key hash of the
+The launch that was tried came back `-25: bad-txns-failed-precheck`, and `pecu`
+used to answer that with one cause: an identity with tokenized control carries a
+*second* destination on its recovery condition — the key hash of the
 `EVAL_IDENTITY_RECOVER` contract pubkey, a constant — and the SDK's identity
-output script did not emit it, so consensus derived a different script. That sat
-inside the transaction builder where no caller could reach it, so the flag
-stopped at a diagnostic rather than at `bad-txns-failed-precheck`.
+output script did not emit it, so consensus derived a different script.
 
+**That answer is no longer honest, so `pecu` no longer gives it.**
 `identity_primary_script` takes the tokenized-control flag now
-([chainvue/verus-rust-sdk#111](https://github.com/chainvue/verus-rust-sdk/issues/111)),
-so the refusal has outlived its reason and is kept only until an NFT launch is
-watched onto the chain — three of the seven gaps that closed were NFT ones, and
-they want proving together. Nothing is spent by the attempt meanwhile: the fee
-is not paid and the identity's one currency slot is untouched.
+([chainvue/verus-rust-sdk#111](https://github.com/chainvue/verus-rust-sdk/issues/111))
+and `tests/upstream.rs` asserts offline that the destination really is emitted;
+meanwhile DeFi is switched off chain-wide on VRSCTEST, so `-25` is what the chain
+answers to *any* currency launch while that lasts, whatever it contains. Either
+would make "the SDK builds the identity output wrong" a confident guess. So the
+diagnostic names both candidates and picks neither.
+
+It also stops claiming nothing was spent. Since the SDK pin moved, a `-25` comes
+back as `BroadcastUncertain` rather than a rejection — a `-25` says a check
+failed, not that the transaction was refused — so `pecu` keeps the txid, keeps
+the signed bytes, and tells you to check before resending. That is the same
+advice every broadcast in this tree gives when the node does not settle the
+outcome; see the tri-state table under [`pecu send`](#pecu-send).
 
 ### `--explain`
 

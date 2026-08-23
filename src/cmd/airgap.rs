@@ -34,6 +34,7 @@ use verus_sdk::verus_keys::Address;
 
 use crate::cli::{BroadcastArgs, Globals, PlanSendArgs, QrOut, SignArgs};
 use crate::cmd::tx;
+use crate::cmd::uncertain_broadcast_advice;
 use crate::cmd::wallet;
 use crate::config::Settings;
 use crate::keystore::{self, Keystore};
@@ -130,9 +131,16 @@ pub enum AirgapError {
 }
 
 fn flow(what: &'static str, source: FlowError) -> AirgapError {
+    let advice = match &source {
+        // `pecu broadcast` is the command someone reaches for to resend, so
+        // sending them to `pecu doctor` here argues directly for the second
+        // broadcast this variant exists to prevent.
+        FlowError::BroadcastUncertain { txid, hex, .. } => uncertain_broadcast_advice(txid, hex),
+        _ => "run `pecu doctor`, or point somewhere else with --node".to_string(),
+    };
     AirgapError::Flow {
         what,
-        advice: "run `pecu doctor`, or point somewhere else with --node".to_string(),
+        advice,
         source: Box::new(source),
     }
 }
@@ -725,4 +733,32 @@ fn emit(value: &serde_json::Value) {
         "{}",
         serde_json::to_string_pretty(value).expect("plain data")
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `pecu broadcast` is the command someone reaches for to resend, so wrong
+    /// advice here argues directly for the double broadcast this variant exists
+    /// to prevent.
+    #[test]
+    fn an_uncertain_broadcast_does_not_blame_the_node() {
+        // The advice saves the signed bytes, so it needs somewhere that is not the
+        // real keystore root to save them into.
+        let _unsent = crate::cmd::UnsentRoot::temporary();
+        let refused = flow(
+            "broadcasting",
+            FlowError::BroadcastUncertain {
+                txid: "9c1d55".into(),
+                hex: "0400008085202f89".into(),
+                reason: "node returned error -25: bad-txns-failed-precheck".into(),
+            },
+        );
+        let AirgapError::Flow { advice, .. } = refused else {
+            panic!("a flow refusal is a AirgapError::Flow");
+        };
+        assert!(advice.contains("tx explain 9c1d55"));
+        assert!(!advice.contains("doctor"));
+    }
 }
