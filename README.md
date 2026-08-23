@@ -120,6 +120,23 @@ anything is broadcast. `--json` refuses to spend without `--yes`.
   <img alt="pecu send --dry-run showing the review panel, the built outputs and the signed transaction" src="docs/media/send-light.svg">
 </picture>
 
+### Sending a token
+
+`--currency` moves a token instead of the chain's own coins. The amount is
+labelled with what is actually moving; the fee stays in VRSCTEST, because that
+is what the miner is paid in. The `currency id` row is what the name resolved
+to — a name is text somebody registered, the id is the part that identifies
+anything.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/send-token-dark.svg">
+  <img alt="pecu send --currency moving a token, with the amount labelled by the token and the fee in VRSCTEST" src="docs/media/send-token-light.svg">
+</picture>
+
+The token-carrying outputs read `0.00000000 VRSCTEST` because a token rides in
+the output's script, not its value. Five go to the recipient, twenty come back
+as change — which is the sum a reader is meant to check before typing yes.
+
 ## The air gap
 
 Three commands, three machines. The one holding the key never opens a socket.
