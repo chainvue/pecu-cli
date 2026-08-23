@@ -27,7 +27,7 @@ expression: "explain(\"currency-launch-fractional-one-reserve.hex\")"
 │      currency                                                              │
 │ #5 100.00000000                                                            │
 │      reserves held for i9G2QgG74f7tErEyF3cWp2x1exBGbFa19t: 100.00000000    │
-│      iJhCezBEx…f2yq                                                        │
+│      iJhCezBExJHvtyH3fGhNnt2NhU4Ztkf2yq                                    │
 │ #6 5.00000000                                                              │
 │      → i9G2QgG74f7tErEyF3cWp2x1exBGbFa19t  held for a VerusID, not a key   │
 └────────────────────────────────────────────────────────────────────────────┘

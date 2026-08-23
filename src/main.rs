@@ -3,6 +3,7 @@
 mod cli;
 mod cmd;
 mod config;
+mod currency_name;
 mod explain;
 mod failure;
 mod keystore;
