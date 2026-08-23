@@ -57,7 +57,7 @@ at 1.1:1 and are unreadable.
 ## Phone widths
 
 ```sh
-make mobile        # asserts no page scrolls sideways at 320/360/390/414
+make check-site    # no sideways scroll at 320/360/390/414, and Replay works
 ```
 
 Worth its own command because the obvious way to check is wrong: headless Chrome
@@ -71,6 +71,13 @@ could be panned on a phone, made a 390px viewport scroll to 594px. Grid items do
 not shrink below their content unless told to, so one wide child dragged every
 paragraph's right edge off the screen — and the visible symptom was clipped
 prose, nowhere near the capture that caused it.
+
+The Replay half is there because the button shipped broken and survived three
+rounds of review: every check asked whether it appeared and whether a handler was
+attached, and none of them clicked it. `animation-name` lives in the capture's
+own inline style and never changes, so toggling a class re-times the existing
+animation rather than replacing it — and a finished animation that is re-timed is
+still finished. The check sets the clock past the end, clicks, and reads it back.
 
 **A capture rests on a different frame depending on the device.** Above the phone
 breakpoint, with motion allowed and an `IntersectionObserver` available, it rests

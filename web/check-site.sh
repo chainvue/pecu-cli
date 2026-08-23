@@ -1,7 +1,9 @@
 #!/bin/sh
-# Assert that no page scrolls sideways at phone widths.
+# Assert the two things about the built site that reading it cannot tell you:
+# that no page scrolls sideways at phone widths, and that the Replay button on a
+# terminal capture actually restarts the recording.
 #
-#   web/check-mobile.sh [width...]        (default: 320 360 390 414)
+#   web/check-site.sh [width...]          (default: 320 360 390 414)
 #
 # Why this exists as a script rather than a habit: headless Chrome clamps its
 # own viewport to a 500px minimum, so `--window-size=390` renders a 500px layout
@@ -62,6 +64,52 @@ HTML
     done
 done
 
+# --- the Replay button ------------------------------------------------------
+#
+# It was shipped broken and stayed broken through three rounds of review,
+# because every check asked whether the button appeared and whether a handler
+# was attached. Nobody clicked it. `animation-name` lives in the capture's own
+# inline style and never changes, so toggling a class re-times the existing
+# animation instead of replacing it — and a finished animation that is re-timed
+# is still finished. This drives the click and reads the clock.
+cat > "$site/.replay.html" <<'HTML'
+<!doctype html><meta charset=utf-8>
+<style>html,body{margin:0}iframe{width:1200px;height:900px;border:0}</style>
+<iframe id=f src="/"></iframe>
+<script>
+document.getElementById('f').onload = function () {
+  var d = this.contentDocument, bad = [];
+  setTimeout(function () {
+    d.querySelectorAll('[data-term]').forEach(function (term, i) {
+      var film = term.querySelector('svg g[style*="animation-name"]');
+      if (!film) { bad.push(i + ':no-film'); return; }
+      var button = term.querySelector('[data-replay]');
+      if (!button || button.hidden) { bad.push(i + ':no-button'); return; }
+      term.classList.add('is-playing');
+      var before = film.getAnimations()[0];
+      if (!before) { bad.push(i + ':no-animation'); return; }
+      before.currentTime = 9000;                 // past every recorded duration
+      button.click();
+      var after = film.getAnimations()[0];
+      if (after.playState !== 'running' || after.currentTime > 100) {
+        bad.push(i + ':' + Math.round(after.currentTime) + '/' + after.playState);
+      }
+    });
+    document.title = bad.length ? 'DEAD ' + bad.join(',') : 'OK';
+  }, 900);
+};
+</script>
+HTML
+verdict=$("$chrome" --headless=new --disable-gpu --window-size=1240,950 \
+          --virtual-time-budget=8000 --dump-dom "http://127.0.0.1:$port/.replay.html" 2>/dev/null \
+          | sed -n 's/.*<title>\(.*\)<\/title>.*/\1/p')
+rm -f "$site/.replay.html"
+
+case "$verdict" in
+    OK) echo "  ok replay restarts every capture" ;;
+    *)  echo "  REPLAY does not restart: $verdict" >&2; failed=1 ;;
+esac
+
 rm -f "$site/.probe.html"
-[ "$failed" -eq 0 ] || { echo "sideways scroll at a phone width" >&2; exit 1; }
-echo "no page scrolls sideways"
+[ "$failed" -eq 0 ] || { echo "the built site has a defect a reader would hit" >&2; exit 1; }
+echo "no page scrolls sideways, and Replay restarts every capture"

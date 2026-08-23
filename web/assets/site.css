@@ -361,6 +361,13 @@ pre:hover .copy, .copy:focus-visible { opacity: 1; }
    it away to type it out. Nobody reads a demo that spoils itself. */
 .js.term-defer [data-term] svg g[style*="animation-name"] { animation-delay: 0s; }
 
+/* Only for the fallback restart: taking the name away and giving it back is
+   what makes the browser build a new animation instead of re-timing the old
+   one. */
+.js [data-term].is-restarting svg g[style*="animation-name"] {
+  animation-name: none !important;
+}
+
 .js [data-term].is-playing svg g[style*="animation-name"] {
   animation-play-state: running;
   animation-delay: 0s;

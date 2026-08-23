@@ -91,10 +91,29 @@
       if (replay && !reduced) {
         replay.hidden = false;
         replay.addEventListener('click', function () {
-          // Restarting a CSS animation needs the class off, a reflow, then on.
-          term.classList.remove('is-playing');
-          void term.offsetWidth;
+          // Toggling the class does NOT restart this. `animation-name` lives in
+          // the capture's own inline style and never changes, so the browser
+          // re-times the existing animation rather than making a new one — and
+          // a finished animation that is re-timed is still finished. Measured:
+          // playState stayed `finished` and currentTime stayed past the end.
+          //
+          // Rewinding the animation itself is the thing that actually restarts
+          // it, and it says what it means.
+          var film = term.querySelector('svg g[style*="animation-name"]');
           term.classList.add('is-playing');
+          var running = film && film.getAnimations ? film.getAnimations() : [];
+          if (running.length) {
+            running.forEach(function (animation) {
+              animation.cancel();
+              animation.play();
+            });
+          } else if (film) {
+            // No Web Animations API: drop the animation, force the style to be
+            // recomputed, and let it be created again from scratch.
+            term.classList.add('is-restarting');
+            film.getBoundingClientRect();
+            term.classList.remove('is-restarting');
+          }
         });
       }
     });
