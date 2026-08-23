@@ -79,6 +79,13 @@ pub enum SendError {
     )]
     UnknownRecipient { name: String },
 
+    #[error("`{name}` did not resolve to a currency on this chain")]
+    #[diagnostic(
+        code(pecu::unknown_currency),
+        help("--currency wants the name with its trailing @, as in `{suggested}`, or the currency's i-address. `pecu wallet balance` prints the currencies an address holds in the form to copy")
+    )]
+    UnknownCurrency { name: String, suggested: String },
+
     #[error("`{name}` is revoked")]
     #[diagnostic(
         code(pecu::revoked_recipient),
@@ -155,7 +162,7 @@ fn attempt(ui: &Ui, settings: &Settings, globals: &Globals, args: &SendArgs) -> 
     let recipient = resolve_recipient(ui, &node, &args.to)?;
     let currency = match &args.currency {
         Some(name) => Some(Token {
-            id: resolve_currency(ui, &node, name)?,
+            id: resolve_currency(ui, &node, &profile.node, name)?,
             shown: name.clone(),
         }),
         None => None,
@@ -332,26 +339,48 @@ fn resolve_recipient(ui: &Ui, node: &Node, to: &str) -> Result<Recipient, miette
     })
 }
 
-fn resolve_currency(ui: &Ui, node: &Node, name: &str) -> Result<CurrencyId, miette::Report> {
+/// Which currency `--currency` names, as the id the SDK moves.
+///
+/// A currency id *is* the defining identity's 160-bit hash, so an i-address is
+/// the answer already and a name has to be looked up as an identity to become
+/// one. What that lookup refuses is a *currency* problem: reporting it as
+/// `unknown_recipient` sent readers off to check a `--to` that was never
+/// involved.
+fn resolve_currency(
+    ui: &Ui,
+    node: &Node,
+    url: &str,
+    name: &str,
+) -> Result<CurrencyId, miette::Report> {
     if let Ok(address) = name.parse::<Address>() {
         if address.kind() == AddressKind::Identity {
             return Ok(CurrencyId::from_bytes(address.hash()));
         }
     }
+
+    // The `@` form of what was typed is the remedy the help offers, and a name
+    // that already carries one gets it back unchanged rather than doubled.
+    let unknown = || SendError::UnknownCurrency {
+        name: name.to_string(),
+        suggested: format!("{}@", name.trim_end_matches('@')),
+    };
+
     ui.sdk(format!("node.identity({name:?})"));
-    let record = node
-        .identity(name)
-        .map_err(|_| SendError::UnknownRecipient {
-            name: name.to_string(),
-        })?;
+    let record = match node.identity(name) {
+        Ok(record) => record,
+        // `-5` is no such name and `-8` is not a usable reference at all —
+        // which is exactly what a currency name missing its `@` gets back.
+        // Both are the daemon answering. Anything else is it failing to, and
+        // calling that "did not resolve to a currency" would deny the
+        // existence of a currency nobody asked about. The same distinction
+        // `wallet balance` and `id show` already draw.
+        Err(RpcError::Node { code: -5 | -8, .. }) => return Err(unknown().into()),
+        Err(other) => {
+            return Err(node::NodeError::request("looking up the currency", url, other).into())
+        }
+    };
     ui.sdk_result(format!("identity_address: {}", record.identity_address));
-    let address: Address =
-        record
-            .identity_address
-            .parse()
-            .map_err(|_| SendError::UnknownRecipient {
-                name: name.to_string(),
-            })?;
+    let address: Address = record.identity_address.parse().map_err(|_| unknown())?;
     Ok(CurrencyId::from_bytes(address.hash()))
 }
 
