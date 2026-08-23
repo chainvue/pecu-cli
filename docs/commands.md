@@ -3,7 +3,7 @@
 
 | Command | Does | Status |
 |---|---|---|
-| `pecu doctor` | Node reachability, chain tip, config paths, build info | ✅ done |
+| `pecu doctor` | Node reachability, chain tip, whether DeFi is switched off, config paths, build info | ✅ done |
 | `pecu key gen\|import\|list\|show\|export\|phrase` | Encrypted keystore (Argon2id + ChaCha20-Poly1305) | ✅ done |
 | `pecu wallet balance\|utxos\|history` | Spendable, withheld, token and unconfirmed balances; the transaction log | ✅ done |
 | `pecu tx explain` | Says what every output in a transaction actually *is* | ✅ done |
@@ -38,6 +38,8 @@ answering.
 │ daemon      1.2.17-3                                │
 │ tip         ▸ 1,176,514   mined 82s ago             │
 │ sync        ✓ in sync                               │
+│ defi        ▲ switching off at block 1,187,000 —    │
+│             launches and conversions still work     │
 │ mempool     0 transactions                          │
 │ latency     232 ms                                  │
 └─────────────────────────────────────────────────────┘
@@ -48,6 +50,16 @@ It exits non-zero when the node cannot be reached, but still prints the local
 half — "my setting is being ignored" and "the node is down" are different
 problems, and the output should tell them apart. `pecu doctor --json` gives the
 same report as machine-readable data, including when the node is down.
+
+The `defi` row is read from the chain's **notification oracle** — the VerusID
+the daemon watches for signals, which for a chain is the chain's own id. While
+the switch is in force the daemon refuses every currency launch and every
+conversion with `bad-txns-failed-precheck`, whatever the transaction contains,
+so the row is worth having before you sign one. **Nothing is gated on it**: a
+chain can re-enable DeFi between the reading and the broadcast, so this is
+information and never a refusal. No row at all means either that no such switch
+is published — the ordinary case — or that the endpoint would not answer
+`getidentity`.
 
 ### `pecu tx explain`
 

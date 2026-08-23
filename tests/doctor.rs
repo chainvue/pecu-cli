@@ -199,4 +199,12 @@ fn a_healthy_testnet_node_passes() {
         "tip looks wrong: {}",
         document["node"]["blocks"]
     );
+    // Present either way — an object when the chain's oracle publishes a DeFi
+    // switch, `null` when it does not — so this covers the whole read without
+    // pinning a height that changes the day VRSCTEST re-enables DeFi.
+    assert!(
+        document["node"].get("defi").is_some(),
+        "no defi reading: {}",
+        document["node"]
+    );
 }
