@@ -64,7 +64,13 @@ is published — the ordinary case — or that the endpoint would not answer
 ### `pecu tx explain`
 
 Says what every output in a transaction actually *is*. Offline for hex; a txid is
-the one input that needs a node, and only to fetch the bytes.
+the one input that needs a node — to fetch the bytes, and then to ask what the
+currencies in them are called. A name is display text and never replaces the
+`i`-address beside it; a lookup that fails costs that one name and nothing else.
+Naming is one request per currency and the currencies come from the transaction,
+so the whole step is capped at roughly one request's worth of waiting — against a
+slow node it stops early and prints the ids it did not get to, rather than
+holding the answer back. `--explain` says how many it reached.
 
 ```sh
 pecu tx explain <txid>                    # fetches the hex, decodes it locally
@@ -90,7 +96,7 @@ cat tx.hex | pecu tx explain -
 │      CURRENCY; do not treat this output as empty                           │
 │ #5 100.00000000                                                            │
 │      reserves held for i9G2QgG74f7tErEyF3cWp2x1exBGbFa19t: 100.00000000    │
-│      iJhCezBEx…f2yq                                                        │
+│      iJhCezBExJHvtyH3fGhNnt2NhU4Ztkf2yq                                    │
 │ #6 5.00000000                                                              │
 │      → i9G2QgG74f7tErEyF3cWp2x1exBGbFa19t held for a VerusID, not a key    │
 └────────────────────────────────────────────────────────────────────────────┘

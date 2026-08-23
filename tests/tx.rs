@@ -1,6 +1,10 @@
 //! `pecu tx explain`, against real bytes.
 //!
-//! Entirely offline. Every fixture but one is a genuine VRSCTEST artefact — two
+//! Offline unless a test says otherwise. Two tests point the binary at a
+//! scripted loopback node, because naming a currency needs a node and the txid
+//! path is the only one that has one; two more point it at an unreachable
+//! address on purpose, because "hex needs no network" is a property and not a
+//! hope. Every fixture but one is a genuine VRSCTEST artefact — two
 //! mined transactions pulled off the chain, two currency-launch transactions and
 //! two output scripts from the SDK's own daemon fixtures — so what these assert
 //! is that the decoder says the right thing about bytes the daemon really
@@ -300,4 +304,302 @@ fn an_unknown_txid_is_an_answer_not_a_crash() {
         .assert()
         .failure()
         .stderr(contains("knows no transaction"));
+}
+
+/// Unreachable on purpose, the way `tests/airgap.rs` uses one. Any run that
+/// still succeeds with this configured has proved it never opened a socket.
+const DEAD_NODE: &str = "https://127.0.0.1:1";
+
+#[test]
+fn hex_still_decodes_with_no_reachable_node_at_all() {
+    // The property, not the hope. `pecu tx explain <hex>` is what still answers
+    // after a broadcast the node was unsure about — it is the recovery step the
+    // `-25` advice tells a caller to run — so it has to work when the node is
+    // the thing that just failed. Naming a currency needs a node, and this is
+    // what keeps that from quietly becoming true of every path.
+    pecu()
+        .args([
+            "tx",
+            "explain",
+            &fixture("currency-launch-fractional-one-reserve.hex"),
+            "--node",
+            DEAD_NODE,
+        ])
+        .assert()
+        .success()
+        .stdout(contains("iJhCezBExJHvtyH3fGhNnt2NhU4Ztkf2yq"));
+}
+
+#[test]
+fn piped_hex_still_decodes_with_no_reachable_node_at_all() {
+    // Same property through stdin, because stdin is not its own path: the input
+    // is classified by what it *is*, and `pecu tx explain -` fed a txid does
+    // connect. What is offline is hex, wherever it arrived from.
+    pecu()
+        .args(["tx", "explain", "-", "--node", DEAD_NODE])
+        .write_stdin(fixture("coinbase.hex"))
+        .assert()
+        .success()
+        .stdout(contains("stays minable forever"));
+}
+
+#[test]
+fn a_currency_id_survives_the_narrowest_frame_whole() {
+    // The bug as filed: a fixed nine-and-four elision cut every token id to
+    // `iJhCezBEx…f2yq` at any width, and `pecu currency show` on that cannot
+    // work — base58check over a truncated address does not decode. Asked at a
+    // width narrower than the narrowest panel this tool will draw.
+    let assertion = pecu()
+        .args([
+            "tx",
+            "explain",
+            &fixture("currency-launch-fractional-one-reserve.hex"),
+            "--theme",
+            "phosphor",
+        ])
+        .env("PECU_WIDTH", "1")
+        .assert()
+        .success();
+    let rendered = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+    assert!(
+        rendered.contains("iJhCezBExJHvtyH3fGhNnt2NhU4Ztkf2yq"),
+        "{rendered}"
+    );
+    let widths: Vec<usize> = rendered
+        .lines()
+        .filter(|line| line.starts_with(['┌', '│', '├', '└']))
+        .map(|line| line.chars().count())
+        .collect();
+    assert!(
+        widths.windows(2).all(|pair| pair[0] == pair[1]),
+        "a whole id pushed the frame open, widths {widths:?}:\n{rendered}"
+    );
+}
+
+#[test]
+fn json_says_a_name_was_never_looked_up_rather_than_that_there_is_none() {
+    // Three states, not two. `"name": null` would say this currency has no
+    // name, which is a confident answer to a question an offline run never
+    // asked — and the id beside it is unchanged and still whole, so nothing a
+    // consumer already reads has moved.
+    let document = explain_json("currency-launch-fractional-one-reserve.hex");
+    let deposit = document["outputs"]
+        .as_array()
+        .expect("outputs")
+        .iter()
+        .find(|output| output["kind"] == "reserve_deposit")
+        .expect("a reserve deposit");
+    assert_eq!(
+        deposit["controlling_currency_name"],
+        serde_json::json!({ "known": false, "error": "the name was not looked up" }),
+        "{deposit}"
+    );
+    let token = &deposit["tokens"][0];
+    assert_eq!(token["currency"], "iJhCezBExJHvtyH3fGhNnt2NhU4Ztkf2yq");
+    assert_eq!(token["name"]["known"], false, "{token}");
+}
+
+/// A loopback node that answers each request with whichever scripted reply
+/// names something the request asked about.
+///
+/// The one way to exercise the txid path without a public daemon, and the txid
+/// path is the only one that names anything. Plaintext is accepted because
+/// loopback is the one place `pecu` does not refuse it. One reply per
+/// connection and `connection: close`: the point is to answer several
+/// *different* requests, and a handler that served one and hung up would strand
+/// the next lookup on a pooled dead socket. The accept loop is not shut down —
+/// it owns nothing but a port and is reaped at process exit.
+fn scripted_node(replies: Vec<(String, String)>) -> String {
+    use std::io::{Read, Write};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let url = format!("http://{}", listener.local_addr().expect("a bound address"));
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 4096];
+            // Drained until the body has arrived, not after one read: headers
+            // and body can land in separate segments, and answering half a
+            // request reads as a transport failure rather than a reply.
+            while !request.windows(4).any(|window| window == b"\r\n\r\n")
+                || !request.ends_with(b"}")
+            {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => request.extend_from_slice(&chunk[..read]),
+                }
+            }
+            let request = String::from_utf8_lossy(&request).into_owned();
+            let body = replies
+                .iter()
+                .find(|(asked, _)| request.contains(asked.as_str()))
+                .map(|(_, reply)| reply.clone())
+                .unwrap_or_else(|| {
+                    r#"{"error":{"code":-1,"message":"nothing scripted"},"id":1}"#.to_string()
+                });
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\n\
+                 content-length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(reply.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+    url
+}
+
+/// The txid of the fractional launch, and the `getrawtransaction` reply that
+/// hands its real bytes back.
+const LAUNCH_TXID: &str = "df69640e4cfafe7cbe9cabd3c790ed3c556f7ee340e5f10ce73dd1b590f0556d";
+
+fn raw_transaction_reply() -> String {
+    format!(
+        r#"{{"result":{{"txid":"{LAUNCH_TXID}","hex":"{}"}},"id":1}}"#,
+        fixture("currency-launch-fractional-one-reserve.hex")
+    )
+}
+
+/// A `getcurrency` reply, trimmed to the fields the SDK reads plus
+/// `idimportfees`, which the daemon really does print as `1e-8`.
+fn definition(id: &str, name: &str) -> String {
+    format!(
+        r#"{{"result":{{"currencyid":"{id}","name":"{name}","fullyqualifiedname":"{name}",
+           "parent":"{id}","systemid":"{id}","startblock":0,"endblock":0,
+           "options":33,"proofprotocol":1,"idimportfees":1e-8}},"id":1}}"#
+    )
+}
+
+#[test]
+fn a_txid_run_names_the_currencies_it_prints() {
+    // The issue as filed: this command never named a currency, not even the
+    // chain's own. It has a node in hand on this path and had not been asking.
+    let node = scripted_node(vec![
+        (LAUNCH_TXID.into(), raw_transaction_reply()),
+        (
+            "iJhCezBExJHvtyH3fGhNnt2NhU4Ztkf2yq".into(),
+            definition("iJhCezBExJHvtyH3fGhNnt2NhU4Ztkf2yq", "VRSCTEST"),
+        ),
+        (
+            "i9G2QgG74f7tErEyF3cWp2x1exBGbFa19t".into(),
+            definition("i9G2QgG74f7tErEyF3cWp2x1exBGbFa19t", "verusrpc-test"),
+        ),
+    ]);
+
+    let assertion = pecu()
+        .args([
+            "tx",
+            "explain",
+            LAUNCH_TXID,
+            "--node",
+            &node,
+            "--theme",
+            "phosphor",
+        ])
+        .env("PECU_WIDTH", "84")
+        .assert()
+        .success();
+    let rendered = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+
+    assert!(rendered.contains("VRSCTEST@"), "{rendered}");
+    // And the id is still there, whole. A node can hand back a lookalike name;
+    // the id is the half of the pair that settles which currency this is.
+    assert!(
+        rendered.contains("iJhCezBExJHvtyH3fGhNnt2NhU4Ztkf2yq"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn a_name_lookup_that_fails_costs_a_name_and_not_the_explain() {
+    // The node answers for the transaction and then refuses every `getcurrency`
+    // with `-1`, which is a transport-shaped failure and not a statement about
+    // any currency. The command still answers, and says what it does not know
+    // instead of printing a currency that has no name.
+    let node = scripted_node(vec![(LAUNCH_TXID.into(), raw_transaction_reply())]);
+
+    let assertion = pecu()
+        .args([
+            "tx",
+            "explain",
+            LAUNCH_TXID,
+            "--node",
+            &node,
+            "--theme",
+            "phosphor",
+        ])
+        .env("PECU_WIDTH", "84")
+        .assert()
+        .success();
+    let rendered = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+
+    assert!(rendered.contains("(name unknown)"), "{rendered}");
+    assert!(
+        rendered.contains("iJhCezBExJHvtyH3fGhNnt2NhU4Ztkf2yq"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn the_explain_record_outlives_the_run_that_failed() {
+    // `--explain` is a record of the calls a command made, and it was printed
+    // only on the two arms that succeeded — so the one run where the record is
+    // worth having, the one where a call blew up, printed nothing about it.
+    // Here the node refuses the txid and the command exits non-zero; the panel
+    // still names the call that was made and what it came back with.
+    let node = scripted_node(vec![(
+        LAUNCH_TXID.into(),
+        r#"{"error":{"code":-5,"message":"No information available about transaction"},"id":1}"#
+            .into(),
+    )]);
+
+    pecu()
+        .args(["tx", "explain", LAUNCH_TXID, "--node", &node, "--explain"])
+        .assert()
+        .failure()
+        .stderr(contains("knows no transaction"))
+        .stdout(contains("SDK CALLS"))
+        .stdout(contains("node.raw_transaction("));
+}
+
+#[test]
+fn a_currency_the_node_has_no_record_of_is_not_a_lookup_that_failed() {
+    // `-8` is what a daemon answers a `getcurrency` miss with, and it is the one
+    // refusal that is a statement about the currency. It still is not a
+    // statement that the currency is nameless — this output is holding a balance
+    // in it — so the panel says what was actually answered.
+    let node = scripted_node(vec![
+        (LAUNCH_TXID.into(), raw_transaction_reply()),
+        (
+            "iJhCezBExJHvtyH3fGhNnt2NhU4Ztkf2yq".into(),
+            r#"{"error":{"code":-8,"message":"Invalid currency or currency not found"},"id":1}"#
+                .into(),
+        ),
+    ]);
+
+    let assertion = pecu()
+        .args(["tx", "explain", LAUNCH_TXID, "--node", &node, "--json"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+    let document: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("not json: {error}\n{stdout}"));
+
+    let deposit = document["outputs"]
+        .as_array()
+        .expect("outputs")
+        .iter()
+        .find(|output| output["kind"] == "reserve_deposit")
+        .expect("a reserve deposit");
+    let token = &deposit["tokens"][0];
+    assert_eq!(
+        token["name"],
+        serde_json::json!({
+            "known": true,
+            "name": null,
+            "reason": "the node has no currency with this id",
+        }),
+        "{token}"
+    );
 }
