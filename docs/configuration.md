@@ -52,7 +52,47 @@ directory and cannot see, or damage, a real keystore.
 | `--profile <NAME>` | Config profile (env: `PECU_PROFILE`) |
 | `--node <URL>` | Override the endpoint (env: `VERUS_ENDPOINT`) |
 | `--theme auto\|phosphor\|plain` | Phosphor on a TTY, plain when piped. `NO_COLOR` always wins |
-| `-v`, `-vv` | More logging |
+| `-v`, `--verbose` | Refused. It never logged anything — see below |
+
+`-v` is the one flag in that table you cannot use. It was scaffolded with the
+command tree and wired to nothing: no logging framework is linked, and `-v`,
+`-vv` and `-vvv` all produced output byte-identical to no flag at all, on
+stdout and on stderr. It is now hidden from every help screen and from the
+completion scripts, and passing it is refused by name:
+
+```console
+$ pecu wallet balance --key default -v
+Error: pecu::verbose_does_nothing
+
+  × -v/--verbose turns up logging this build does not have
+  help: nothing in `pecu` logs. … `--explain` is the diagnostic that works …
+$ echo $?
+1
+```
+
+**This is a breaking change.** A run that passed `-v` and exited `0` exits `1`
+now. Nobody can have depended on what the flag *did*, because it did nothing;
+what breaks is scripts that passed it and were accepted. Deleting it outright
+would have broken those the same way and answered worse — clap's `unexpected
+argument '-v'` carries no code and no document, and `--verbose` draws `tip: a
+similar argument exists: '--version'`, a flag that parses, prints a version
+string and exits `0` without doing the work. Refusing it by name says what
+happened and points at `--explain`, which does the job `-v` was reaching for.
+
+Two details if you read the exit code or `.error.code` from a script:
+
+- A run that was **already failing** keeps exit `1` and changes its code. `pecu
+  wallet balance -v` reported `pecu::no_address` and now reports
+  `pecu::verbose_does_nothing`, because the refusal is answered before the
+  command runs. A consumer branching on `.error.code` sees that even though the
+  status did not move.
+- Three command lines never reach the refusal, because clap settles them first.
+  `pecu … -v --help` and `pecu … -v --version` still exit `0` with `-v` ignored:
+  clap resolves both during parsing, and no command runs. A command line already
+  invalid for another reason keeps that answer — `pecu key show -v` is exit `2`
+  for the missing `<LABEL>`. Catching these would mean scanning the arguments
+  ahead of clap, which cannot tell the flag `-v` from the value `-v` in `pecu
+  key show -- -v`.
 
 Under `--json`, stdout carries one JSON document and nothing else. Panels,
 notes, progress lines and the `--explain` record are not written there at all —
@@ -126,7 +166,10 @@ The SDK reports that case separately and so does this.
 unknown to clap, so it exits `1` with a `pecu::…` code and a JSON document —
 `unexpected argument '--currency' found` reads as a misspelling and carries
 neither. `pecu plan send --currency` and `pecu plan send --from-identity` moved
-from `2` to `1` for that reason.
+from `2` to `1` for that reason, and `-v`/`--verbose` moved from `0` to `1` for
+the same one — a flag that cannot be honoured is worth a name, a code and a
+document whether it was refused yesterday or accepted by mistake. See the note
+under [Global flags](#global-flags) for the cases `-v` does not change.
 
 `2` still covers everything clap settles before a command runs: a flag the
 parser has never heard of, and a flag it has — these two included — given no
