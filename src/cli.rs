@@ -4,7 +4,7 @@
 //! SDK, so the tree is organised the way the SDK is: keys, then reading, then
 //! spending, then identities.
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 
 /// The `verus-sdk` commit this binary is built against, as a literal so it can
 /// go through `concat!` into clap's `long_version`. It must match the `rev` in
@@ -77,9 +77,81 @@ pub struct Globals {
     #[arg(long, global = true, value_enum, default_value_t = Theme::Auto)]
     pub theme: Theme,
 
-    /// Log more; repeat for more still
-    #[arg(long, short = 'v', global = true, action = clap::ArgAction::Count)]
+    /// How many times `-v` was passed, which is only ever used to refuse it.
+    ///
+    /// `skip`, because the argument is added to the parser by [`parse`] rather
+    /// than declared here — see the doc comment there for why, and
+    /// [`crate::cmd::VerboseDoesNothing`] for why it is still parsed at all.
+    #[arg(skip)]
     pub verbose: u8,
+}
+
+/// Parse the command line.
+///
+/// `Cli::parse()` everywhere else, except that `-v` is bolted on here instead
+/// of being a `#[arg]` on [`Globals`].
+///
+/// The flag has to reach the parser: it was accepted for the whole life of this
+/// binary, and it is refused *by name* rather than left to clap's `unexpected
+/// argument` (see [`crate::cmd::VerboseDoesNothing`]). Scanning `argv` for it
+/// before clap runs is not an option — `-v` can legitimately be a value, and a
+/// pre-scan would refuse `pecu send --to -v` and anything after `--`.
+///
+/// But it must not reach `Cli::command()`, which is what `pecu completions`
+/// renders. `clap_complete`'s script generators walk `Command::get_opts()` and
+/// filter hidden *possible values*, not hidden *arguments*, so `hide(true)`
+/// alone still emitted `--verbose` in all five shells — 39 times each, once per
+/// command context, which is the promise this whole change is about. Adding it
+/// to the parser and only to the parser is what keeps it out: `--help` renders
+/// from the command built here, where `hide(true)` does apply, and the
+/// completion scripts render from a `Cli::command()` that has never heard of it.
+pub fn parse() -> Cli {
+    let matches = command().get_matches();
+    let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    cli.globals.verbose = matches.get_count("verbose");
+    cli
+}
+
+/// The command the parser actually runs: [`Cli::command`] plus [`refused_verbose`].
+///
+/// The divergence is the point, and it is deliberate. `pecu completions` renders
+/// from a plain `Cli::command()`, which has never heard of `-v`; everything that
+/// parses a command line renders from this one, which has. A test below pins
+/// both halves, because a second parser-only argument added the obvious way — as
+/// an `#[arg]` on [`Globals`] — would silently put the flag back into all five
+/// completion scripts.
+fn command() -> clap::Command {
+    Cli::command().arg(refused_verbose())
+}
+
+/// `-v`, declared so that passing it can be answered rather than guessed at.
+///
+/// `Count`, so `-vv` and `-vvv` land on the same refusal as `-v` — `-v`, `-vv`
+/// is the form the docs used to promise. `global`, because that is how it was
+/// accepted before, and a script that put it after the subcommand has to reach
+/// the same answer as one that put it first.
+///
+/// # No help text, unlike the other refused flags
+///
+/// `plan send --currency` and `currency define --contribute` are refused too,
+/// and they stay *visible*, each with a doc comment starting `Refused:` that
+/// says why and where to go instead. This one departs from that form: it is
+/// `hide(true)`, so it carries no help string, because any string here would
+/// render nowhere.
+///
+/// The reason is that those flags are local to one command and this one was
+/// `global`, so a visible `-v` is not one line of "refused" — it is one line on
+/// all 39 help screens, which is the exact complaint #55 opened with. Between
+/// advertising a dead flag everywhere and explaining it nowhere, the explanation
+/// moves to where a reader with a rejected command line actually looks: the
+/// refusal itself, which names the flag, says why, and points at `--explain`.
+fn refused_verbose() -> clap::Arg {
+    clap::Arg::new("verbose")
+        .long("verbose")
+        .short('v')
+        .global(true)
+        .hide(true)
+        .action(clap::ArgAction::Count)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -790,4 +862,88 @@ pub struct CurrencyLaunchArgs {
     /// How long to wait for that registration, in minutes
     #[arg(long, value_name = "MINUTES", default_value_t = 20)]
     pub register_timeout: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every command context this parser has, `help` aside — clap generates
+    /// that one itself and propagates nothing to it.
+    fn contexts(command: &clap::Command) -> Vec<&clap::Command> {
+        let mut found = vec![command];
+        for sub in command.get_subcommands() {
+            if sub.get_name() != "help" {
+                found.extend(contexts(sub));
+            }
+        }
+        found
+    }
+
+    fn has_arg(command: &clap::Command, name: &str) -> bool {
+        command.get_arguments().any(|arg| arg.get_id() == name)
+    }
+
+    /// The invariant the whole of #55 rests on, in both directions.
+    ///
+    /// `-v` has to reach the parser in every context, or a script that passed it
+    /// somewhere gets clap's `unexpected argument` instead of the refusal. It
+    /// has to be hidden in every context, or it is advertised on 39 help screens
+    /// again — the complaint #55 opened with. And it must be absent from
+    /// `Cli::command()`, because that is what `pecu completions` renders and
+    /// `clap_complete` emits hidden arguments anyway.
+    ///
+    /// Spot-checking rendered screens cannot cover 39 contexts × 2 help forms ×
+    /// 5 shells, so the structure is checked here and the rendering is checked
+    /// on a sample in `tests/cli.rs`.
+    #[test]
+    fn verbose_reaches_every_parser_context_hidden_and_no_completion_context_at_all() {
+        let mut parser = command();
+        parser.build();
+        for context in contexts(&parser) {
+            let verbose = context
+                .get_arguments()
+                .find(|arg| arg.get_id() == "verbose")
+                .unwrap_or_else(|| panic!("`{}` cannot refuse -v", context.get_name()));
+            assert!(
+                verbose.is_hide_set(),
+                "`{}` advertises -v again",
+                context.get_name()
+            );
+            assert!(
+                has_arg(context, "explain"),
+                "`{}` lost --explain",
+                context.get_name()
+            );
+        }
+
+        let mut completions = Cli::command();
+        completions.build();
+        for context in contexts(&completions) {
+            assert!(
+                !has_arg(context, "verbose"),
+                "`{}` would put -v back in the completion scripts",
+                context.get_name()
+            );
+            assert!(
+                has_arg(context, "explain"),
+                "`{}` lost --explain",
+                context.get_name()
+            );
+        }
+    }
+
+    /// `hide(true)` is not what keeps the flag out of the completion scripts —
+    /// the absence from `Cli::command()` is. Stated as a test so that a future
+    /// reader who "simplifies" [`command`] away sees the reason fail, not just
+    /// the assertion.
+    #[test]
+    fn the_parser_and_the_completion_source_are_deliberately_different() {
+        let (mut parser, mut completions) = (command(), Cli::command());
+        parser.build();
+        completions.build();
+
+        assert!(has_arg(&parser, "verbose"));
+        assert!(!has_arg(&completions, "verbose"));
+    }
 }

@@ -13,10 +13,8 @@ mod ui;
 
 use std::process::ExitCode;
 
-use clap::Parser;
-
 fn main() -> ExitCode {
-    let cli = cli::Cli::parse();
+    let cli = cli::parse();
     // Read before `dispatch` takes the `Cli` by value. Returning
     // `miette::Result` from `main` was the whole of issue #49: std's
     // `Termination` impl is what printed the failure, and it can no more see

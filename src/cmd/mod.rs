@@ -52,6 +52,68 @@ impl NotYet {
     }
 }
 
+/// `-v` names a capability this binary has never had.
+///
+/// It was scaffolded in M0, wired to nothing, and has been advertised on every
+/// help screen since: `pecu wallet balance -v --json` exited `0` with output
+/// byte-identical to the same run without it, on stdout *and* stderr. There is
+/// no logging framework linked to turn up, and `--explain` already occupies the
+/// diagnostic niche.
+///
+/// # Why this is refused rather than deleted
+///
+/// Deleting the flag hands the question to clap, whose whole vocabulary here is
+/// `unexpected argument`. Measured, that is worse than it sounds: bare `-v`
+/// gets no suggestion at all, and `--verbose` gets `tip: a similar argument
+/// exists: '--version'` — a flag that parses, prints a version string and exits
+/// `0` without doing the work, offered as the fix on a wallet that spends. It
+/// is the same misspelling-shaped answer the `plan send --currency` refusal
+/// exists to avoid, and it drops the run from exit `0` to exit `2` with an
+/// empty stdout, so a `--json` consumer gets nothing to parse rather than an
+/// error document.
+///
+/// # Why it is refused rather than quietly ignored
+///
+/// Accepting it and doing nothing is the shape a run that asked for detail and
+/// exited `0` with none already has, and hiding it would make that both
+/// undiscoverable and still untrue. Nobody depends on this flag's *behaviour* —
+/// there is none — only on its acceptance, and acceptance is exactly the thing
+/// that was lying.
+///
+/// So the flag stays declared, leaves every help screen and every completion
+/// script, and is answered by name with a `pecu::…` code and a document. The
+/// status moves from `0` to `1`, which is a change to the published contract
+/// and is written down in `docs/configuration.md`.
+///
+/// # Where this gate does not run
+///
+/// It is a `dispatch` gate, so clap gets there first in two cases, and both
+/// keep their old status rather than reaching the refusal. `--help` and
+/// `--version` are resolved inside `get_matches`, so `pecu key list -v --help`
+/// still exits `0` with `-v` swallowed. A command line that is invalid for some
+/// other reason is answered by that reason: `pecu key show -v` is clap's exit
+/// `2` for the missing `<LABEL>`, not this. Closing either would need an `argv`
+/// scan ahead of clap, which cannot tell a `-v` flag from a `-v` value — a worse
+/// bug than the one it fixes. Both are recorded in `docs/configuration.md`
+/// rather than quietly left for someone to find.
+#[derive(Debug, Error, Diagnostic)]
+// Both spellings, because the message is fixed and the command line is not: a
+// reader who typed `--verbose` should not be told to drop something they did
+// not type. Which one clap matched is not in `ArgMatches` to ask.
+#[error("-v/--verbose turns up logging this build does not have")]
+#[diagnostic(
+    code(pecu::verbose_does_nothing),
+    help(
+        "nothing in `pecu` logs. No logging framework is linked, and -v, -vv and -vvv all \
+         produced output byte-identical to no flag at all, on stdout and on stderr — the flag was \
+         scaffolded with the command tree and never wired to anything. It is refused rather than \
+         swallowed so that you are told, instead of a run that asked for detail exiting 0 with \
+         none of it. `--explain` is the diagnostic that works: pass it to any command to see each \
+         verus-sdk call this build makes and what it decoded back. Drop -v/--verbose"
+    )
+)]
+pub struct VerboseDoesNothing;
+
 /// What to do about a broadcast whose outcome the node did not settle.
 ///
 /// Shared by every command that broadcasts, because the answer does not depend
@@ -278,6 +340,13 @@ pub(crate) fn estimated_native_fee(utxos: usize) -> u64 {
 }
 
 pub fn dispatch(cli: Cli) -> miette::Result<()> {
+    // Ahead of everything, including `Ui`: a flag that can never be honoured
+    // should cost neither a rendered line nor a round trip, and this one is
+    // global, so there is no command it could be honoured by.
+    if cli.globals.verbose > 0 {
+        return Err(VerboseDoesNothing.into());
+    }
+
     let ui = Ui::new(cli.globals.theme, cli.globals.json, cli.globals.explain);
 
     match &cli.command {
