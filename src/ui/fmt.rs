@@ -159,6 +159,19 @@ pub fn untrusted(text: &str, max: usize, ellipsis: &str) -> String {
     fit(neutralise(text).trim(), max, ellipsis)
 }
 
+/// [`untrusted`]'s filtering without its budget: safe to print, and whole.
+///
+/// For the one caller that has to spend the budget itself. `id list` cuts a
+/// name from the **end** rather than from the middle, because [`fit`] keeps the
+/// tail and the last character of a VerusID name is the `@` that says it is a
+/// whole one — so a name cut to fit came out still wearing the mark of a name
+/// another command would accept, and `pecu id show` answers "nothing on this
+/// chain is called that" for it. Filtering and budgeting are separated here so
+/// that the cut can drop the `@` with everything else it drops.
+pub fn neutralised(text: &str) -> String {
+    neutralise(text).trim().to_string()
+}
+
 /// Replace everything that cannot be allowed onto a terminal, one character for
 /// one character.
 ///

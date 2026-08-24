@@ -54,6 +54,7 @@ cargo build --release
 | `pecu tx explain` | Says what every output in a transaction actually *is* |
 | `pecu send` | Transparent sends: native, token, or out of a VerusID's own funds |
 | `pecu plan send` · `sign` · `broadcast` | The air-gap trio, over files or QR codes — the chain's own coins only |
+| `pecu id list` | Which VerusIDs an address is a primary of — the one read that starts from a key |
 | `pecu id show\|register\|update\|revoke\|recover\|unlock` | The VerusID lifecycle, including timelocks |
 | `pecu currency show\|launch\|mint\|preconvert\|convert` | Currency definitions, launches, minting, conversions |
 
