@@ -252,6 +252,13 @@ def capture(name, command, caption):
 # Dark captures on both themes, deliberately. A terminal is a dark surface; a
 # screenshot of one keeps its own background the way a photograph does, and the
 # frame around it is what tells the eye it is quoted rather than part of the page.
+#
+# The README does the opposite — `<picture>` there serves the light capture to a
+# light reader — and the two are not in disagreement. Here the capture sits in a
+# page we designed, inside a `figure.term` frame that says "quoted"; on GitHub it
+# sits bare on a background we do not control, with no frame to do that job. Both
+# surfaces show a faithful rendering of a skin `pecu` really has: this one shows
+# `--theme phosphor`, the README's light half shows `--theme light`.
 DEMOS = {
     "doctor": ("pecu doctor", "where the files are, what the binary is, whether the node answers"),
     "id": ("pecu id show VRSCTEST@", "authorities, timelock state, and whether the identity can be revoked at all"),

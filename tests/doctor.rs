@@ -14,7 +14,10 @@ const DEAD_NODE: &str = "https://127.0.0.1:1";
 
 fn pecu(home: &TempDir) -> Command {
     let mut command = Command::cargo_bin("pecu").expect("the pecu binary should be built");
-    command.env("PECU_HOME", home.path()).env_remove("NO_COLOR");
+    command
+        .env("PECU_HOME", home.path())
+        .env_remove("NO_COLOR")
+        .env_remove("PECU_THEME");
     command
 }
 

@@ -74,7 +74,7 @@ pub struct Globals {
     pub node: Option<String>,
 
     /// Visual theme
-    #[arg(long, global = true, value_enum, default_value_t = Theme::Auto)]
+    #[arg(long, global = true, value_enum, default_value_t = Theme::Auto, env = "PECU_THEME")]
     pub theme: Theme,
 
     /// How many times `-v` was passed, which is only ever used to refuse it.
@@ -154,12 +154,22 @@ fn refused_verbose() -> clap::Arg {
         .action(clap::ArgAction::Count)
 }
 
+/// Which skin to render in.
+///
+/// `Auto` chooses between `Phosphor` and `Plain` on one question — is stdout a
+/// terminal — and never guesses `Light`. The background colour of a terminal is
+/// not reliably knowable (see [`crate::ui::theme::Theme::resolve`]), so a light
+/// terminal is something the reader says once, with `--theme light` or
+/// `PECU_THEME=light`, rather than something this program divines on the way to
+/// a spend confirmation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Theme {
     /// Phosphor on a terminal, plain when piped
     Auto,
     /// Green-on-black frames and glyphs
     Phosphor,
+    /// The same frames in dark ink, for a light-background terminal
+    Light,
     /// No colour, no box drawing
     Plain,
 }
