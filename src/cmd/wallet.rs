@@ -678,45 +678,7 @@ pub fn balance(
         ),
         Ok(pending) if pending.is_empty() => panel,
         Ok(pending) => {
-            // Four columns here against `TOKENS`' three, which is why the id
-            // cells cannot decide their own width: see `fitted`.
-            let table = fitted(&ui.theme, |ids| {
-                let mut table =
-                    Table::headerless([Align::Left, Align::Right, Align::Left, Align::Left]);
-                let mut movement = |label: &str, amount: Amount, style: anstyle::Style| {
-                    if amount == Amount::ZERO {
-                        return;
-                    }
-                    table.push(vec![
-                        Text::of(label, palette.label),
-                        Text::of(fmt::amount(amount), style),
-                        Text::of(currency, palette.muted),
-                        Text::new(),
-                    ]);
-                };
-                movement("INCOMING", pending.incoming, palette.ok);
-                movement("OUTGOING", pending.outgoing, palette.warn);
-                // Only when both directions are present. On its own, a net line
-                // repeats the single figure above it.
-                if pending.incoming != Amount::ZERO && pending.outgoing != Amount::ZERO {
-                    table.push(vec![
-                        Text::of("NET", palette.label),
-                        Text::of(fmt::signed(pending.net()), palette.accent),
-                        Text::of(currency, palette.muted),
-                        Text::new(),
-                    ]);
-                }
-                for (currency, value) in &pending.tokens {
-                    let [name, id] = currency_cells(ui, *currency, &names, ids);
-                    table.push(vec![
-                        Text::new(),
-                        Text::of(fmt::signed(value.to_sat()), palette.value),
-                        name,
-                        id,
-                    ]);
-                }
-                table
-            });
+            let table = pending_table(ui, pending, &names, currency);
 
             panel
                 .section("PENDING")
@@ -864,12 +826,16 @@ pub fn utxos(
         return Ok(());
     }
 
+    // The outpoint is the only column here that may be shortened. CONF and
+    // STATUS are what the command is for, and an amount cut from the middle is
+    // a different number rather than a shorter one.
     let mut table = Table::new(vec![
         Column::left("outpoint"),
         Column::right("amount"),
         Column::right("conf"),
         Column::left("status"),
-    ]);
+    ])
+    .elidable(0);
 
     for utxo in &wallet.funding.utxos {
         let txid = utxo.txid.to_string();
@@ -1077,7 +1043,6 @@ pub fn history_command(
     }
 
     let palette = ui.theme.palette;
-    let glyphs = ui.theme.glyphs;
 
     if entries.is_empty() {
         ui.note(format!("{address} has no transactions in that range"));
@@ -1085,24 +1050,7 @@ pub fn history_command(
         return Ok(());
     }
 
-    let now = now_seconds();
-    let mut table = Table::new(vec![
-        Column::right("height"),
-        Column::right("when"),
-        Column::right("change"),
-        Column::left("transaction"),
-    ]);
-    for entry in shown {
-        table.push(vec![
-            Text::of(fmt::height(entry.height.into()), palette.muted),
-            Text::of(age(now, entry.block_time), palette.muted),
-            change(ui, entry, &names, &settings.profile.currency),
-            Text::of(
-                fmt::hash(&entry.txid.to_string(), glyphs.ellipsis),
-                palette.value,
-            ),
-        ]);
-    }
+    let table = history_table(ui, shown, &names, &settings.profile.currency, now_seconds());
 
     let mut panel = Panel::new("HISTORY")
         .row("address", address_row(ui, &target))
@@ -1186,13 +1134,74 @@ fn failed_ids(ui: &Ui, names: &BTreeMap<CurrencyId, CurrencyName>) -> Option<Str
     }
 }
 
-/// The change column: the native leg, then any token legs.
-fn change(
+/// The `wallet history` table.
+///
+/// Only the txid may be shortened. HEIGHT, WHEN and CHANGE are the answer the
+/// command was asked for, and the change cell holds every leg of the
+/// transaction in one string — cut from the middle it would drop an amount and
+/// keep a currency, which reads like a smaller transfer rather than like a cut.
+/// The txid is already elided to `10…6` on the way in; at a width that cannot
+/// hold even that, the column gives up more of it rather than the frame giving
+/// up its right-hand border.
+fn history_table(
+    ui: &Ui,
+    entries: &[HistoryEntry],
+    names: &BTreeMap<CurrencyId, CurrencyName>,
+    currency: &str,
+    now: u64,
+) -> Table {
+    let palette = ui.theme.palette;
+    let glyphs = ui.theme.glyphs;
+    let mut table = Table::new(vec![
+        Column::right("height"),
+        Column::right("when"),
+        Column::right("change"),
+        Column::left("transaction"),
+    ])
+    .elidable(3);
+    for entry in entries {
+        // One row per leg. A conversion moves two currencies at once, and both
+        // legs on one line made a cell wider than the widest frame the theme
+        // can reach — 51 cells of `+867.66527599 mambo-basket@  +45717268.
+        // 17860181 mambo@` against a ceiling of 78, with the other three
+        // columns already spent. No amount of txid could pay for that, so every
+        // row of the table broke out of the frame at *every* width, 120
+        // included, on any address that had ever converted anything.
+        //
+        // Down rather than across, because there is nothing here to give up:
+        // an amount cut from the middle is a different number, and a leg
+        // dropped is a transfer the panel did not mention. Height, age and txid
+        // belong to the transaction rather than to the leg, so they stay on its
+        // first row and the continuation rows carry only the change.
+        let mut legs = change_legs(ui, entry, names, currency).into_iter();
+        if let Some(first) = legs.next() {
+            table.push(vec![
+                Text::of(fmt::height(entry.height.into()), palette.muted),
+                Text::of(age(now, entry.block_time), palette.muted),
+                first,
+                Text::of(
+                    fmt::hash(&entry.txid.to_string(), glyphs.ellipsis),
+                    palette.value,
+                ),
+            ]);
+        }
+        for leg in legs {
+            table.push(vec![Text::new(), Text::new(), leg]);
+        }
+    }
+    table
+}
+
+/// The change column, one [`Text`] per leg: the native leg, then any token
+/// legs.
+///
+/// Always at least one, so a transaction that moved nothing still gets a row.
+fn change_legs(
     ui: &Ui,
     entry: &HistoryEntry,
     names: &BTreeMap<CurrencyId, CurrencyName>,
     native: &str,
-) -> Text {
+) -> Vec<Text> {
     let palette = ui.theme.palette;
     let glyphs = ui.theme.glyphs;
     let style = if entry.is_outgoing() {
@@ -1204,18 +1213,16 @@ fn change(
     // Zero native is not "nothing happened" — a token-only transfer moves no
     // native value at all — so the native leg is dropped when there are tokens
     // to show instead of printing a misleading 0.
-    let mut text = if entry.net_native != SignedAmount::ZERO || entry.net_currencies.is_empty() {
-        Text::of(fmt::signed(entry.net_native.to_sat()), style)
-            .space()
-            .push(native, palette.muted)
-    } else {
-        Text::new()
-    };
+    let mut legs = Vec::new();
+    if entry.net_native != SignedAmount::ZERO || entry.net_currencies.is_empty() {
+        legs.push(
+            Text::of(fmt::signed(entry.net_native.to_sat()), style)
+                .space()
+                .push(native, palette.muted),
+        );
+    }
 
     for (currency, value) in &entry.net_currencies {
-        if text.width() > 0 {
-            text = text.push("  ", palette.muted);
-        }
         // No name, for whatever reason, falls back to the node's own key. The
         // change column is one cell holding every leg of the transaction, so
         // there is no room for a second column saying why — the id is a true
@@ -1231,12 +1238,13 @@ fn change(
             })
             .map(|name| format!("{}@", fmt::untrusted(&name, NAME_BUDGET, glyphs.ellipsis)))
             .unwrap_or_else(|| fmt::address(currency, glyphs.ellipsis));
-        text = text
-            .push(fmt::signed(value.to_sat()), style)
-            .space()
-            .push(label, palette.accent);
+        legs.push(
+            Text::of(fmt::signed(value.to_sat()), style)
+                .space()
+                .push(label, palette.accent),
+        );
     }
-    text
+    legs
 }
 
 /// How long ago a block was mined, from its own timestamp.
@@ -1341,10 +1349,86 @@ fn fitted(theme: &crate::ui::Theme, build: impl Fn(IdWidth) -> Table) -> Table {
     }
 }
 
+/// The `PENDING` table: native movements, then one row per token moving.
+///
+/// Four columns here against `TOKENS`' three, which is why the id cells cannot
+/// decide their own width: see `fitted`.
+///
+/// Only the id column may be shortened, unlike `token_table`'s name-then-id,
+/// and it stops at the short form. The third column is not the same kind of
+/// cell on every row: a currency name on the token rows, which has an id beside
+/// it to be looked up from, but the native ticker on the movement rows, where
+/// the fourth column is empty and the ticker is the only thing saying what
+/// currency the amount is in. Marking it would turn `VRSCTEST` into `V…TEST` on
+/// a money row to buy characters for a name, so it is left alone — and a table
+/// with nothing left to give comes out ragged rather than giving up the id.
+///
+/// A function rather than a block inside `balance` because the frame test needs
+/// to render the table that ships. Built inline, the test built a copy, and a
+/// copy stops being the thing under test the first time the two drift.
+fn pending_table(
+    ui: &Ui,
+    pending: &Pending,
+    names: &BTreeMap<CurrencyId, CurrencyName>,
+    currency: &str,
+) -> Table {
+    let palette = ui.theme.palette;
+    fitted(&ui.theme, |ids| {
+        let mut table = Table::headerless([Align::Left, Align::Right, Align::Left, Align::Left])
+            .elidable_to(3, fmt::address_width(ui.theme.glyphs.ellipsis));
+        let mut movement = |label: &str, amount: Amount, style: anstyle::Style| {
+            if amount == Amount::ZERO {
+                return;
+            }
+            table.push(vec![
+                Text::of(label, palette.label),
+                Text::of(fmt::amount(amount), style),
+                Text::of(currency, palette.muted),
+                Text::new(),
+            ]);
+        };
+        movement("INCOMING", pending.incoming, palette.ok);
+        movement("OUTGOING", pending.outgoing, palette.warn);
+        // Only when both directions are present. On its own, a net line repeats
+        // the single figure above it.
+        if pending.incoming != Amount::ZERO && pending.outgoing != Amount::ZERO {
+            table.push(vec![
+                Text::of("NET", palette.label),
+                Text::of(fmt::signed(pending.net()), palette.accent),
+                Text::of(currency, palette.muted),
+                Text::new(),
+            ]);
+        }
+        for (currency, value) in &pending.tokens {
+            let [name, id] = currency_cells(ui, *currency, names, ids);
+            table.push(vec![
+                Text::new(),
+                Text::of(fmt::signed(value.to_sat()), palette.value),
+                name,
+                id,
+            ]);
+        }
+        table
+    })
+}
+
+/// The name column pays before the id column, for the reason `key_table` puts
+/// the label ahead of the address: the name is display text and the id is the
+/// identifier.
+///
+/// A currency name here is whatever the node said it was, already bounded to
+/// `NAME_BUDGET`, and a reader who has the id can look the name up again. The
+/// id cannot be recovered from the name — least of all on the rows where there
+/// is no name, which are exactly the rows `currency_cells` keeps a wide id for.
+/// Queued id-first, a *sibling* row's long name used to drain this column past
+/// that wide id and past the short form below it, down to `i…dK9f`: four
+/// informative characters, since every i-address opens with an `i`.
 fn token_table(ui: &Ui, held: &TokenBalances, names: &BTreeMap<CurrencyId, CurrencyName>) -> Table {
     let palette = ui.theme.palette;
     fitted(&ui.theme, |ids| {
-        let mut table = Table::headerless([Align::Right, Align::Left, Align::Left]);
+        let mut table = Table::headerless([Align::Right, Align::Left, Align::Left])
+            .elidable(1)
+            .elidable_to(2, fmt::address_width(ui.theme.glyphs.ellipsis));
         for (currency, amount) in held {
             let [name, id] = currency_cells(ui, *currency, names, ids);
             table.push(vec![
@@ -1777,7 +1861,7 @@ mod tests {
     fn a_narrow_frame_shortens_the_id_rather_than_running_past_the_border() {
         // Same property from the other end. Sixty columns leaves no room for
         // thirty-four characters of id, and the honest fit is the elided form.
-        for terminal in [40, 60, 78, 80, 120] {
+        for terminal in [40, 48, 52, 60, 70, 78, 80, 120] {
             let ui = framed_ui(terminal);
             let names = verdicts(vec![(KAIJU, CurrencyName::Failed("boom".into()))]);
             let held = holding(vec![(KAIJU, 927_249_511_041)]);
@@ -1877,6 +1961,203 @@ mod tests {
         );
     }
 
+    /// A history entry, with whatever legs the caller wants on it.
+    fn entry(byte: u8, native: i64, legs: Vec<(&str, i64)>) -> HistoryEntry {
+        HistoryEntry {
+            txid: txid(byte),
+            height: 1_202_941,
+            block_index: 0,
+            block_time: 1_700_000_000,
+            net_native: SignedAmount::from_sat(native),
+            net_currencies: legs
+                .into_iter()
+                .map(|(id, value)| (id.to_string(), SignedAmount::from_sat(value)))
+                .collect(),
+            spent_something: native < 0,
+        }
+    }
+
+    /// Every width the theme can actually produce. `Theme::with_skin` takes the
+    /// terminal's columns, spends four on the frame and its margin, then clamps
+    /// to 48..=78 — so a terminal of 52 is already at the floor and one of 82 is
+    /// already at the ceiling. Going wider on either side proves nothing new,
+    /// and going narrower proves that the floor is a floor.
+    fn reachable() -> std::ops::RangeInclusive<usize> {
+        40..=120
+    }
+
+    /// The three legs the history tests share, and the numbers that make them
+    /// mean something. A column is as wide as the widest cell *across* rows, so
+    /// the width these come to is a property of the fixture and not of the
+    /// renderer — pinned here so that changing the fixture moves the numbers
+    /// loudly rather than quietly.
+    fn history_fixture() -> (Vec<HistoryEntry>, BTreeMap<CurrencyId, CurrencyName>) {
+        (
+            vec![
+                entry(0x9f, -150_000_000, vec![]),
+                entry(0x41, 0, vec![(KAIJU, 927_249_511_041)]),
+                entry(0x1c, 25_000_000_000, vec![]),
+            ],
+            verdicts(vec![(KAIJU, CurrencyName::Known("Kaiju".into()))]),
+        )
+    }
+
+    fn history_at(terminal: usize) -> (Ui, String) {
+        let (entries, names) = history_fixture();
+        let ui = framed_ui(terminal);
+        let table = history_table(&ui, &entries, &names, "VRSCTEST", 1_700_086_400);
+        let rendered = Panel::new("HISTORY").table(table).render(&ui.theme);
+        (ui, rendered)
+    }
+
+    #[test]
+    fn a_history_frame_the_txid_column_can_pay_for_comes_out_square() {
+        // Sixty-four cells of table. HEIGHT, WHEN, CHANGE and the gutters are
+        // forty-seven of them and none of those may be touched; the TRANSACTION
+        // column holds the other seventeen and stops at its own header, so it
+        // can find six. From a fifty-eight-cell budget upwards — a terminal of
+        // sixty-two — that is enough, and the box closes. Before this change
+        // every one of these widths came out ragged.
+        let (entries, names) = history_fixture();
+        let wide = framed_ui(200);
+        let natural = history_table(&wide, &entries, &names, "VRSCTEST", 1_700_086_400)
+            .lines(&wide.theme)
+            .iter()
+            .map(Text::width)
+            .max()
+            .unwrap_or(0);
+        assert_eq!(natural, 64, "the fixture moved; so have the widths below");
+
+        for terminal in 62..=120 {
+            let (_, rendered) = history_at(terminal);
+            let widths = frame_widths(&rendered);
+            assert!(
+                widths.windows(2).all(|pair| pair[0] == pair[1]),
+                "ragged frame at {terminal} columns, widths {widths:?}:\n{rendered}"
+            );
+            // Squared by shortening a hash, not by dropping a column.
+            let visible = strip_ansi(&rendered);
+            for column in ["HEIGHT", "WHEN", "CHANGE", "TRANSACTION"] {
+                assert!(
+                    visible.contains(column),
+                    "{column} went missing:\n{rendered}"
+                );
+            }
+            assert!(visible.contains("1,202,941"), "{rendered}");
+            assert!(visible.contains("1d 00h ago"), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn a_history_frame_too_narrow_to_pay_for_keeps_its_txid_rather_than_cutting_it_for_nothing() {
+        // Below sixty-two columns the four cells that may not be touched have
+        // already spent the whole budget, and this fix is explicit that WHEN is
+        // not to be dropped to make room: removing data from a wallet table is
+        // worse than a ragged frame. So the frame stays ragged — which is the
+        // designed failure mode, not an oversight — and the txid comes back
+        // whole, because cutting it would not have closed the box either.
+        let whole = fmt::hash(&txid(0x9f).to_string(), "\u{2026}");
+        for terminal in 40..=61 {
+            let (_, rendered) = history_at(terminal);
+            let visible = strip_ansi(&rendered);
+            assert!(
+                visible.contains(&whole),
+                "the txid was cut for nothing at {terminal} columns:\n{rendered}"
+            );
+            assert!(visible.contains("1d 00h ago"), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn a_history_frame_with_room_keeps_the_txid_it_was_given() {
+        // `fmt::hash` shortens to `10…6` on the way in; nothing here shortens it
+        // further while there is room for it.
+        let ui = framed_ui(120);
+        let entries = vec![entry(0x9f, -150_000_000, vec![])];
+        let table = history_table(&ui, &entries, &BTreeMap::new(), "VRSCTEST", 1_700_086_400);
+        let rendered = strip_ansi(&Panel::new("HISTORY").table(table).render(&ui.theme));
+        let whole = fmt::hash(&txid(0x9f).to_string(), ui.theme.glyphs.ellipsis);
+        assert!(rendered.contains(&whole), "{rendered}");
+    }
+
+    #[test]
+    fn the_unspent_frame_stays_square_without_giving_up_conf_or_status() {
+        // The outpoint is the only column here that may be shortened: CONF and
+        // STATUS are what the command is for.
+        for terminal in reachable() {
+            let ui = framed_ui(terminal);
+            let palette = ui.theme.palette;
+            let mut table = Table::new(vec![
+                Column::left("outpoint"),
+                Column::right("amount"),
+                Column::right("conf"),
+                Column::left("status"),
+            ])
+            .elidable(0);
+            table.push(vec![
+                outpoint(&ui, &txid(0x9f).to_string(), 137),
+                Text::of(
+                    fmt::amount(Amount::from_sat(1_234_567_800_000_000)),
+                    palette.accent,
+                ),
+                Text::of("1,204", palette.muted),
+                Text::of(format!("{} spendable", ui.theme.glyphs.ok), palette.ok),
+            ]);
+            let panel = Panel::new("UTXOS").table(table);
+            let rendered = panel.render(&ui.theme);
+            let widths = frame_widths(&rendered);
+            assert!(
+                widths.windows(2).all(|pair| pair[0] == pair[1]),
+                "ragged frame at {terminal} columns, widths {widths:?}:\n{rendered}"
+            );
+            let visible = strip_ansi(&rendered);
+            assert!(visible.contains("CONF"), "{rendered}");
+            assert!(visible.contains("1,204"), "{rendered}");
+            assert!(visible.contains("spendable"), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn a_token_table_stays_square_at_every_width_the_theme_can_reach() {
+        // `fitted` picks between a whole id and a wallet-style short one; below
+        // the width even the short one needs, the table shortens it further
+        // rather than running out through the border.
+        let names = verdicts(vec![
+            (KAIJU, CurrencyName::Failed("idimportfees: 1e-8".into())),
+            (
+                TOKEN,
+                CurrencyName::Known("a-name-of-twentyfour-chr".into()),
+            ),
+        ]);
+        let held = holding(vec![(KAIJU, 927_249_511_041), (TOKEN, 100_000_000)]);
+        for terminal in reachable() {
+            let ui = framed_ui(terminal);
+            let panel = Panel::new("WALLET")
+                .section("TOKENS")
+                .table(token_table(&ui, &held, &names));
+            let rendered = panel.render(&ui.theme);
+            let widths = frame_widths(&rendered);
+            assert!(
+                widths.windows(2).all(|pair| pair[0] == pair[1]),
+                "ragged frame at {terminal} columns, widths {widths:?}:\n{rendered}"
+            );
+        }
+    }
+
+    /// A `Pending` carrying one native movement and one token leg.
+    fn pending_with_token(id: &str, satoshis: i64) -> Pending {
+        Pending {
+            incoming: Amount::from_sat(150_000_000),
+            outgoing: Amount::ZERO,
+            transactions: 1,
+            spent: BTreeSet::new(),
+            receiving: Vec::new(),
+            tokens: [(currency(id), SignedAmount::from_sat(satoshis))]
+                .into_iter()
+                .collect(),
+        }
+    }
+
     #[test]
     fn the_pending_table_stays_square_though_it_has_a_column_the_token_table_has_not() {
         // The other half of the same regression, and the half a per-row width
@@ -1884,38 +2165,143 @@ mod tests {
         // out against four columns rather than three. The label column and its
         // gutter are ten more characters, and the frame came out three columns
         // ragged at every terminal width — eighty included.
-        for terminal in [60, 80, 100, 200] {
+        //
+        // Through `pending_table` rather than a copy of it. Built inline this
+        // test went on passing while the table that ships changed underneath.
+        for terminal in [60, 70, 80, 100, 200] {
             let ui = framed_ui(terminal);
-            let palette = ui.theme.palette;
             let names = verdicts(vec![(
                 KAIJU,
                 CurrencyName::Failed("idimportfees: 1e-8".into()),
             )]);
-            let table = fitted(&ui.theme, |ids| {
-                let mut table =
-                    Table::headerless([Align::Left, Align::Right, Align::Left, Align::Left]);
-                table.push(vec![
-                    Text::of("INCOMING", palette.label),
-                    Text::of(fmt::amount(Amount::from_sat(150_000_000)), palette.ok),
-                    Text::of("VRSCTEST", palette.muted),
-                    Text::new(),
-                ]);
-                let [name, id] = currency_cells(&ui, currency(KAIJU), &names, ids);
-                table.push(vec![
-                    Text::new(),
-                    // The figure from the issue itself.
-                    Text::of(fmt::signed(927_249_511_041), palette.value),
-                    name,
-                    id,
-                ]);
-                table
-            });
+            // The figure from the issue itself.
+            let pending = pending_with_token(KAIJU, 927_249_511_041);
+            let table = pending_table(&ui, &pending, &names, "VRSCTEST");
             let panel = Panel::new("WALLET").section("PENDING").table(table);
-            let widths = frame_widths(&panel.render(&ui.theme));
+            let rendered = panel.render(&ui.theme);
+            let widths = frame_widths(&rendered);
             assert!(
                 widths.windows(2).all(|pair| pair[0] == pair[1]),
-                "ragged frame at {terminal} columns, widths {widths:?}:\n{}",
-                panel.render(&ui.theme)
+                "ragged frame at {terminal} columns, widths {widths:?}:\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_conversion_row_stays_inside_the_frame_and_keeps_both_its_legs() {
+        // A currency conversion moves two currencies in one transaction. Both
+        // legs on one line came to 51 cells, against the 78 the theme clamps
+        // to and with three other columns already spent — so the table was 100
+        // cells wide and *every* row broke out of the frame, at every width up
+        // to and including 120, on any address that had ever converted
+        // anything. The txid column could not have paid for it at any width.
+        //
+        // One row per leg instead. Nothing is elided, both amounts and both
+        // currency names survive whole, and the frame squares from the
+        // seventy-column split the issue was filed about upwards.
+        let names = verdicts(vec![
+            (KAIJU, CurrencyName::Known("mambo-basket".into())),
+            (TOKEN, CurrencyName::Known("mambo".into())),
+        ]);
+        let entries = vec![entry(
+            0x9f,
+            0,
+            vec![(KAIJU, 86_766_527_599), (TOKEN, 4_571_726_817_860_181)],
+        )];
+        for terminal in 70..=120 {
+            let ui = framed_ui(terminal);
+            let table = history_table(&ui, &entries, &names, "VRSCTEST", 1_700_100_000);
+            let rendered = Panel::new("HISTORY").table(table).render(&ui.theme);
+            let widths = frame_widths(&rendered);
+            assert!(
+                widths.windows(2).all(|pair| pair[0] == pair[1]),
+                "ragged frame at {terminal} columns, widths {widths:?}:\n{rendered}"
+            );
+            let visible = strip_ansi(&rendered);
+            for leg in ["+867.66527599 mambo-basket@", "+45717268.17860181 mambo@"] {
+                assert!(
+                    visible.contains(leg),
+                    "leg `{leg}` went missing at {terminal} columns:\n{rendered}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_transaction_with_one_leg_still_takes_exactly_one_row() {
+        // The common case pays nothing for the case above: no conversion, no
+        // continuation row, and the height and age stay on the line the change
+        // is on.
+        let names = verdicts(vec![]);
+        let entries = vec![entry(0x9f, -75_010_000, vec![])];
+        let ui = framed_ui(80);
+        let table = history_table(&ui, &entries, &names, "VRSCTEST", 1_700_100_000);
+        let body: Vec<String> = strip_ansi(&Panel::new("HISTORY").table(table).render(&ui.theme))
+            .lines()
+            .filter(|line| line.contains("1,202,941"))
+            .map(str::to_string)
+            .collect();
+        assert_eq!(body.len(), 1, "{body:?}");
+        assert!(body[0].contains("-0.75010000 VRSCTEST"), "{body:?}");
+    }
+
+    #[test]
+    fn a_token_id_is_never_cut_below_the_form_that_can_still_be_looked_up() {
+        // The `TOKENS` half of the same rule. Here there is a name column to
+        // take from first, so the frame squares *and* the id survives: a
+        // sibling row's long name must not come out of a nameless row's id.
+        let whole = Address::new(AddressKind::Identity, currency(KAIJU).to_bytes()).to_string();
+        let short = fmt::address(&whole, Theme::with_skin(Skin::Phosphor, 80).glyphs.ellipsis);
+        for terminal in reachable() {
+            let ui = framed_ui(terminal);
+            let names = verdicts(vec![
+                (KAIJU, CurrencyName::Failed("idimportfees: 1e-8".into())),
+                (
+                    TOKEN,
+                    CurrencyName::Known("a-name-of-twentyfour-chr".into()),
+                ),
+            ]);
+            let held = holding(vec![(KAIJU, 927_249_511_041), (TOKEN, 5_000_000_000)]);
+            let panel = Panel::new("WALLET").table(token_table(&ui, &held, &names));
+            let rendered = panel.render(&ui.theme);
+            let visible = strip_ansi(&rendered);
+            assert!(
+                visible.contains(&whole) || visible.contains(&short),
+                "the id was cut below `{short}` at {terminal} columns:\n{rendered}"
+            );
+            let widths = frame_widths(&rendered);
+            assert!(
+                widths.windows(2).all(|pair| pair[0] == pair[1]),
+                "ragged frame at {terminal} columns, widths {widths:?}:\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pending_id_is_never_cut_below_the_form_that_can_still_be_looked_up() {
+        // `currency_cells` keeps a wide id on a row whose name the node would
+        // not give up, because there the id is the only handle the reader has
+        // left. The table may narrow it to the short form and no further: every
+        // i-address opens with an `i`, so `i…dK9f` is four informative
+        // characters, and four characters cannot be copied, pasted or looked
+        // up. Under the floor the frame goes ragged instead — removing data
+        // from a wallet table is worse than a cosmetic ragged frame.
+        let whole = Address::new(AddressKind::Identity, currency(KAIJU).to_bytes()).to_string();
+        let short = fmt::address(&whole, Theme::with_skin(Skin::Phosphor, 80).glyphs.ellipsis);
+        for terminal in reachable() {
+            let ui = framed_ui(terminal);
+            let names = verdicts(vec![(
+                KAIJU,
+                CurrencyName::Failed("idimportfees: 1e-8".into()),
+            )]);
+            let pending = pending_with_token(KAIJU, 927_249_511_041);
+            let table = pending_table(&ui, &pending, &names, "VRSCTEST");
+            let rendered = strip_ansi(&Panel::new("WALLET").table(table).render(&ui.theme));
+            // The whole id where the frame has room for it, the short form
+            // where it has not, and never anything narrower than the two.
+            assert!(
+                rendered.contains(&whole) || rendered.contains(&short),
+                "the id was cut below the short form `{short}` at {terminal} columns:\n{rendered}"
             );
         }
     }

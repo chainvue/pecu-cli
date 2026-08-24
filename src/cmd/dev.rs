@@ -46,6 +46,13 @@ pub fn gallery(ui: &Ui) {
     ]);
 
     // Movements, not holdings — the one table here whose numbers are signed.
+    //
+    // No elidable column, unlike `wallet balance`'s PENDING. There the fourth
+    // column carries a currency id on the token rows; these three rows are
+    // native-only and stop at the third, so marking the fourth would be a
+    // setting with nothing under it to take — a knob a reader has to check the
+    // rows to discover does nothing. The gallery samples elision in `tokens`
+    // and `utxos` below, which do have cells in the column they mark.
     let mut pending = Table::headerless([Align::Left, Align::Right, Align::Left, Align::Left]);
     pending.push(vec![
         Text::of("INCOMING", palette.label),
@@ -63,7 +70,9 @@ pub fn gallery(ui: &Ui) {
         Text::of("VRSCTEST", palette.muted),
     ]);
 
-    let mut tokens = Table::headerless([Align::Right, Align::Left, Align::Left]);
+    // Marked the way `wallet balance` marks it, so the gallery is a fair
+    // sample of the real thing at a narrow width and not just of a happy one.
+    let mut tokens = Table::headerless([Align::Right, Align::Left, Align::Left]).elidable(2);
     tokens.push(vec![
         Text::of(
             fmt::amount(Amount::from_sat(120_000_000_000)),
@@ -174,7 +183,8 @@ pub fn gallery(ui: &Ui) {
         Column::right("amount"),
         Column::right("conf"),
         Column::left("status"),
-    ]);
+    ])
+    .elidable(0);
     utxos.push(vec![
         Text::of(
             format!(
