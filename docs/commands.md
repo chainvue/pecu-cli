@@ -1149,11 +1149,11 @@ well-funded key and an empty identity cannot mint, and the refusal says so:
 ┌─ MINT ──────────────────────────────────────────────────────────────────┐
 │ currency      pecuref9                                                  │
 │ currency id   iKh6DBXjPVU72BBD4sq5qbdFFeQGVcYokg                        │
-│ amount        1000.00000000  new supply, created by this                │
+│ amount        1000.00000000 pecuref9  new supply, created by this       │
 │ to            RComfCn4wHHsGR8vWBAU7T1r3tHHyxN9Hm                        │
 │ paid by       pecuref9  the identity's own coins, not the key's         │
 │ signed by     faucet  RComfCn4w…N9Hm                                    │
-│ fee           0.00020000                                                │
+│ fee           0.00020000 VRSCTEST                                       │
 └─────────────────────────────────────────────────────────────────────────┘
   ▸ this currency is centralized — its supply is whatever its identity
     decides, and every holder is trusting that
@@ -1219,7 +1219,7 @@ one; a floor could only be checked against a number nobody produced.
 │               contribution                                               │
 │ to            RComfCn4wHHsGR8vWBAU7T1r3tHHyxN9Hm                         │
 │ launches      block 1,179,161  153 blocks to go                          │
-│ fee           0.00020000                                                 │
+│ fee           0.00020000 VRSCTEST                                        │
 └──────────────────────────────────────────────────────────────────────────┘
   ▸ if the launch misses its minimum, every contribution is refunded —
     including this one, to the paying key
@@ -1271,9 +1271,9 @@ would be worse than asking, and saying which guess was made is better than both.
 │ spending      1.00000000  VRSCTEST                                       │
 │ into          SPORTS  iGhBps9rmbN7U544dZY7nx2rfg26QTh1zY                 │
 │ through       bankroll  one reserve into another, priced by the basket   │
-│ you receive   15897.04750000  estimated, not guaranteed                  │
-│ at least      15000.00000000  checked now, not by the chain              │
-│ fee           0.00020000                                                 │
+│ you receive   15897.04750000 SPORTS  estimated, not guaranteed           │
+│ at least      15000.00000000 SPORTS  checked now, not by the chain       │
+│ fee           0.00020000 VRSCTEST                                        │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
