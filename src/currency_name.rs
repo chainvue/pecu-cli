@@ -96,6 +96,47 @@ pub fn look_up_names(
     wanted: &BTreeSet<CurrencyId>,
     budget: Duration,
 ) -> BTreeMap<CurrencyId, CurrencyName> {
+    look_up(node, wanted, budget, NameForm::Unqualified)
+}
+
+/// The same lookup, asking for the name **with its parents** — `mobile.Kaiju`.
+///
+/// For the callers that are going to build a longer name out of the answer
+/// rather than print it. `id list` qualifies a sub-identity by appending its
+/// parent's name to its own, and the unqualified form is a trap there: the
+/// parent of `crypto.Kaiju.VRSCTEST@` is named `Kaiju` unqualified, so a name
+/// built from that reads `crypto.Kaiju@`, which resolves only because `Kaiju`
+/// happens to sit at the top of this chain. One level deeper and the same
+/// arithmetic produces a name pointing at a different identity — the confident
+/// wrong answer this module exists to refuse. `fully_qualified_name` carries
+/// every level, so a name built on it means one thing.
+///
+/// No trailing `@`: that is the identity convention, and a currency's qualified
+/// name does not carry one. The caller appends it.
+pub fn look_up_qualified_names(
+    node: &impl ChainReader,
+    wanted: &BTreeSet<CurrencyId>,
+    budget: Duration,
+) -> BTreeMap<CurrencyId, CurrencyName> {
+    look_up(node, wanted, budget, NameForm::Qualified)
+}
+
+/// Which spelling of a name a caller needs. See [`look_up_qualified_names`] for
+/// why the distinction is load-bearing rather than cosmetic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NameForm {
+    /// The name on its own — `Kaiju`.
+    Unqualified,
+    /// The name with its parents, dotted — `mobile.Kaiju`.
+    Qualified,
+}
+
+fn look_up(
+    node: &impl ChainReader,
+    wanted: &BTreeSet<CurrencyId>,
+    budget: Duration,
+    form: NameForm,
+) -> BTreeMap<CurrencyId, CurrencyName> {
     let deadline = Instant::now() + budget;
     wanted
         .iter()
@@ -103,7 +144,10 @@ pub fn look_up_names(
         .map(|currency| {
             let id = Address::new(AddressKind::Identity, currency.to_bytes()).to_string();
             let verdict = match node.currency_definition(&id) {
-                Ok(summary) if summary.currency_id == id => CurrencyName::Known(summary.name),
+                Ok(summary) if summary.currency_id == id => CurrencyName::Known(match form {
+                    NameForm::Unqualified => summary.name,
+                    NameForm::Qualified => summary.fully_qualified_name,
+                }),
                 // Free consistency check, kept from the SDK's version: a node
                 // that answers about a different currency than the one asked
                 // about is confused or hostile, and either way its answer is
@@ -233,6 +277,24 @@ mod tests {
         format!(
             r#"{{"result":{{"currencyid":"{id}","name":"{name}","fullyqualifiedname":"{name}",
                "parent":"{NATIVE}","systemid":"{NATIVE}","startblock":0,"endblock":0,
+               "options":33,"proofprotocol":1,"idimportfees":1e-8}},"id":1}}"#
+        )
+    }
+
+    /// A currency registered *under* another, where the two spellings of its
+    /// name are not the same string.
+    ///
+    /// `definition` above sets `name` and `fullyqualifiedname` to one value,
+    /// which is honest for a top-level currency and makes the two branches of
+    /// [`NameForm`] indistinguishable. Real ones differ — `mobile` and
+    /// `mobile.Kaiju` are both on VRSCTEST today, as are `Bridge` and
+    /// `Bridge.vETH` — and the difference is the whole reason
+    /// [`look_up_qualified_names`] exists.
+    fn sub_definition(id: &str, name: &str, qualified: &str) -> String {
+        format!(
+            r#"{{"result":{{"currencyid":"{id}","name":"{name}",
+               "fullyqualifiedname":"{qualified}","parent":"{KAIJU}",
+               "systemid":"{NATIVE}","startblock":0,"endblock":0,
                "options":33,"proofprotocol":1,"idimportfees":1e-8}},"id":1}}"#
         )
     }
@@ -372,6 +434,44 @@ mod tests {
 
     fn asked_about(ids: &[&str]) -> BTreeSet<CurrencyId> {
         ids.iter().map(|id| currency(id)).collect()
+    }
+
+    /// The distinction the qualified lookup exists for, on a currency where the
+    /// two spellings differ.
+    ///
+    /// `id list` builds a name out of this answer rather than printing it, so
+    /// the unqualified form is a trap: a sub-identity under `mobile.Kaiju`
+    /// named from the bare `mobile` comes out `x.mobile@`, which is a name —
+    /// just not this one's. It resolves, and it resolves to somebody else. So
+    /// the two forms are asserted against each other over the same reply,
+    /// where a lookup quietly reading `name` cannot pass both halves.
+    #[test]
+    fn a_qualified_name_carries_its_parents_and_the_bare_one_does_not() {
+        let replies = vec![(
+            TOKEN.into(),
+            sub_definition(TOKEN, "mobile", "mobile.Kaiju"),
+        )];
+        let wanted = asked_about(&[TOKEN]);
+
+        let qualified = look_up_qualified_names(
+            &scripted_node(replies.clone()),
+            &wanted,
+            Duration::from_secs(30),
+        );
+        let bare = look_up_names(&scripted_node(replies), &wanted, Duration::from_secs(30));
+
+        assert!(
+            matches!(qualified.get(&currency(TOKEN)), Some(CurrencyName::Known(name)) if name == "mobile.Kaiju"),
+            "{:?}",
+            qualified.get(&currency(TOKEN))
+        );
+        // And the other caller still gets the short form: `wallet` prints this
+        // beside a balance, where the parents are noise.
+        assert!(
+            matches!(bare.get(&currency(TOKEN)), Some(CurrencyName::Known(name)) if name == "mobile"),
+            "{:?}",
+            bare.get(&currency(TOKEN))
+        );
     }
 
     #[test]

@@ -359,6 +359,30 @@ pub struct WalletTarget {
     pub key: Option<String>,
 }
 
+/// Which address `pecu id list` asks about.
+///
+/// Deliberately not [`WalletTarget`]. That flag takes a VerusID name as well as
+/// an address, and `id list` refuses one: identities are found *by* the address
+/// that signs for them, so an identity is what comes back from this question
+/// rather than what goes into it. Flattened, the shared flag advertised
+/// `<R…|NAME@>` and "or a VerusID name like `bob@`, which is resolved" on the
+/// one command that answers a name with an offline refusal — and `-h`, the form
+/// most people read, showed only that promise. A flag may not advertise the
+/// input its command turns away.
+#[derive(Debug, Clone, Args)]
+#[group(multiple = false)]
+pub struct IdListTarget {
+    /// Look at this transparent address. Not a VerusID name, and not an
+    /// i-address: an identity is what this question answers with, not what it
+    /// takes
+    #[arg(long, short = 'a', value_name = "R…")]
+    pub address: Option<String>,
+
+    /// Look at the address of a stored key
+    #[arg(long, short = 'k', value_name = "LABEL")]
+    pub key: Option<String>,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum TxCommand {
     /// Say what every output in a transaction actually is
@@ -504,6 +528,24 @@ pub enum IdCommand {
         /// The identity: a name like `bob@`, or an i-address
         #[arg(value_name = "NAME@|i-ADDRESS")]
         name: String,
+    },
+    /// Which identities an address is a primary of
+    ///
+    /// Every other `id` subcommand needs a name you already know. This is the
+    /// one that starts from a key, which is what a wallet restored from a seed
+    /// on a new machine actually holds.
+    ///
+    /// PRIMARY addresses only. The chain is asked which identities list this
+    /// address among the addresses that sign for them; an identity this
+    /// address can revoke or recover, but is not primary on, is not something
+    /// the reply can answer for and does not appear.
+    ///
+    /// `--address` takes a transparent R-address here, not a VerusID name and
+    /// not an i-address: identities are found *by* the address that controls
+    /// them, so an identity is not an input to this question.
+    List {
+        #[command(flatten)]
+        target: IdListTarget,
     },
     /// Register a new VerusID. Run it again to carry on where it left off
     Register(IdRegisterArgs),

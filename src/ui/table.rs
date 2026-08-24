@@ -214,6 +214,30 @@ impl Table {
         shortened
     }
 
+    /// Whether fitting this table into `budget` would take anything off a cell.
+    ///
+    /// For the caller whose table holds something a reader is meant to copy. A
+    /// shortened cell is no longer the string it names, and a panel that prints
+    /// one without saying so has handed over a value that looks whole and is
+    /// not — which on a column of names is the difference between a list you
+    /// can act on and one you cannot.
+    ///
+    /// Measured by rendering both ways rather than predicted from the widths,
+    /// for the same reason [`Table::fitted_lines`] measures: the saving a
+    /// narrower column makes is not arithmetic on the column, and the
+    /// all-or-nothing rule means a table over budget is not always a table that
+    /// gets cut. Only a difference in what comes out counts.
+    #[must_use]
+    pub fn shortens_at(&self, theme: &Theme, budget: usize) -> bool {
+        let natural = self.lines(theme);
+        let fitted = self.fitted_lines(theme, budget);
+        natural.len() != fitted.len()
+            || natural
+                .iter()
+                .zip(&fitted)
+                .any(|(whole, cut)| whole.render() != cut.render())
+    }
+
     fn render(&self, theme: &Theme, widths: &[usize]) -> Vec<Text> {
         let mut lines = Vec::with_capacity(self.rows.len() + 1);
 

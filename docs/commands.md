@@ -9,6 +9,7 @@
 | `pecu tx explain` | Says what every output in a transaction actually *is* | ✅ done |
 | `pecu send` | Transparent sends: native, token, or out of a VerusID's own funds | ✅ done |
 | `pecu plan send` / `pecu sign` / `pecu broadcast` | The air-gap trio, over files or QR codes — the chain's own coins only, since no builder produces an unsigned token or identity spend | ✅ done |
+| `pecu id list` | Which VerusIDs an address is a primary of — the one identity read that starts from a key rather than from a name you already know | ✅ done |
 | `pecu id show\|register` | Read an identity; register one (two-phase, resumable) | ✅ done |
 | `pecu id update\|revoke\|recover\|unlock` | The rest of the lifecycle, including timelocks | ✅ done |
 | `pecu id login\|publish\|read` | Sign-in with VerusID, and VDXF data | M8 |
@@ -619,6 +620,122 @@ goes through: the address rows budgeted at an address's exact width — an
 i-address is exactly 34 characters, so a well-formed one prints whole — and the
 `status` word on the same name budget the `name` row uses. An answer that is
 neither cannot repaint the row you were told to compare against.
+
+#### Which identities a key controls
+
+Every other `id` subcommand takes a name you already know. This is the one that
+starts from a key — which is all a wallet restored from a seed on a new machine
+actually holds, and on Verus funds live under an identity rather than under a
+bare key, so a name you cannot recover is money you cannot reach.
+
+```sh
+pecu id list --key cold                                   # a stored key
+pecu id list --address RComfCn4wHHsGR8vWBAU7T1r3tHHyxN9Hm  # any address
+```
+
+```
+┌─ IDENTITIES ────────────────────────────────────────────────────────┐
+│ address   RComfCn4wHHsGR8vWBAU7T1r3tHHyxN9Hm                        │
+│ found     9 identities                                              │
+├─────────────────────────────────────────────────────────────────────┤
+│ NAME          I-ADDRESS                           STATE    SIGNERS  │
+│ pecurefcur1@  i49TaUGBXA4ZHbybQe3tw1r58BhCW361SC  ✓ active  1-of-1  │
+│ pecudepth3@   i7kDJurgpZA63cjPTuyK49CeCKihB5ryDB  ✓ active  1-of-1  │
+│ pecucli7@     i7r29bDQfrwjkTxjv4bcYD6B1ZV7WZ4kGo  ✓ active  1-of-1  │
+│ pecubask1@    i9dpvtcsH6FRD4UmNVur75cLXj7rUx9iD1  ✓ active  1-of-1  │
+│ pecuauto1@    iCFrCRiWJZVRMgcCZPNUjVd8KtinWCU1aH  ✓ active  1-of-1  │
+│ pecuauto3@    iCdzCCaZU3jzTwJA2yzWDQdPw4WwbiRRFf  ✓ active  1-of-1  │
+│ pecunft1@     iHHx6Mmv4qWpGDR3xiUXJywkGMaMacG1W2  ✓ active  1-of-1  │
+│ pecuref9@     iKh6DBXjPVU72BBD4sq5qbdFFeQGVcYokg  ✓ active  1-of-1  │
+│ pecudepth2@   iSHPgvF7f4huHK5WZ52tURDkZxbkCvsYke  ✓ active  1-of-1  │
+└─────────────────────────────────────────────────────────────────────┘
+  ▸ primary addresses only: these are the identities this address SIGNS for…
+  ▸ and as the chain stands now: one that listed this address in an older…
+```
+
+**The NAME column is a name you can use.** The chain answers this question with
+the *name component alone* — `pecucli7`, not `pecucli7.VRSCTEST@` — and a bare
+component is not a name any `pecu` command accepts, so a list that printed it
+would be a list you could not act on. Each row is qualified before it is shown,
+and what comes out goes straight back into `pecu id show`, `pecu id update` or
+`send --to` without editing.
+
+That costs nothing for an identity registered at the top of the chain, which is
+the ordinary case: the reply already carries `systemid`, and an identity whose
+parent *is* the system is fully named by `name@`. A sub-identity —
+`crypto.Kaiju@` — needs its parent's name, which is one `getcurrency`, **shared
+across every identity with the same parent**. Nine identities under one parent
+cost one request, not nine. The whole naming step is bounded by a single
+deadline rather than a timeout each, so the worst case against a hanging node is
+roughly one request's wait however many parents turn up.
+
+Appending `@` to the component would be cheaper and is wrong. `crypto@` is
+refused today only because nobody has registered a top-level `crypto`; the day
+somebody does, that shortcut prints a name resolving to **a different person's
+identity**. A parent that cannot be named is never a guess, and the row says
+which of two things happened: `(no such parent)` when the node answered and has
+no currency with that parent id, `(name unknown)` when the lookup itself failed
+or the shared naming deadline ran out before it was reached. Either way the
+i-address beside it stays whole, which is the handle the SDK itself steers a
+destructive follow-up at.
+
+**A name that would not fit is cut from the end, and the `@` goes with it.** A
+name component may be 64 bytes and a qualified sub-identity is longer still, so
+a name can outrun the column at any window width. Cut from the middle it kept
+its tail — `aaaa…aaaa@`, still wearing the one mark that says "whole VerusID
+name" — and `pecu id show` answered *nothing on this chain is called that* for
+it. So the cut takes the trailing `@` too, the cell ends in an ellipsis, and the
+leaf component is what survives. Whenever any name on the panel was shortened —
+by that budget or by a narrow window taking the column down — the panel says so
+and points at `pecu id list --json`, which carries every name whole.
+
+**The SIGNERS column is the other half of "which identities does this key
+control".** `getidentitieswithaddress` returns `minimumsignatures` and
+`primaryaddresses` on every entry, so whether the address that found an identity
+is enough on its own costs no extra request — and a `2-of-3` identity used to
+render exactly like one the key can move alone.
+
+Read it as *how many have to sign, out of how many*, because those are two
+different facts. The queried address is one of the primaries by construction, so
+what decides whether it is enough is the threshold alone: `2-of-3` means it is
+not, and `1-of-2` means it is — and so is one other key, which is `monkins@` on
+VRSCTEST today. A reply that carries neither field reads `unknown`, never
+`1-of-1`, which is the answer somebody acts on.
+
+**Primary addresses only, and this is the limit worth knowing.** The RPC matches
+on an identity's primary addresses and on nothing else. Revocation and recovery
+authorities are i-addresses — they name a VerusID, not a key — so this reply
+cannot answer for them, and an identity you can revoke or recover but are not
+primary on **will not appear here**. It is not gone. The panel says so on every
+run, because a reader who does not know it draws the opposite conclusion.
+
+The answer is also present tense: an identity that listed this address in an
+older version and no longer does is absent too. That is deliberate — the
+outpoint from a superseded version produces a transaction the chain rejects
+*after* it has been signed.
+
+**Zero identities and a failed lookup are different facts.** An empty list is a
+real answer and says whose it is; a node that did not answer exits `3` and says
+the request failed. A daemon that refuses the address — `getidentitieswithaddress`
+serves transparent R-addresses only — exits `1` naming the refusal, and is never
+folded into the empty case. For the same reason `--address` here takes an
+R-address and not a VerusID name: an identity is what comes back from this
+question, not what goes into it, so a name is refused offline, by name, before
+anything is connected. The flag's own help says so — it takes `<R…>`, not the
+`<R…|NAME@>` the read-only wallet commands take, because a flag that advertises
+the input its command turns away is a refusal the reader met too late.
+
+**`--json`, for the fields worth knowing about.** One document, and every name
+whole:
+
+| field | what it carries |
+| --- | --- |
+| `name` | the name **component** the reply sent, verbatim and on its own — not a name any command accepts |
+| `qualified_name` | the same three-answer grammar the rest of `pecu` uses for a name: `{known, name}`, `{known: true, name: null, reason}` when the node has no currency with the parent id, `{known: false, error}` when nothing was learned |
+| `minimum_signatures`, `primary_addresses` | straight off the reply. `primary_addresses` includes the address that was asked about, by construction |
+| `timelock.spendable` | whether the primary keys can move it **now**, decided rather than described: `false` for a revoked identity whatever its timelock says, and an `until_block` height already compared against the `tip` this run fetched. `null` only when a height needed a tip the node would not give |
+| `primary_only` | always `true`, and not derivable from the array: an empty `identities` does not mean the address controls none |
+| `tip` | the height the timelocks were measured against, or `null` when none needed one and `null` again when the node would not say |
 
 #### Registration is two transactions
 

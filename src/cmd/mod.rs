@@ -454,6 +454,10 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
         } => id::show(&ui, &Settings::resolve(&cli.globals)?, name),
 
         Command::Id {
+            command: IdCommand::List { target },
+        } => id::list(&ui, &Settings::resolve(&cli.globals)?, target),
+
+        Command::Id {
             command: IdCommand::Register(args),
         } => id::register(&ui, &Settings::resolve(&cli.globals)?, &cli.globals, args),
 
@@ -475,6 +479,7 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
 
         Command::Id { command } => Err(match command {
             IdCommand::Show { .. }
+            | IdCommand::List { .. }
             | IdCommand::Register(_)
             | IdCommand::Update(_)
             | IdCommand::Revoke(_)

@@ -14,6 +14,7 @@
 //! saw the commitment confirm. Running step two early is a compile error rather
 //! than a spent commitment.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use miette::Diagnostic;
@@ -21,17 +22,19 @@ use thiserror::Error;
 use verus_sdk::money::Amount;
 use verus_sdk::network::{
     prepare_registration, AwaitingCommitment, ChainReader, CommitmentStatus, FlowError,
-    IdentityRecord, Pending, RegistrationOptions, WaitPolicy,
+    IdentityAtAddress, IdentityRecord, Pending, RegistrationOptions, WaitPolicy,
 };
+use verus_sdk::send::CurrencyId;
 use verus_sdk::verus_keys::{Address, AddressKind};
 use verus_sdk::verus_tx::{Timelock, FLAG_LOCKED};
 
-use crate::cli::{Globals, IdRegisterArgs};
-use crate::cmd::uncertain_broadcast_advice;
+use crate::cli::{Globals, IdListTarget, IdRegisterArgs};
+use crate::cmd::{uncertain_broadcast_advice, wallet};
 use crate::config::Settings;
+use crate::currency_name::{look_up_qualified_names, name_budget, name_result, CurrencyName};
 use crate::keystore::{self, Envelope, Keystore};
 use crate::node::{self, Node};
-use crate::ui::{fmt, Panel, Text, Ui};
+use crate::ui::{fmt, Column, Panel, Table, Text, Ui};
 
 /// How much of a node-supplied name is ever printed. Identity names are
 /// untrusted display text, the same as currency names.
@@ -45,6 +48,20 @@ pub enum IdError {
         help("VerusID names end with @, as in `bob@`")
     )]
     NotFound { name: String },
+
+    #[error("`{value}` is not an address a key controls")]
+    #[diagnostic(
+        code(pecu::not_a_primary_address),
+        help("--address takes a transparent R-address here. This asks the chain which identities list that address among the ones that SIGN for them, so a VerusID name or an i-address is not an input to the question — an identity is what comes back, not what goes in. `pecu key list` shows the addresses your keys hold, or name one with --key <label>. To read a single identity by name, `pecu id show <name@>`")
+    )]
+    NotAPrimaryAddress { value: String },
+
+    #[error("the node would not look up identities for `{address}`")]
+    #[diagnostic(
+        code(pecu::address_refused),
+        help("`getidentitieswithaddress` serves transparent R-addresses only, and this daemon did not read that one as one. Nothing was listed, and this is not an answer about how many identities the address controls. `pecu key list` shows the addresses your keys hold")
+    )]
+    AddressRefused { address: String },
 
     #[error("`{name}` is not a name this can register")]
     #[diagnostic(
@@ -451,6 +468,709 @@ fn panel(
     }
 
     panel
+}
+
+// ── list ────────────────────────────────────────────────────────────────────
+
+/// What `id list` promises, and the sentence a reader has to have seen before
+/// concluding an identity of theirs is gone.
+///
+/// `getidentitieswithaddress` matches on the identity's **primary** addresses
+/// and on nothing else. Revocation and recovery authorities are i-addresses —
+/// they name a VerusID, not a key — so the reply cannot answer for them, and
+/// this list is silent about a role a reader would very reasonably expect it to
+/// cover. Silence with no note attached reads as "you have no such identity".
+const PRIMARY_ONLY: &str = "primary addresses only: these are the identities this address SIGNS \
+                            for. One it can revoke or recover but is not primary on cannot appear \
+                            — the reply does not carry those";
+
+/// The other half of the promise: the answer is present tense.
+///
+/// The SDK sends `unspent: true`, which asks what the identity looks like now
+/// rather than what it has ever looked like. That is the only form whose answer
+/// is safe to act on — an outpoint from a superseded version produces a
+/// transaction the chain rejects after it has been signed — but it does mean
+/// this list drops an identity the moment its primary addresses change.
+const PRESENT_TENSE: &str = "and as the chain stands now: one that listed this address in an \
+                             older version, and no longer does, is not here either";
+
+/// The identities one address is a primary of.
+///
+/// The one identity read that does not start from a name. Every other `id`
+/// subcommand takes a name the caller already knows, which is exactly what
+/// somebody restored from a seed on a new machine does not have — and on Verus
+/// funds live under an identity rather than under a bare key, so a name they
+/// cannot recover is money they cannot reach.
+pub fn list(ui: &Ui, settings: &Settings, target: &IdListTarget) -> miette::Result<()> {
+    // Refused offline, before anything is connected, and by name.
+    //
+    // `getidentitieswithaddress` serves transparent addresses only and answers
+    // anything else with `-5: no valid PKH or PK address` — measured. Under
+    // this repo's own rule a `-5` is the daemon answering rather than failing,
+    // which everywhere else in this tree means "no such thing"; here that arm
+    // would print an empty list. So `pecu id list --address bob@` would resolve
+    // happily and then report that bob controls nothing, which is the one
+    // confident wrong answer this command exists to avoid. Base58check settles
+    // the shape without asking anybody.
+    if let Some(given) = target.address.as_deref() {
+        if given.parse::<Address>().map(|address| address.kind()) != Ok(AddressKind::PubKeyHash) {
+            return Err(IdError::NotAPrimaryAddress {
+                value: given.to_string(),
+            }
+            .into());
+        }
+    }
+
+    let node = node::connect(&settings.profile)?;
+    let address = match target.address.as_deref() {
+        Some(given) => given.to_string(),
+        // `wallet`'s resolver rather than a second one spelled differently: its
+        // two refusals already name the flags that fix them — `--key <label>`
+        // and `pecu key list` — and a wallet where the same choice is made one
+        // way here and another way in `wallet balance` is a wallet whose user
+        // has to remember which is which. `None` for the address keeps it off
+        // the node: the name-resolving half is the half this command must not
+        // reach, and it is the half that needs one.
+        None => wallet::resolve_address(ui, &node, settings, None, target.key.as_deref())?.address,
+    };
+
+    ui.sdk(format!("node.identities_with_address({address:?})"));
+    let entries = match node.identities_with_address(&address) {
+        Ok(entries) => entries,
+        // Deliberately *not* the "nothing found" arm this repo uses everywhere
+        // else. An address that controls nothing comes back as `Ok(vec![])` —
+        // the SDK is explicit that the empty list is a real answer — so a `-5`
+        // here is the daemon refusing the address, not describing it. Folded
+        // into the empty case it would tell somebody their identities are gone.
+        Err(verus_sdk::network::RpcError::Node { code: -5 | -8, .. }) => {
+            return Err(IdError::AddressRefused { address }.into())
+        }
+        Err(other) => {
+            return Err(node::NodeError::request(
+                "listing the identities at the address",
+                &settings.profile.node,
+                other,
+            )
+            .into())
+        }
+    };
+    ui.sdk_result(fmt::plural(entries.len(), "identity", "identities"));
+
+    let rows = rows(ui, &node, settings, &entries);
+
+    // One request, asked only when a row carries an absolute unlock height.
+    // Whether such a height has passed cannot be answered without the tip, and
+    // an identity that carries no timelock at all — which is nearly all of them
+    // — needs nothing to say so. A tip the node will not give is carried as
+    // unread rather than as zero: the difference decides a word on every locked
+    // row, and the panel says which one it printed.
+    let tip = if rows
+        .iter()
+        .any(|row| matches!(row.timelock, Timelock::UntilBlock(_)))
+    {
+        ui.sdk("node.block_count()");
+        let tip = node.block_count().ok();
+        ui.sdk_result(match tip {
+            Some(tip) => fmt::height(tip.into()),
+            None => "the node would not say".to_string(),
+        });
+        match tip {
+            Some(tip) => Tip::Known(tip),
+            None => Tip::Unread,
+        }
+    } else {
+        Tip::NotNeeded
+    };
+
+    let listing = Listing { address, rows, tip };
+
+    if ui.is_json() {
+        emit(&serde_json::json!({
+            "address": listing.address,
+            "identities": entries
+                .iter()
+                .zip(&listing.rows)
+                .map(|(entry, row)| serde_json::json!({
+                    // The name component the node sent, verbatim and on its
+                    // own. Not a name any `pecu` command accepts — that is what
+                    // `qualified_name` is for — but it is what the reply said.
+                    "name": entry.name,
+                    "qualified_name": qualified_json(&row.name),
+                    "identity_address": entry.identity_address,
+                    "parent": entry.parent,
+                    "flags": entry.flags,
+                    "revoked": entry.is_revoked(),
+                    "timelock": list_timelock_json(row.timelock, entry.is_revoked(), listing.tip),
+                    // Both verbatim off the reply, and both arrive with every
+                    // entry at no extra request. Whether the queried address is
+                    // enough on its own is half of "which identities does this
+                    // key control", and without these two a 2-of-3 identity is
+                    // indistinguishable here from one the key alone can move.
+                    "minimum_signatures": entry
+                        .identity
+                        .get("minimumsignatures")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                    "primary_addresses": entry
+                        .identity
+                        .get("primaryaddresses")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                    "outpoint": {
+                        "txid": entry.outpoint.0.to_string(),
+                        "vout": entry.outpoint.1,
+                    },
+                }))
+                .collect::<Vec<_>>(),
+            "count": listing.rows.len(),
+            // Not derivable from the list above, and the difference between an
+            // address that is primary on nothing and one whose identities this
+            // call cannot see. A consumer that treats an empty `identities` as
+            // "controls no identities" is wrong in a way the array cannot show.
+            "primary_only": true,
+            // Present when a row needed it, `null` when none did and `null`
+            // again when the node would not say — two facts this cannot tell
+            // apart and the panel can. Read `timelock.spendable` for whether a
+            // row can be moved: it is already decided against this tip, so a
+            // consumer has no arithmetic of its own to do, and it is `null`
+            // exactly when the tip was needed and not got.
+            "tip": match listing.tip {
+                Tip::Known(tip) => serde_json::Value::from(tip),
+                Tip::NotNeeded | Tip::Unread => serde_json::Value::Null,
+            },
+        }));
+        ui.explain_panel();
+        return Ok(());
+    }
+
+    if listing.rows.is_empty() {
+        // An empty list is an answer, and it is the node's. Said as one:
+        // "nothing found" with no provenance is indistinguishable from a
+        // command that failed to look, and this is the command somebody runs
+        // when they already suspect they have lost something.
+        ui.note(format!(
+            "no identity on this chain lists {} among its primary addresses",
+            // On the `--key` path this is the keystore's word, and a keystore
+            // is a file that can be edited or corrupted. Same filter the panel
+            // gives it.
+            fmt::id(&listing.address, ui.theme.glyphs.ellipsis)
+        ));
+        ui.note(
+            "that is the node's answer, not a failure to ask: a node that had not answered \
+                 would be an error here rather than an empty list",
+        );
+        ui.note(PRIMARY_ONLY);
+        ui.note(PRESENT_TENSE);
+        ui.note("`pecu id register <name>` registers one");
+        ui.explain_panel();
+        return Ok(());
+    }
+
+    ui.panel(&list_panel(ui, &listing));
+    ui.explain_panel();
+    Ok(())
+}
+
+/// The listing as the panel prints it.
+///
+/// Gathered into a struct rather than passed as four arguments so that
+/// [`list_panel`] can be one function: what the tests drive is then the panel
+/// the command prints, and a note only a fixture attaches is not a note the
+/// command can quietly lose.
+struct Listing {
+    address: String,
+    rows: Vec<Row>,
+    tip: Tip,
+}
+
+/// One line of the list.
+struct Row {
+    name: Name,
+    identity_address: String,
+    revoked: bool,
+    timelock: Timelock,
+    control: Control,
+}
+
+/// How many of an identity's primary addresses have to sign, out of how many.
+///
+/// The question a reader of this list is actually asking. They ran it because
+/// they hold a key and no name, and "which identities does this key control"
+/// has two halves: which ones list the address at all, and whether the address
+/// is enough on its own. `getidentitieswithaddress` answers both in the same
+/// reply — `minimumsignatures` and `primaryaddresses` arrive with every entry —
+/// so the second half costs no request, and dropping it left a 2-of-3 identity
+/// rendering exactly like one the key alone can move.
+///
+/// Both halves are optional because both are read off the raw identity object.
+/// A reply that does not carry them leaves an unknown rather than a confident
+/// `1-of-1`, which is the answer somebody acts on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Control {
+    min_sigs: Option<u64>,
+    primaries: Option<usize>,
+}
+
+impl Control {
+    /// The same two fields `id show`'s CONTROL section reads, under the same
+    /// rule: anything missing is unknown, never a default.
+    fn of(identity: &serde_json::Value) -> Self {
+        Self {
+            min_sigs: identity.get("minimumsignatures").and_then(|v| v.as_u64()),
+            primaries: identity
+                .get("primaryaddresses")
+                .and_then(|v| v.as_array())
+                .map(Vec::len),
+        }
+    }
+
+    /// Whether the address that was asked about is enough on its own.
+    ///
+    /// A threshold of one, whatever the number of primaries. The queried
+    /// address is one of them by construction — that is what the RPC matched
+    /// on — so one signature being enough means *this* signature is enough.
+    /// `monkins@` on VRSCTEST is the live case: two primary addresses, one
+    /// required, and either key moves it. `2-of-3` is the case that is not.
+    ///
+    /// An unknown is not this case either, and must not read as one: a
+    /// threshold nobody stated is not a threshold this key meets.
+    fn moves_alone(self) -> bool {
+        self.min_sigs == Some(1) && self.primaries.is_some_and(|total| total > 0)
+    }
+
+    /// Whether this row is the ordinary one: one key, its own, nothing to
+    /// explain. Anything else earns the note under the table.
+    fn is_plain(self) -> bool {
+        (self.min_sigs, self.primaries) == (Some(1), Some(1))
+    }
+
+    /// What the `signers` column prints, or `None` when the reply did not say.
+    fn threshold(self) -> Option<String> {
+        match (self.min_sigs, self.primaries) {
+            (Some(min), Some(total)) if total > 0 => Some(format!("{min}-of-{total}")),
+            _ => None,
+        }
+    }
+}
+
+/// The chain tip, and whether it was ever wanted.
+///
+/// Three states rather than an `Option<u32>`, because "nobody asked" and "the
+/// node would not say" print different words on a locked row and warrant
+/// different notes. Collapsed to `None` they printed the same, and the more
+/// alarming of the two was the one that meant nothing was wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tip {
+    /// No row carried an absolute unlock height, so none was fetched.
+    NotNeeded,
+    Known(u32),
+    /// A row needed one and the request failed.
+    Unread,
+}
+
+/// A name for one identity, in the spelling another `pecu` command accepts.
+///
+/// Three answers, not two, for the reason [`crate::currency_name::CurrencyName`]
+/// has three: a name that could not be built is an **unknown**, and printing the
+/// bare name component instead would hand the reader a string that looks like a
+/// name and is not one.
+enum Name {
+    /// Hand this to `pecu id show`, `pecu send --to` or `pecu id update`
+    /// unedited: `pecucli7@`, `crypto.Kaiju.VRSCTEST@`.
+    Usable(String),
+    /// The node knows no currency with this identity's parent id, so there is
+    /// no parent name to build one out of.
+    NoParent,
+    /// No parent name was got, and that says nothing about the identity. The
+    /// string is why.
+    Unknown(String),
+}
+
+/// Whether an identity's own name component is the whole of its name.
+enum Parentage {
+    /// It sits directly on the chain being read, so `name@` is the whole name
+    /// and costs no request at all.
+    TopLevel,
+    /// It sits under another currency, whose name is needed to build one.
+    Under(CurrencyId),
+    /// The reply did not say. Not a name, and not a licence to guess at one.
+    Unsaid,
+}
+
+/// Read an identity's parentage off the reply, without asking anything.
+///
+/// `systemid` is the field that makes this free. It is in every entry
+/// `getidentitieswithaddress` returns — verified against api.verustest.net —
+/// and an identity whose `parent` *is* the system is one that sits at the top
+/// of this chain, where `name@` is already the fully qualified name. Twelve of
+/// the twelve identities across the three sample addresses in #48 are that
+/// case, so the common path spends nothing.
+///
+/// Appending `@` unconditionally instead would be wrong rather than merely
+/// optimistic. `crypto.Kaiju.VRSCTEST@` has the name component `crypto`, and
+/// `crypto@` is refused today only because nobody has registered a top-level
+/// `crypto` — nothing stops one being registered tomorrow, and then this list
+/// would print a name that resolves to somebody else's identity.
+fn parentage(entry: &IdentityAtAddress) -> Parentage {
+    let Some(system) = entry.identity.get("systemid").and_then(|v| v.as_str()) else {
+        return Parentage::Unsaid;
+    };
+    // The chain's own identity is checked first, because its `parent` is the
+    // chain it was launched *from* — `VRSCTEST@`'s parent is the VRSC mainnet
+    // root, an i-address this node has no currency for. The parent test below
+    // would send that to `getcurrency`, take the refusal, and print
+    // `(no such parent)` for the one identity whose name is on every panel.
+    if entry.identity_address == system || entry.parent == system {
+        return Parentage::TopLevel;
+    }
+    match entry.parent.parse::<Address>() {
+        Ok(parent) if parent.kind() == AddressKind::Identity => {
+            Parentage::Under(CurrencyId::from_bytes(parent.hash()))
+        }
+        _ => Parentage::Unsaid,
+    }
+}
+
+/// Every row, with its name resolved — one request per **distinct** parent, and
+/// none at all for an address whose identities are all top-level.
+///
+/// The deduplication is free: [`look_up_qualified_names`] takes a set, so nine
+/// identities sharing one parent collapse to one `getcurrency` without this
+/// having to arrange it. The bound on the bad case is [`name_budget`]'s single
+/// deadline, shared across every parent rather than one timeout each — a name
+/// is display text and the i-address beside it is the answer, so the whole
+/// naming step is worth roughly one request's worth of waiting however many
+/// parents turn up.
+fn rows(ui: &Ui, node: &Node, settings: &Settings, entries: &[IdentityAtAddress]) -> Vec<Row> {
+    let wanted: BTreeSet<CurrencyId> = entries
+        .iter()
+        .filter_map(|entry| match parentage(entry) {
+            Parentage::Under(parent) => Some(parent),
+            Parentage::TopLevel | Parentage::Unsaid => None,
+        })
+        .collect();
+
+    let named = if wanted.is_empty() {
+        BTreeMap::new()
+    } else {
+        // One `--explain` line naming the count, not one per parent.
+        ui.sdk(format!(
+            "node.currency_definition(…) for {}",
+            fmt::plural(wanted.len(), "parent", "parents")
+        ));
+        let named = look_up_qualified_names(node, &wanted, name_budget(&settings.profile));
+        ui.sdk_result(name_result(&named, &wanted));
+        named
+    };
+
+    build_rows(entries, &named)
+}
+
+/// The rows a set of entries and a set of parent names make, with no node in
+/// sight — which is what lets a test drive the naming rule that decides whether
+/// this list is usable at all.
+fn build_rows(
+    entries: &[IdentityAtAddress],
+    named: &BTreeMap<CurrencyId, CurrencyName>,
+) -> Vec<Row> {
+    entries
+        .iter()
+        .map(|entry| Row {
+            name: name_of(entry, named),
+            identity_address: entry.identity_address.clone(),
+            // Off the flag, not off a status string: this reply carries no
+            // status string, so `id show`'s source for the same fact does not
+            // exist here.
+            revoked: entry.is_revoked(),
+            // `entry.identity` is the whole identity object, flags and timelock
+            // reinserted, so the one reader in this tree that pairs those two
+            // fields correctly works on it unchanged.
+            timelock: timelock_of(&entry.identity),
+            control: Control::of(&entry.identity),
+        })
+        .collect()
+}
+
+fn name_of(entry: &IdentityAtAddress, named: &BTreeMap<CurrencyId, CurrencyName>) -> Name {
+    match parentage(entry) {
+        Parentage::TopLevel => Name::Usable(format!("{}@", entry.name)),
+        Parentage::Under(parent) => match named.get(&parent) {
+            Some(CurrencyName::Known(parent)) => Name::Usable(format!("{}.{parent}@", entry.name)),
+            Some(CurrencyName::Absent) => Name::NoParent,
+            Some(CurrencyName::Failed(why)) => Name::Unknown(why.clone()),
+            // No entry at all: the shared deadline ran out before this parent
+            // came up. Nothing was asked, which is a different fact from a
+            // lookup that was made and came back empty-handed.
+            None => Name::Unknown("the parent's name was not looked up".to_string()),
+        },
+        Parentage::Unsaid => {
+            Name::Unknown("the reply did not say what system this identity is on".to_string())
+        }
+    }
+}
+
+/// One identity's usable name, as JSON.
+///
+/// The same three-answer grammar [`crate::currency_name::name_json`] uses, and
+/// for the same reason: a bare string cannot say that no name was got, and
+/// `null` on its own reads as "this identity has no name".
+fn qualified_json(name: &Name) -> serde_json::Value {
+    match name {
+        Name::Usable(name) => serde_json::json!({ "known": true, "name": name }),
+        Name::NoParent => serde_json::json!({
+            "known": true,
+            "name": null,
+            "reason": "the node has no currency with this identity's parent id",
+        }),
+        Name::Unknown(why) => serde_json::json!({ "known": false, "error": why }),
+    }
+}
+
+/// The IDENTITIES panel, built away from the node so a test can render it.
+fn list_panel(ui: &Ui, listing: &Listing) -> Panel {
+    let palette = ui.theme.palette;
+    let glyphs = ui.theme.glyphs;
+    let table = list_table(ui, &listing.rows, listing.tip);
+
+    // Two different ways a printed name stops being the name, and a reader can
+    // act on neither. One is this command's own budget on untrusted display
+    // text; the other is the frame taking the column down to fit, which happens
+    // after the row is built and without the row knowing. The second is
+    // measured against the same ceiling `Panel` fits the table to — and only
+    // under the framed skin, because the plain one has no border to run out
+    // through and prints the table unbudgeted.
+    let over_budget = listing.rows.iter().any(|row| match &row.name {
+        Name::Usable(name) => shortened_name(name, glyphs.ellipsis).1,
+        Name::NoParent | Name::Unknown(_) => false,
+    });
+    let over_frame = !ui.theme.is_plain() && table.shortens_at(&ui.theme, ui.theme.width);
+
+    let mut panel = Panel::new("IDENTITIES")
+        // Filtered, because on the `--key` path this is the keystore's word
+        // rather than something parsed off the command line: a keystore is a
+        // file, and a newline in one forges a row inside the frame. An honest
+        // address is exactly an address wide and comes back untouched.
+        .row(
+            "address",
+            Text::of(fmt::id(&listing.address, glyphs.ellipsis), palette.value),
+        )
+        .row(
+            "found",
+            Text::of(
+                fmt::plural(listing.rows.len(), "identity", "identities"),
+                palette.accent,
+            ),
+        )
+        .rule()
+        .table(table)
+        .note(Text::of(PRIMARY_ONLY, palette.muted))
+        .note(Text::of(PRESENT_TENSE, palette.muted));
+
+    if over_budget || over_frame {
+        // Silence here is the expensive kind. `fmt::untrusted` cuts from the
+        // middle and keeps the tail, so a shortened name came out still ending
+        // in `@` and read as a whole one — and `pecu id show` answers "nothing
+        // on this chain is called that" for it. The cut now shows in the cell,
+        // and this says where the whole name is.
+        panel = panel.note(Text::of(
+            "a name too wide for its column is shortened here, and a shortened name is not one \
+             another `pecu` command accepts: `pecu id list --json` carries every name whole, and \
+             the i-address on the row is the handle that needs no name",
+            palette.warn,
+        ));
+    }
+
+    if listing.rows.iter().any(|row| !row.control.is_plain()) {
+        // The whole point of the column, said once — and said carefully,
+        // because the threshold and the number of primaries are two different
+        // facts. `monkins@` on this chain is `1-of-2`: a second key exists and
+        // either one is enough, which is not the same warning as `2-of-3`.
+        panel = panel.note(Text::of(
+            "`signers` is how many of an identity's primary addresses have to sign, out of how \
+             many: `2-of-3` means this address is not enough on its own, `1-of-2` means it is and \
+             so is another key, and `unknown` means the reply did not carry the threshold",
+            palette.warn,
+        ));
+    }
+
+    if listing
+        .rows
+        .iter()
+        .any(|row| !matches!(row.name, Name::Usable(_)))
+    {
+        // The row is still actionable, and saying which handle to use is the
+        // difference between a line a reader can act on and one they conclude
+        // is broken.
+        panel = panel.note(Text::of(
+            "a row with no name is one whose parent could not be named; its i-address is whole, \
+             and `pecu id show` takes one",
+            palette.warn,
+        ));
+    }
+    if listing.tip == Tip::Unread {
+        // Silence here would let `timelocked` read as `locked`, which is a
+        // claim about spendability that nothing in this run established.
+        panel = panel.note(Text::of(
+            "the chain tip could not be read, so `timelocked` says a timelock is set, not that \
+             it is still in force",
+            palette.warn,
+        ));
+    }
+    if listing
+        .rows
+        .iter()
+        .any(|row| !row.revoked && !matches!(row.timelock, Timelock::None))
+    {
+        panel = panel.note(Text::of(
+            "`pecu id show <name>` gives the form of a timelock and the height it turns on",
+            palette.muted,
+        ));
+    }
+    panel
+}
+
+/// The `id list` table.
+///
+/// Two columns may be shortened, and the order matters: the name pays first,
+/// and the i-address is touched only once the name is already down to its own
+/// header — and then only as far as the short address form, never below it.
+///
+/// The name is the column that makes this table too wide. It is display text a
+/// registrant chose, bounded by nothing the chain enforces, and it is the one
+/// thing on the row recoverable without the row: `id list --json` carries it in
+/// full. The i-address cannot be recovered from anywhere else on screen, it is
+/// what the SDK itself steers any destructive follow-up at, and it is what
+/// keeps a nameless row usable. So the queue is name, then id — the other way
+/// round, one long name would cut *every* row's i-address to the width of the
+/// word I-ADDRESS, because a column's width is the maximum across its rows.
+///
+/// The state column is never shortened: `revoked` cut from the middle is not a
+/// shorter word, it is a different one, on the one cell that says whether an
+/// identity is still yours.
+fn list_table(ui: &Ui, rows: &[Row], tip: Tip) -> Table {
+    let palette = ui.theme.palette;
+    let glyphs = ui.theme.glyphs;
+    let mut table = Table::new(vec![
+        Column::left("name"),
+        Column::left("i-address"),
+        Column::left("state"),
+        Column::left("signers"),
+    ])
+    .elidable(0)
+    .elidable_to(1, fmt::address_width(glyphs.ellipsis));
+    for row in rows {
+        table.push(vec![
+            name_cell(ui, &row.name),
+            // An i-address, and the node is the only thing saying so.
+            Text::of(
+                fmt::id(&row.identity_address, glyphs.ellipsis),
+                palette.value,
+            ),
+            state_cell(ui, row, tip),
+            signers_cell(ui, row.control),
+        ]);
+    }
+    table
+}
+
+/// Whether the address that was asked about is enough on its own to move this.
+///
+/// `1-of-1` is printed rather than left blank, and it is printed on every row.
+/// A column that appears only when something is unusual cannot be told from a
+/// command that does not report the fact at all, and this is the fact the
+/// reader came for. The grammar is `id show`'s, so the two commands do not
+/// spell the same thing two ways.
+fn signers_cell(ui: &Ui, control: Control) -> Text {
+    let palette = ui.theme.palette;
+    match control.threshold() {
+        Some(threshold) if control.moves_alone() => Text::of(threshold, palette.muted),
+        Some(threshold) => Text::of(threshold, palette.warn),
+        // Not `1-of-1`. That is the answer somebody acts on, and the reply did
+        // not give it.
+        None => Text::of("unknown", palette.warn),
+    }
+}
+
+/// One usable name as the column prints it, and whether the budget cut it.
+///
+/// Not `fmt::untrusted`, and the difference is the whole of #48's promise that
+/// a printed name is one another command accepts. `untrusted` cuts from the
+/// middle and keeps the tail, which on a VerusID name keeps the `@` — so a
+/// sixty-character name came out as `aaaa…aaaa@`, wearing the one mark that
+/// says "this is a whole name", and `pecu id show` answered "nothing on this
+/// chain is called that" for it. Verus permits 64-byte name components, and a
+/// qualified sub-identity passes this budget with two ordinary ones, so this is
+/// a name a chain really carries rather than a pathological case.
+///
+/// Cut from the end instead: the `@` goes with everything else that goes, the
+/// cell ends in the ellipsis, and what is kept is the leaf component — the part
+/// that says which identity this is. The frame may cut the cell again, and it
+/// cuts *around* an ellipsis that is already there rather than opening a second
+/// hole, so the mark survives. The whole name is in `--json`, and the panel
+/// says so on any run where this fires.
+fn shortened_name(name: &str, ellipsis: &str) -> (String, bool) {
+    let filtered = fmt::neutralised(name);
+    if filtered.chars().count() <= NAME_BUDGET {
+        return (filtered, false);
+    }
+    let head = NAME_BUDGET.saturating_sub(ellipsis.chars().count());
+    (
+        filtered
+            .chars()
+            .take(head)
+            .chain(ellipsis.chars())
+            .collect(),
+        true,
+    )
+}
+
+fn name_cell(ui: &Ui, name: &Name) -> Text {
+    let palette = ui.theme.palette;
+    let glyphs = ui.theme.glyphs;
+    match name {
+        // Untrusted display text: a registrant chose it, and a newline in it
+        // would forge a row inside the frame.
+        Name::Usable(name) => Text::of(shortened_name(name, glyphs.ellipsis).0, palette.accent),
+        // Not `(unnamed)`. The chain has not said this identity has no name; it
+        // has said it has no currency with the parent id this identity names.
+        Name::NoParent => Text::of("(no such parent)", palette.muted),
+        // And not `(name unreadable)` either, which would name a cause. Most of
+        // the ways this happens are not a garbled answer.
+        Name::Unknown(_) => Text::of("(name unknown)", palette.warn),
+    }
+}
+
+/// The one word that says whether this identity is still yours to move.
+///
+/// Kept to a word so the row fits beside a whole i-address: the height a
+/// timelock turns on belongs to `id show`, which has a section for it and the
+/// room to say which of the two forms it is.
+fn state_cell(ui: &Ui, row: &Row, tip: Tip) -> Text {
+    let palette = ui.theme.palette;
+    let glyphs = ui.theme.glyphs;
+    let word = |glyph: &str, style: anstyle::Style, word: &str| {
+        Text::of(glyph, style).space().push(word.to_string(), style)
+    };
+    if row.revoked {
+        return word(glyphs.danger, palette.danger, "revoked");
+    }
+    match row.timelock {
+        Timelock::None => word(glyphs.ok, palette.ok, "active"),
+        // Certain without a tip: the delay does not start counting until an
+        // unlock is asked for, so there is no height at which this opens.
+        Timelock::DelayAfterUnlock(_) => word(glyphs.warn, palette.warn, "locked"),
+        Timelock::UntilBlock(height) => match tip {
+            // A countdown that has elapsed leaves its height on the identity
+            // forever, because nothing clears it. Reporting that as locked
+            // would be wrong about an identity that unlocked years ago.
+            Tip::Known(tip) if tip >= height => word(glyphs.ok, palette.ok, "active"),
+            Tip::Known(_) => word(glyphs.warn, palette.warn, "locked"),
+            // The height is known and whether it has passed is not, so this
+            // says a timelock is set and stops there. `locked` would be a guess
+            // about spendability, and the panel carries a note saying so.
+            Tip::NotNeeded | Tip::Unread => word(glyphs.warn, palette.warn, "timelocked"),
+        },
+    }
 }
 
 // ── register ────────────────────────────────────────────────────────────────
@@ -1597,6 +2317,43 @@ pub(crate) fn timelock_of(identity: &serde_json::Value) -> Timelock {
     }
 }
 
+/// The timelock as `id list` reports it: [`timelock_json`], with `spendable`
+/// decided rather than left as a shape.
+///
+/// `spendable` answers one question — can the primary keys move this now — and
+/// a consumer keying on it has to get the same answer the panel beside it
+/// prints. Two things `id show` cannot settle for free, this command has in
+/// hand:
+///
+/// * Revocation settles it whatever the timelock says. A revoked identity with
+///   no timelock reported `"kind": "none", "spendable": true`, which is true
+///   about the timelock and wrong about the identity.
+/// * An `until_block` height is decided by the tip, and this run already
+///   fetched one if any row needed it. Left `null` a consumer had to combine
+///   the document's `tip` with `unlock_height` itself, on the one field the
+///   notes point it at.
+///
+/// `null` survives for exactly one case: a height that needed a tip the node
+/// would not give. That is an unknown, and it stays one.
+fn list_timelock_json(timelock: Timelock, revoked: bool, tip: Tip) -> serde_json::Value {
+    let mut value = timelock_json(timelock);
+    let spendable = if revoked {
+        Some(false)
+    } else {
+        match (timelock, tip) {
+            (Timelock::None, _) => Some(true),
+            (Timelock::DelayAfterUnlock(_), _) => Some(false),
+            (Timelock::UntilBlock(height), Tip::Known(tip)) => Some(tip >= height),
+            (Timelock::UntilBlock(_), Tip::NotNeeded | Tip::Unread) => None,
+        }
+    };
+    value["spendable"] = match spendable {
+        Some(spendable) => serde_json::Value::Bool(spendable),
+        None => serde_json::Value::Null,
+    };
+    value
+}
+
 fn timelock_json(timelock: Timelock) -> serde_json::Value {
     match timelock {
         Timelock::None => serde_json::json!({ "kind": "none", "spendable": true }),
@@ -1792,6 +2549,660 @@ mod tests {
         std::fs::write(pending_path(&settings, "mybasket"), "{}").expect("writable temp dir");
 
         assert!(!reveal_was_broadcast(&pending_path(&settings, "MyBasket")));
+    }
+
+    // ── id list ─────────────────────────────────────────────────────────────
+
+    /// VRSCTEST's own i-address, which is the `systemid` on every identity
+    /// registered on that chain.
+    const SYSTEM: &str = "iJhCezBExJHvtyH3fGhNnt2NhU4Ztkf2yq";
+
+    /// `Kaiju.VRSCTEST@` — a real VRSCTEST currency with identities under it,
+    /// and the reason a sub-identity's name cannot be built by appending `@`.
+    const KAIJU: &str = "iHBwQo7LUmb7QKKqbsd8Kw9BxdQvgTdK9f";
+
+    /// Two more real i-addresses, so a multi-row table is measured over the
+    /// shapes a daemon actually returns.
+    const OTHER_IDENTITY: &str = "i7kDJurgpZA63cjPTuyK49CeCKihB5ryDB";
+
+    fn at_address(
+        name: &str,
+        identity_address: &str,
+        parent: &str,
+        system: &str,
+        flags: u32,
+        timelock: u32,
+    ) -> IdentityAtAddress {
+        IdentityAtAddress {
+            identity_address: identity_address.to_string(),
+            name: name.to_string(),
+            parent: parent.to_string(),
+            flags,
+            timelock,
+            outpoint: (verus_sdk::money::Txid::from_internal([0u8; 32]), 0),
+            // The whole object, the way `into_typed` rebuilds it: the lifted
+            // fields reinserted alongside everything else the daemon sent.
+            identity: serde_json::json!({
+                "identityaddress": identity_address,
+                "name": name,
+                "parent": parent,
+                "systemid": system,
+                "flags": flags,
+                "timelock": timelock,
+                // Carried because the wire carries them on every entry, and
+                // the `signers` column reads them. A fixture that left them out
+                // would test the unknown arm and call it the ordinary case.
+                "minimumsignatures": 1,
+                "primaryaddresses": [HONEST_PRIMARY],
+            }),
+        }
+    }
+
+    /// The same, with a threshold no single key can meet.
+    ///
+    /// The row the whole `signers` column exists for: the queried address is
+    /// one of three primaries and two of them have to sign, so finding this
+    /// identity does not mean the key that found it can move it.
+    fn shared(
+        name: &str,
+        identity_address: &str,
+        min_sigs: u64,
+        primaries: usize,
+    ) -> IdentityAtAddress {
+        let mut entry = at_address(name, identity_address, SYSTEM, SYSTEM, 0, 0);
+        entry.identity["minimumsignatures"] = serde_json::json!(min_sigs);
+        entry.identity["primaryaddresses"] =
+            serde_json::Value::Array(vec![serde_json::json!(HONEST_PRIMARY); primaries]);
+        entry
+    }
+
+    /// An entry whose reply carried neither field, which is the only honest
+    /// source of an `unknown` in the column.
+    fn threshold_unsaid(name: &str, identity_address: &str) -> IdentityAtAddress {
+        let mut entry = at_address(name, identity_address, SYSTEM, SYSTEM, 0, 0);
+        let object = entry.identity.as_object_mut().expect("an identity object");
+        object.remove("minimumsignatures");
+        object.remove("primaryaddresses");
+        entry
+    }
+
+    /// A plain top-level identity on VRSCTEST.
+    fn top_level(name: &str, identity_address: &str) -> IdentityAtAddress {
+        at_address(name, identity_address, SYSTEM, SYSTEM, 0, 0)
+    }
+
+    fn currency(i_address: &str) -> CurrencyId {
+        CurrencyId::from_bytes(
+            i_address
+                .parse::<Address>()
+                .expect("a valid i-address")
+                .hash(),
+        )
+    }
+
+    fn listing(rows: Vec<Row>, tip: Tip) -> Listing {
+        Listing {
+            address: HONEST_PRIMARY.to_string(),
+            rows,
+            tip,
+        }
+    }
+
+    /// The panel as `id list` renders it at `terminal` columns.
+    fn list_rendered(listing: &Listing, terminal: usize) -> String {
+        let ui = framed_id(terminal);
+        list_panel(&ui, listing).render(&ui.theme)
+    }
+
+    /// The framed skin at `terminal` columns — the one with a border to run out
+    /// through. `Ui::new` alone picks a theme off the real stdout, which in a
+    /// test harness is a pipe and therefore unframed.
+    fn framed_id(terminal: usize) -> Ui {
+        let mut ui = Ui::new(ThemeFlag::Phosphor, false, false);
+        ui.theme = crate::ui::theme::Theme::with_skin(crate::ui::theme::Skin::Phosphor, terminal);
+        ui
+    }
+
+    fn name_text(name: &Name) -> String {
+        crate::ui::text::strip_ansi(&name_cell(&framed_id(120), name).render())
+    }
+
+    /// The whole design decision behind this command, pinned where it is made.
+    ///
+    /// An identity whose parent is the chain it lives on is fully named by
+    /// `name@`, which `id show`, `id update` and `send --to` all accept — so
+    /// the list is actionable for the twelve of twelve sample identities in
+    /// #48 without spending a single extra request. `systemid` is what makes
+    /// that free; it is in the reply already.
+    #[test]
+    fn a_top_level_identity_is_named_without_asking_the_node_anything() {
+        let entries = [top_level("pecucli7", HONEST_IDENTITY)];
+
+        // No parent names at all — the map a node that was never asked leaves.
+        let rows = build_rows(&entries, &BTreeMap::new());
+
+        assert!(
+            matches!(&rows[0].name, Name::Usable(name) if name == "pecucli7@"),
+            "{}",
+            name_text(&rows[0].name)
+        );
+    }
+
+    /// The other half of it, and the reason `format!("{name}@")` is not the
+    /// whole implementation.
+    ///
+    /// `crypto.Kaiju.VRSCTEST@`'s name component is `crypto`. `crypto@` is
+    /// refused by the chain today only because nobody has registered a
+    /// top-level `crypto` — and the day somebody does, a list that appended
+    /// `@` would print a name resolving to a different person's identity.
+    /// The parent's **fully qualified** name is what makes the answer mean one
+    /// thing: built from the unqualified `Kaiju` this would read
+    /// `crypto.Kaiju@`, which resolves only because `Kaiju` happens to sit at
+    /// the top of this chain.
+    #[test]
+    fn a_sub_identity_is_qualified_through_its_parent_rather_than_by_appending_an_at_sign() {
+        let entries = [at_address("crypto", HONEST_IDENTITY, KAIJU, SYSTEM, 5, 0)];
+        let named = BTreeMap::from([(
+            currency(KAIJU),
+            CurrencyName::Known("Kaiju.VRSCTEST".to_string()),
+        )]);
+
+        let rows = build_rows(&entries, &named);
+
+        assert!(
+            matches!(&rows[0].name, Name::Usable(name) if name == "crypto.Kaiju.VRSCTEST@"),
+            "{}",
+            name_text(&rows[0].name)
+        );
+    }
+
+    /// One request per *distinct* parent, and none for a top-level identity.
+    ///
+    /// The deduplication is what makes the worst case bearable: nine
+    /// identities under one parent are one `getcurrency`, not nine. It comes
+    /// free from `look_up_qualified_names` taking a set, which is exactly why
+    /// it is worth a test — nothing in `rows` looks like it is doing it.
+    #[test]
+    fn parents_are_asked_about_once_each_and_top_level_identities_not_at_all() {
+        let entries = [
+            top_level("pecucli7", HONEST_IDENTITY),
+            at_address("crypto", OTHER_IDENTITY, KAIJU, SYSTEM, 5, 0),
+            at_address("mobile", HONEST_IDENTITY, KAIJU, SYSTEM, 0, 0),
+        ];
+
+        let wanted: BTreeSet<CurrencyId> = entries
+            .iter()
+            .filter_map(|entry| match parentage(entry) {
+                Parentage::Under(parent) => Some(parent),
+                Parentage::TopLevel | Parentage::Unsaid => None,
+            })
+            .collect();
+
+        assert_eq!(wanted, BTreeSet::from([currency(KAIJU)]), "{wanted:?}");
+    }
+
+    /// The chain's own identity, whose `parent` is the chain it was launched
+    /// *from*: `VRSCTEST@`'s parent is the VRSC mainnet root, which this node
+    /// has no currency for. Named off `identityaddress == systemid` instead, or
+    /// the one identity on every panel in this repo prints as nameless.
+    #[test]
+    fn the_chains_own_identity_is_named_even_though_its_parent_is_another_chain() {
+        let entries = [at_address(
+            "VRSCTEST",
+            SYSTEM,
+            "i3UXS5QPRQGNRDDqVnyWTnmFCTHDbzmsYk",
+            SYSTEM,
+            1,
+            0,
+        )];
+
+        let rows = build_rows(&entries, &BTreeMap::new());
+
+        assert!(
+            matches!(&rows[0].name, Name::Usable(name) if name == "VRSCTEST@"),
+            "{}",
+            name_text(&rows[0].name)
+        );
+    }
+
+    /// Three ways a parent goes unnamed, and none of them may print a name.
+    ///
+    /// A lookup that failed, a deadline that never reached it, and a node that
+    /// denies the parent exists are different facts, and the one thing they
+    /// have in common is that no name was got. Printing the bare component —
+    /// `crypto`, or `crypto@` — would hand the reader a string that looks like
+    /// a name, is not one, and in the `@` case may name somebody else.
+    #[test]
+    fn a_parent_that_was_not_named_leaves_the_row_nameless_rather_than_bare() {
+        let entries = [at_address("crypto", HONEST_IDENTITY, KAIJU, SYSTEM, 0, 0)];
+        let unnamed = [
+            (
+                BTreeMap::from([(
+                    currency(KAIJU),
+                    CurrencyName::Failed("connection refused".to_string()),
+                )]),
+                "(name unknown)",
+            ),
+            // No entry at all: the shared deadline ran out first.
+            (BTreeMap::new(), "(name unknown)"),
+            (
+                BTreeMap::from([(currency(KAIJU), CurrencyName::Absent)]),
+                "(no such parent)",
+            ),
+        ];
+
+        for (named, expected) in unnamed {
+            let rows = build_rows(&entries, &named);
+            let cell = name_text(&rows[0].name);
+            assert_eq!(cell, expected, "{named:?}");
+            assert!(
+                !cell.contains("crypto"),
+                "a bare name component leaked: {cell}"
+            );
+        }
+    }
+
+    /// And the row stays usable: the i-address is whole, and the panel says
+    /// which handle to reach for. A nameless row a reader cannot act on is a
+    /// row they read as broken.
+    #[test]
+    fn a_nameless_row_keeps_a_whole_i_address_and_says_to_use_it() {
+        let entries = [at_address("crypto", HONEST_IDENTITY, KAIJU, SYSTEM, 0, 0)];
+        let rows = build_rows(&entries, &BTreeMap::new());
+
+        let out = crate::ui::text::strip_ansi(&list_rendered(&listing(rows, Tip::NotNeeded), 120));
+
+        assert!(
+            out.contains(HONEST_IDENTITY),
+            "the i-address was cut:\n{out}"
+        );
+        assert!(out.contains("`pecu id show`"), "no handle named:\n{out}");
+    }
+
+    /// A timelock whose height may already have passed is not a locked
+    /// identity, and without the tip nothing here knows which it is.
+    #[test]
+    fn a_timelock_the_tip_cannot_settle_is_not_reported_as_locked() {
+        let entries = [at_address(
+            "alice",
+            HONEST_IDENTITY,
+            SYSTEM,
+            SYSTEM,
+            0,
+            1_100_000,
+        )];
+        let rows = build_rows(&entries, &BTreeMap::new());
+        assert!(
+            matches!(rows[0].timelock, Timelock::UntilBlock(1_100_000)),
+            "{:?}",
+            rows[0].timelock
+        );
+
+        let unread = crate::ui::text::strip_ansi(&list_rendered(&listing(rows, Tip::Unread), 120));
+        assert!(unread.contains("timelocked"), "{unread}");
+        assert!(
+            unread.contains("the chain tip could not be read"),
+            "no note said the word was hedged:\n{unread}"
+        );
+
+        // With a tip past the height it is an ordinary identity: the height
+        // stays on it forever once the countdown finishes, so `locked` here
+        // would be wrong about something that unlocked long ago.
+        let rows = build_rows(&entries, &BTreeMap::new());
+        let elapsed =
+            crate::ui::text::strip_ansi(&list_rendered(&listing(rows, Tip::Known(1_200_000)), 120));
+        assert!(!elapsed.contains("locked"), "{elapsed}");
+        assert!(elapsed.contains("active"), "{elapsed}");
+    }
+
+    /// Read off the flag, because this reply carries no status string for it.
+    #[test]
+    fn a_revoked_identity_says_so_in_the_list() {
+        let entries = [at_address(
+            "alice",
+            HONEST_IDENTITY,
+            SYSTEM,
+            SYSTEM,
+            verus_sdk::verus_tx::identity::FLAG_REVOKED,
+            0,
+        )];
+        let rows = build_rows(&entries, &BTreeMap::new());
+
+        let out = crate::ui::text::strip_ansi(&list_rendered(&listing(rows, Tip::NotNeeded), 120));
+
+        assert!(out.contains("revoked"), "{out}");
+    }
+
+    /// A name is display text a registrant chose, and this table prints it
+    /// inside a frame. A newline in one forges a row; an escape run repaints
+    /// the terminal from inside the box.
+    #[test]
+    fn a_hostile_identity_name_cannot_forge_a_row_in_the_list() {
+        let entries = [
+            at_address(HOSTILE, HOSTILE, SYSTEM, SYSTEM, 0, 0),
+            top_level("alice", HONEST_IDENTITY),
+        ];
+        for terminal in 48..=120 {
+            let out = crate::ui::text::strip_ansi(&list_rendered(
+                &listing(build_rows(&entries, &BTreeMap::new()), Tip::NotNeeded),
+                terminal,
+            ));
+            assert!(
+                !out.contains('\u{1b}'),
+                "escape survived at {terminal}:\n{out}"
+            );
+            assert!(
+                !out.contains('\u{7f}'),
+                "delete survived at {terminal}:\n{out}"
+            );
+            assert_list_square(&out, terminal);
+        }
+
+        // The polarity, at a width with room for both: the frame is square
+        // because the hostile cells were filtered, not because the row beside
+        // them was swallowed.
+        let wide = crate::ui::text::strip_ansi(&list_rendered(
+            &listing(build_rows(&entries, &BTreeMap::new()), Tip::NotNeeded),
+            120,
+        ));
+        assert!(wide.contains("alice@"), "the honest row vanished:\n{wide}");
+        assert!(
+            wide.contains(HONEST_IDENTITY),
+            "a hostile neighbour cut an honest i-address:\n{wide}"
+        );
+    }
+
+    /// #53 on the one row of this panel that does not come from the node.
+    ///
+    /// On the `--key` path the address is the keystore's word, and a keystore
+    /// is a file that can be edited or corrupted. Rendered unfiltered, a
+    /// newline in it forged a row inside the IDENTITIES frame and left the box
+    /// ragged. `--address` is safe — base58check settles it offline — so this
+    /// is the vector that is left.
+    #[test]
+    fn a_tampered_keystore_address_cannot_forge_a_row_in_the_list() {
+        let entries = [top_level("alice", HONEST_IDENTITY)];
+        let listing = Listing {
+            address: format!("{HONEST_PRIMARY}\n\u{2502} forged  {HONEST_IDENTITY}  ok active"),
+            rows: build_rows(&entries, &BTreeMap::new()),
+            tip: Tip::NotNeeded,
+        };
+
+        for terminal in 48..=120 {
+            let out = crate::ui::text::strip_ansi(&list_rendered(&listing, terminal));
+            assert!(
+                !out.contains("forged"),
+                "a forged row at {terminal}:\n{out}"
+            );
+            assert_list_square(&out, terminal);
+        }
+    }
+
+    /// #50's budget, over every width the theme can reach.
+    #[test]
+    fn the_identity_list_frame_stays_square_at_every_width_the_theme_can_reach() {
+        let entries = [
+            top_level("a", HONEST_IDENTITY),
+            top_level("pecu-demo-id", OTHER_IDENTITY),
+            // Far longer than anything the budget prints, so the table is over
+            // its frame at every width and the elision queue is exercised.
+            top_level(&"n".repeat(96), "iKh6DBXjPVU72BBD4sq5qbdFFeQGVcYokg"),
+            at_address(
+                "crypto",
+                "i9dpvtcsH6FRD4UmNVur75cLXj7rUx9iD1",
+                KAIJU,
+                SYSTEM,
+                0,
+                0,
+            ),
+        ];
+
+        for terminal in 48..=120 {
+            let rows = build_rows(&entries, &BTreeMap::new());
+            let out = crate::ui::text::strip_ansi(&list_rendered(
+                &listing(rows, Tip::NotNeeded),
+                terminal,
+            ));
+            assert_list_square(&out, terminal);
+        }
+    }
+
+    /// The elision queue, pinned where it is decided.
+    ///
+    /// Queued id-first, one ninety-six-character name drained the i-address
+    /// column to the width of the word I-ADDRESS for *every* row — column
+    /// widths are the maximum across rows, which is what makes one long name
+    /// everybody's problem. The i-address is the handle a nameless row has
+    /// left, and the one the SDK itself steers a destructive follow-up at.
+    #[test]
+    fn a_long_name_pays_for_the_frame_rather_than_the_i_addresses() {
+        let entries = [
+            top_level("alice", HONEST_IDENTITY),
+            top_level(&"n".repeat(96), OTHER_IDENTITY),
+        ];
+
+        for terminal in 80..=120 {
+            let rows = build_rows(&entries, &BTreeMap::new());
+            let out = crate::ui::text::strip_ansi(&list_rendered(
+                &listing(rows, Tip::NotNeeded),
+                terminal,
+            ));
+            assert!(
+                out.contains(HONEST_IDENTITY),
+                "a neighbour's long name cut alice's i-address at {terminal} columns:\n{out}"
+            );
+        }
+    }
+
+    fn assert_list_square(rendered: &str, at: usize) {
+        let widths: Vec<usize> = rendered
+            .lines()
+            .filter(|line| line.starts_with(['┌', '│', '├', '└']))
+            .map(UnicodeWidthStr::width)
+            .collect();
+        assert!(!widths.is_empty(), "nothing was framed at {at}");
+        assert!(
+            widths.windows(2).all(|pair| pair[0] == pair[1]),
+            "ragged frame at {at} columns, widths {widths:?}:\n{rendered}"
+        );
+    }
+
+    /// The `--json` grammar for a name, which has three answers and not two.
+    #[test]
+    fn the_json_never_says_a_nameless_identity_has_no_name() {
+        assert_eq!(
+            qualified_json(&Name::Usable("pecucli7@".into())),
+            serde_json::json!({ "known": true, "name": "pecucli7@" })
+        );
+        // `known: false` — nothing was learned, so a consumer must not read
+        // this as an identity the chain declines to name.
+        assert_eq!(
+            qualified_json(&Name::Unknown("connection refused".into()))["known"],
+            serde_json::json!(false)
+        );
+        // The one case that really is the chain answering, and even then the
+        // reason is carried rather than left as a bare `null`.
+        let absent = qualified_json(&Name::NoParent);
+        assert_eq!(absent["known"], serde_json::json!(true));
+        assert_eq!(absent["name"], serde_json::Value::Null);
+        assert!(absent["reason"].is_string(), "{absent}");
+    }
+
+    /// The promise the whole command rests on, at the length that broke it.
+    ///
+    /// A name over the budget used to come back cut from the middle and still
+    /// ending in `@` — `aaaa…aaaa@`, which wears the one mark that says "this
+    /// is a whole VerusID name" and is not one. Verus permits 64-byte name
+    /// components, so this is a name a chain really carries. Now the cut takes
+    /// the `@` with it and the cell ends in the ellipsis.
+    #[test]
+    fn a_name_too_long_for_the_column_does_not_come_out_looking_like_a_whole_one() {
+        let long = "a".repeat(60);
+        let entries = [top_level(&long, HONEST_IDENTITY)];
+        let rows = build_rows(&entries, &BTreeMap::new());
+
+        let cell = name_text(&rows[0].name);
+
+        assert!(
+            !cell.ends_with('@'),
+            "a cut name still ends in the mark of a whole one: {cell}"
+        );
+        assert!(cell.ends_with('…'), "the cut is not visible: {cell}");
+        // And the leaf component is what survives, so the row still says which
+        // identity it is.
+        assert!(cell.starts_with("aaaa"), "{cell}");
+        // `--json` is where the whole name lives, and it is whole there.
+        assert_eq!(
+            qualified_json(&rows[0].name)["name"],
+            serde_json::json!(format!("{long}@"))
+        );
+    }
+
+    /// A name a reader cannot copy is a name the panel has to own up to.
+    ///
+    /// Two ways it happens and both are silent without this: the budget above,
+    /// and the frame taking the column down to fit. At 48 columns every name in
+    /// this table elides to four characters, and the reader is left staring at
+    /// the column they came for with nothing saying it is no longer the answer.
+    #[test]
+    fn a_panel_that_shortened_a_name_says_so_and_says_where_the_whole_one_is() {
+        let entries = [
+            top_level("pecucli7", HONEST_IDENTITY),
+            top_level("pecu-demo-id", OTHER_IDENTITY),
+        ];
+        let rows = || build_rows(&entries, &BTreeMap::new());
+
+        // Room for everything: nothing was cut, so nothing is claimed.
+        let roomy =
+            crate::ui::text::strip_ansi(&list_rendered(&listing(rows(), Tip::NotNeeded), 120));
+        assert!(roomy.contains("pecucli7@"), "{roomy}");
+        assert!(!roomy.contains("carries every name whole"), "{roomy}");
+
+        // The frame takes the column down, and says so.
+        let tight =
+            crate::ui::text::strip_ansi(&list_rendered(&listing(rows(), Tip::NotNeeded), 48));
+        assert!(
+            !tight.contains("pecucli7@"),
+            "nothing was cut at 48:\n{tight}"
+        );
+        assert!(tight.contains("carries every name whole"), "{tight}");
+
+        // The budget cuts one on its own, at a width with room to spare.
+        let long = [top_level(&"a".repeat(60), HONEST_IDENTITY)];
+        let over = crate::ui::text::strip_ansi(&list_rendered(
+            &listing(build_rows(&long, &BTreeMap::new()), Tip::NotNeeded),
+            120,
+        ));
+        assert!(over.contains("carries every name whole"), "{over}");
+    }
+
+    /// The question a reader of this list is actually asking.
+    ///
+    /// They ran it holding a key and no name. "Which identities does this key
+    /// control" has a second half — whether the key is enough on its own — and
+    /// `minimumsignatures` and `primaryaddresses` answer it in the same reply,
+    /// at no extra request. Dropped, a 2-of-3 identity rendered exactly like
+    /// one the key alone can move.
+    #[test]
+    fn an_identity_the_key_cannot_move_alone_does_not_render_like_one_it_can() {
+        let entries = [
+            top_level("pecucli7", HONEST_IDENTITY),
+            shared("sharedvault", OTHER_IDENTITY, 2, 3),
+        ];
+        let rows = build_rows(&entries, &BTreeMap::new());
+
+        assert!(rows[0].control.moves_alone());
+        assert!(!rows[1].control.moves_alone());
+
+        let out = crate::ui::text::strip_ansi(&list_rendered(&listing(rows, Tip::NotNeeded), 120));
+
+        assert!(out.contains("1-of-1"), "{out}");
+        assert!(out.contains("2-of-3"), "{out}");
+        // And the column is explained, once, on the run where it matters.
+        assert!(out.contains("not enough on its own"), "{out}");
+    }
+
+    /// The threshold and the number of primaries are two different facts.
+    ///
+    /// `monkins@` on VRSCTEST is `1-of-2`: two primary addresses, one required,
+    /// so the queried key moves it on its own and so does the other. Read as
+    /// "anything but `1-of-1` means you cannot move this", the panel would warn
+    /// about an identity this key controls outright — the opposite of the
+    /// mistake `2-of-3` was added to stop.
+    #[test]
+    fn one_signature_out_of_two_is_still_a_key_that_moves_the_identity_alone() {
+        let entries = [shared("monkins", HONEST_IDENTITY, 1, 2)];
+        let rows = build_rows(&entries, &BTreeMap::new());
+
+        assert!(rows[0].control.moves_alone());
+        // Still not the ordinary row, so the column is still explained.
+        assert!(!rows[0].control.is_plain());
+
+        let out = crate::ui::text::strip_ansi(&list_rendered(&listing(rows, Tip::NotNeeded), 120));
+
+        assert!(out.contains("1-of-2"), "{out}");
+        assert!(out.contains("so is another key"), "{out}");
+    }
+
+    /// A reply that did not carry the threshold is an unknown, not a `1-of-1`.
+    ///
+    /// `1-of-1` is the answer somebody acts on. Defaulting to it would be this
+    /// program's guess printed in the column whose whole job is saying whether
+    /// the key in hand is enough.
+    #[test]
+    fn a_reply_that_did_not_say_the_threshold_is_not_a_key_that_signs_alone() {
+        let entries = [threshold_unsaid("quiet", HONEST_IDENTITY)];
+        let rows = build_rows(&entries, &BTreeMap::new());
+
+        assert_eq!(
+            rows[0].control,
+            Control {
+                min_sigs: None,
+                primaries: None
+            }
+        );
+        assert!(!rows[0].control.moves_alone());
+        assert!(!rows[0].control.is_plain());
+
+        let out = crate::ui::text::strip_ansi(&list_rendered(&listing(rows, Tip::NotNeeded), 120));
+
+        let row = out
+            .lines()
+            .find(|line| line.contains("quiet@"))
+            .expect("the identity's row");
+        assert!(row.contains("unknown"), "{out}");
+        assert!(!row.contains("1-of-1"), "a guess was printed:\n{out}");
+    }
+
+    /// `--json`'s `spendable` answers one question, and it has to be the same
+    /// answer the panel prints beside it.
+    #[test]
+    fn the_json_says_whether_the_primary_keys_can_move_it_rather_than_describing_the_timelock() {
+        // Revoked settles it whatever the timelock says. `kind: none` used to
+        // carry `spendable: true` for an identity nobody's primary keys move.
+        assert_eq!(
+            list_timelock_json(Timelock::None, true, Tip::NotNeeded)["spendable"],
+            serde_json::json!(false)
+        );
+        // A height already passed is spendable, which is what the panel decided
+        // off the same tip. `null` here left the consumer to redo the
+        // comparison on the one field the notes point it at.
+        assert_eq!(
+            list_timelock_json(Timelock::UntilBlock(1_000), false, Tip::Known(900_000))
+                ["spendable"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            list_timelock_json(Timelock::UntilBlock(2_000_000), false, Tip::Known(900_000))
+                ["spendable"],
+            serde_json::json!(false)
+        );
+        // And the one unknown that survives: a height nothing could be measured
+        // against, because the node would not give a tip.
+        assert_eq!(
+            list_timelock_json(Timelock::UntilBlock(1_000), false, Tip::Unread)["spendable"],
+            serde_json::Value::Null
+        );
     }
 
     /// `id register` burns 100 VRSCTEST across two transactions, so the advice
