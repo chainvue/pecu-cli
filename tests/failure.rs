@@ -21,7 +21,10 @@ fn home() -> TempDir {
 
 fn pecu(home: &TempDir) -> Command {
     let mut command = Command::cargo_bin("pecu").expect("the pecu binary should be built");
-    command.env("PECU_HOME", home.path()).env_remove("NO_COLOR");
+    command
+        .env("PECU_HOME", home.path())
+        .env_remove("NO_COLOR")
+        .env_remove("PECU_THEME");
     command
 }
 
@@ -204,6 +207,7 @@ fn a_consumer_that_stopped_reading_still_gets_the_exit_code() {
         .args(["tx", "explain", "deadbeef", "--json"])
         .env("PECU_HOME", home.path())
         .env_remove("NO_COLOR")
+        .env_remove("PECU_THEME")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()

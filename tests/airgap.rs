@@ -44,7 +44,8 @@ fn pecu(home: &TempDir) -> Command {
     command
         .env("PECU_HOME", home.path())
         .env("PECU_PASSPHRASE", PASSPHRASE)
-        .env_remove("NO_COLOR");
+        .env_remove("NO_COLOR")
+        .env_remove("PECU_THEME");
     command
 }
 

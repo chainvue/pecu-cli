@@ -94,6 +94,21 @@ for variant in dark light; do
         --window --width 78 --height "$rows" \
         --term xresources --profile "$work/$variant.xresources" >/dev/null 2>&1
     cp "$work/$name-$variant.svg" "$here/$name-$variant.svg"
+
+    # And re-ink the light one, because the profile above cannot.
+    #
+    # An xresources profile defines the sixteen ANSI slots; every colour `pecu`
+    # asks for is a 256-colour index above 15, so the light render came out with
+    # the *phosphor* palette on a white background — the value column at 1.10:1,
+    # invisible, next to labels that were still legible. The panel looked whole
+    # and had no numbers in it, which is worse than a demo that looks broken.
+    #
+    # `relight.py` substitutes each phosphor colour for the one `--theme light`
+    # gives that role, so the light capture is a real rendering of a real skin.
+    # A unit test in src/ui/theme.rs fails if the two ever drift apart.
+    if [ "$variant" = light ]; then
+        python3 "$here/relight.py" "$here/$name-$variant.svg" >/dev/null
+    fi
 done
 
 rm -rf "$work"

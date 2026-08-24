@@ -36,9 +36,18 @@ widths=${*:-"320 360 390 414"}
 pages="/ /commands/ /configuration/ /design/ /status/ /404.html"
 failed=0
 
+# Each probe gets its own filename. They are written to the same directory and
+# served by the same `http.server`, whose Last-Modified has one-second
+# granularity — so two probes written inside the same second are, to a
+# revalidating browser, the same resource, and it answers 304 and renders the
+# *previous* width. That is the `?? 360px /: iframe reported 320px` this used to
+# print at random: not a layout defect, and not a resize race, but a cached page.
+probe=0
+
 for width in $widths; do
     for page in $pages; do
-        cat > "$site/.probe.html" <<HTML
+        probe=$((probe + 1))
+        cat > "$site/.probe-$probe.html" <<HTML
 <!doctype html><meta charset=utf-8>
 <style>html,body{margin:0}iframe{width:${width}px;height:900px;border:0}</style>
 <iframe id=f src="$page"></iframe>
@@ -48,7 +57,7 @@ document.title=d.documentElement.clientWidth+' '+d.documentElement.scrollWidth;
 }.bind(this),900);};</script>
 HTML
         got=$("$chrome" --headless=new --disable-gpu --window-size=$((width + 60)),950 \
-              --virtual-time-budget=7000 --dump-dom "http://127.0.0.1:$port/.probe.html" 2>/dev/null \
+              --virtual-time-budget=7000 --dump-dom "http://127.0.0.1:$port/.probe-$probe.html" 2>/dev/null \
               | sed -n 's/.*<title>\([0-9]* [0-9]*\)<\/title>.*/\1/p')
         viewport=${got% *}
         scroll=${got#* }
@@ -110,6 +119,6 @@ case "$verdict" in
     *)  echo "  REPLAY does not restart: $verdict" >&2; failed=1 ;;
 esac
 
-rm -f "$site/.probe.html"
+rm -f "$site"/.probe-*.html
 [ "$failed" -eq 0 ] || { echo "the built site has a defect a reader would hit" >&2; exit 1; }
 echo "no page scrolls sideways, and Replay restarts every capture"

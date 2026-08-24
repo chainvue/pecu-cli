@@ -28,6 +28,14 @@ colour and the box-drawing entirely; `--theme auto` (the default) picks plain
 whenever stdout is not a terminal; `NO_COLOR` always wins; and `--json` will
 bypass the renderer completely once commands have data to serialise.
 
+`--theme light` is the same layout in dark ink, for a terminal with a light
+background — phosphor is unreadable there and no terminal profile can fix it,
+because every colour it asks for is a 256-colour index outside the sixteen slots
+a profile can remap. Nine roles, each measured against white at 4.5:1 or better
+and pinned by a test rather than asserted in prose. `auto` never chooses it: the
+background of a terminal cannot be asked about reliably, so it is something you
+say (`--theme light`, or `PECU_THEME`) rather than something `pecu` guesses.
+
 ```
 $ pecu dev ui --theme plain
 WALLET

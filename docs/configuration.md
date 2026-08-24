@@ -51,7 +51,7 @@ directory and cannot see, or damage, a real keystore.
 | `-y`, `--yes` | Answer yes to every confirmation |
 | `--profile <NAME>` | Config profile (env: `PECU_PROFILE`) |
 | `--node <URL>` | Override the endpoint (env: `VERUS_ENDPOINT`) |
-| `--theme auto\|phosphor\|plain` | Phosphor on a TTY, plain when piped. `NO_COLOR` always wins |
+| `--theme auto\|phosphor\|light\|plain` | Phosphor on a TTY, plain when piped; `light` for a light-background terminal (env: `PECU_THEME`). `NO_COLOR` always wins |
 | `-v`, `--verbose` | Refused. It never logged anything — see below |
 
 `-v` is the one flag in that table you cannot use. It was scaffolded with the
@@ -104,6 +104,31 @@ Two commands are exceptions, and both are cases where there is no document to
 print: `dev ui` renders the widget gallery, which is a picture of how things
 look and has no machine-readable form, and `completions <shell>` prints a shell
 script. Both accept `--json`, say so on stderr where it matters, and exit `0`.
+
+### Colour on a light terminal
+
+`auto` picks between phosphor and plain on one question — is stdout a terminal —
+and it will not pick `light` for you. The phosphor palette is 256-colour, and
+every index it uses sits above the sixteen slots a terminal profile can remap,
+so a light profile cannot rescue it: the value column lands at 1.10:1 on white,
+invisible, while the labels beside it stay legible. A panel that looks complete
+and has no figures in it is the worst way for this to fail, so `--theme light`
+re-inks all nine roles — every one measured at 4.5:1 or better on white, pinned
+by a unit test.
+
+Nothing sniffs the background. `$COLORFGBG` is set by a minority of terminals
+and an OSC 11 query means putting the tty into raw mode and waiting on a reply,
+which is a new way for a spend confirmation to fail. Your terminal's background
+is a fact about you, so you state it:
+
+```sh
+export PECU_THEME=light        # or --theme light, per command
+pecu wallet balance --key default
+```
+
+`NO_COLOR=1` is the other way out and needs no flag: it keeps the frames and
+drops every colour, so the output stays the shape of the tool. `--theme plain`
+drops the frames too.
 
 ### Failures in JSON
 

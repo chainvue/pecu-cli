@@ -20,6 +20,17 @@ same documentation, searchable, with the demos below playing in place.
   <img alt="pecu doctor reporting profile, node, build, chain tip and DeFi being switched off" src="docs/media/doctor-light.svg">
 </picture>
 
+Every demo here is one recording shown twice: phosphor green if you read GitHub
+in the dark, the same panels in dark ink if you read it in the light. `pecu`
+decides for itself whether to emit colour at all — a pipe or `NO_COLOR` gets
+none — but it never guesses your terminal's background, because there is no way
+to ask that is worth a wrong answer on a spend confirmation. On a light
+terminal, say so once:
+
+```sh
+export PECU_THEME=light     # or --theme light, one command at a time
+```
+
 ## No full node
 
 There is no `verusd` to install, no chain to sync, no wallet daemon to keep

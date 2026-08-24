@@ -25,7 +25,9 @@ fn fixture(name: &str) -> String {
 
 fn pecu() -> Command {
     let mut command = Command::cargo_bin("pecu").expect("the pecu binary should be built");
-    command.env("PECU_HOME", tempfile::tempdir().expect("a temp dir").keep());
+    command
+        .env("PECU_HOME", tempfile::tempdir().expect("a temp dir").keep())
+        .env_remove("PECU_THEME");
     command
 }
 
