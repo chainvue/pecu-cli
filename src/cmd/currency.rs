@@ -2008,6 +2008,7 @@ pub fn mint(
 
     let review = mint_panel(
         ui,
+        settings,
         &found,
         amount,
         &args.to,
@@ -2115,9 +2116,46 @@ fn mint_flow(name: &str, source: FlowError) -> CurrencyError {
     }
 }
 
+/// The coin a reserve transfer's fee leaves in.
+///
+/// The SDK takes the fee currency from the node — `chain_info().chain_id` —
+/// but that is an i-address, and what a fee row needs is a ticker. So this is
+/// the profile's configured `currency`, which is where every other fee row in
+/// the tool gets its label, and it is a convention rather than the chain's own
+/// answer: a global `--node` pointed at a chain the profile does not name
+/// would print that profile's ticker on a fee the other chain collected.
+/// Naming it here rather than reading the field inline is so that the one
+/// assumption these three panels make is written down once.
+fn fee_currency(settings: &Settings) -> &str {
+    &settings.profile.currency
+}
+
+/// Append the currency an amount is denominated in, the way `send` and
+/// `currency launch` label theirs: one space, then the name in muted text.
+///
+/// Both halves of these panels come through here, and neither is trustworthy.
+/// The token's name is the node repeating what a registrant chose; the chain
+/// coin's is a string out of the user's own `config.toml`. A file is no more
+/// trustworthy than a node when the question is whether one row can forge
+/// another inside a box that precedes a spend, so both are neutralised.
+///
+/// Either can also come back blank, and a blank pushed here would turn a
+/// labelled number back into a bare one without saying that it had — on the
+/// very row this exists to label. So it says the name is not known instead,
+/// which is #46's rule about a name nobody got.
+fn in_currency(value: Text, name: &str, ui: &Ui) -> Text {
+    let palette = ui.theme.palette;
+    let shown = fmt::untrusted(name, NAME_BUDGET, ui.theme.glyphs.ellipsis);
+    if shown.is_empty() {
+        return value.space().push("(name unknown)", palette.warn);
+    }
+    value.space().push(shown, palette.muted)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn mint_panel(
     ui: &Ui,
+    settings: &Settings,
     found: &CurrencySummary,
     amount: Amount,
     to: &str,
@@ -2128,6 +2166,12 @@ fn mint_panel(
 ) -> Panel {
     let palette = ui.theme.palette;
     let glyphs = ui.theme.glyphs;
+    // Two currencies are in play on this panel: `amount` is new supply of the
+    // currency named at the top, while the fee is the miner's and is paid in
+    // the chain's own coins whatever is being minted. Labelling either row
+    // with the other's name would answer the question falsely rather than
+    // leave it open, which is worse than the bare number both used to be.
+    let native = fee_currency(settings);
 
     Panel::new(if dry_run { "WOULD MINT" } else { "MINT" })
         .row(
@@ -2145,8 +2189,12 @@ fn mint_panel(
         )
         .row(
             "amount",
-            Text::of(fmt::amount(amount), palette.accent)
-                .push("  new supply, created by this", palette.muted),
+            in_currency(
+                Text::of(fmt::amount(amount), palette.accent),
+                &found.name,
+                ui,
+            )
+            .push("  new supply, created by this", palette.muted),
         )
         .row("to", Text::of(to, palette.value))
         // Named separately from the signer because they are different things
@@ -2169,7 +2217,10 @@ fn mint_panel(
                     palette.muted,
                 ),
         )
-        .row("fee", Text::of(fmt::amount(fee), palette.value))
+        .row(
+            "fee",
+            in_currency(Text::of(fmt::amount(fee), palette.value), native, ui),
+        )
         .row("txid", Text::of(txid, palette.muted))
         .note(Text::of(
             "this currency is centralized — its supply is whatever its identity decides, and \
@@ -2409,6 +2460,7 @@ pub fn preconvert(
 
     let review = preconvert_panel(
         ui,
+        settings,
         &target,
         &spend,
         &source_text,
@@ -2537,6 +2589,7 @@ fn convert_flow(name: &str, source: FlowError) -> CurrencyError {
 #[allow(clippy::too_many_arguments)]
 fn preconvert_panel(
     ui: &Ui,
+    settings: &Settings,
     target: &CurrencySummary,
     spend: &str,
     source_id: &str,
@@ -2550,6 +2603,10 @@ fn preconvert_panel(
 ) -> Panel {
     let palette = ui.theme.palette;
     let glyphs = ui.theme.glyphs;
+    // The fee is in the chain's own coins, and it is the only row here that is:
+    // `spending` and the two `this leg` rows are in `spend`, and `you receive`
+    // has no number to be in anything.
+    let native = fee_currency(settings);
 
     let mut panel = Panel::new(if dry_run {
         "WOULD PRECONVERT"
@@ -2615,7 +2672,10 @@ fn preconvert_panel(
                 palette.muted,
             ),
     )
-    .row("fee", Text::of(fmt::amount(fee), palette.value))
+    .row(
+        "fee",
+        in_currency(Text::of(fmt::amount(fee), palette.value), native, ui),
+    )
     .row("txid", Text::of(txid, palette.muted));
 
     // Which legs are already funded, and which are not. A fractional basket
@@ -2924,6 +2984,7 @@ pub fn convert(
 
     let review = convert_panel(
         ui,
+        settings,
         &ConvertReview {
             target: &target,
             source: &source,
@@ -3019,10 +3080,14 @@ struct ConvertReview<'a> {
     txid: &'a str,
 }
 
-fn convert_panel(ui: &Ui, r: &ConvertReview, dry_run: bool) -> Panel {
+fn convert_panel(ui: &Ui, settings: &Settings, r: &ConvertReview, dry_run: bool) -> Panel {
     let palette = ui.theme.palette;
     let glyphs = ui.theme.glyphs;
     let show = |name: &str| fmt::untrusted(name, NAME_BUDGET, glyphs.ellipsis);
+    // Three currencies can appear on this panel at once — the source, the
+    // target, and the chain's own coin the fee is paid in. Only the last of
+    // those belongs on the fee row, `--via` or no `--via`.
+    let native = fee_currency(settings);
 
     let mut panel = Panel::new(if dry_run { "WOULD CONVERT" } else { "CONVERT" })
         .row(
@@ -3056,15 +3121,26 @@ fn convert_panel(ui: &Ui, r: &ConvertReview, dry_run: bool) -> Panel {
     panel = panel.row(
         "you receive",
         // The node's estimate, and it is only that: the price moves with every
-        // conversion that lands before this one.
-        Text::of(fmt::amount(r.estimated_out), palette.value)
-            .push("  estimated, not guaranteed", palette.muted),
+        // conversion that lands before this one. In the target's units for
+        // every shape of conversion, including a routed one — what `--via`
+        // changes is the price, not the currency this arrives in.
+        in_currency(
+            Text::of(fmt::amount(r.estimated_out), palette.value),
+            &r.target.name,
+            ui,
+        )
+        .push("  estimated, not guaranteed", palette.muted),
     );
     if let Some(floor) = r.min_out {
         panel = panel.row(
             "at least",
-            Text::of(fmt::amount(floor), palette.value)
-                .push("  checked now, not by the chain", palette.muted),
+            // The same units as the estimate: it is compared against it.
+            in_currency(
+                Text::of(fmt::amount(floor), palette.value),
+                &r.target.name,
+                ui,
+            )
+            .push("  checked now, not by the chain", palette.muted),
         );
     }
 
@@ -3079,7 +3155,10 @@ fn convert_panel(ui: &Ui, r: &ConvertReview, dry_run: bool) -> Panel {
                     palette.muted,
                 ),
         )
-        .row("fee", Text::of(fmt::amount(r.fee), palette.value))
+        .row(
+            "fee",
+            in_currency(Text::of(fmt::amount(r.fee), palette.value), native, ui),
+        )
         .row("txid", Text::of(r.txid, palette.muted))
         .note(Text::of(
             "the price is whatever the basket's reserves make it when this lands, which is not \
@@ -3213,6 +3292,14 @@ mod tests {
         }
     }
 
+    /// The built-in testnet profile, which is where the panels get the name of
+    /// the coin a fee is paid in. No config file is written or read: the
+    /// absent one *is* the built-in profile.
+    fn settings() -> Settings {
+        Settings::resolve_in(crate::config::Paths::at("/nonexistent"), None, None)
+            .expect("no config file is the built-in profile")
+    }
+
     fn summary(currency_id: &str) -> CurrencySummary {
         CurrencySummary {
             currency_id: currency_id.to_string(),
@@ -3231,12 +3318,12 @@ mod tests {
     /// The three panels that print a node-supplied currency id and need no
     /// node to build. `currency show`'s own panel is not among them: it asks
     /// the node for the tip, so it cannot be rendered offline.
-    fn panels_printing_an_id(currency_id: &str) -> Vec<String> {
-        let ui = Ui::new(ThemeFlag::Phosphor, false, false);
+    fn panels_printing_an_id(ui: &Ui, settings: &Settings, currency_id: &str) -> Vec<String> {
         let found = summary(currency_id);
         let envelope = envelope();
         let mint = mint_panel(
-            &ui,
+            ui,
+            settings,
             &found,
             Amount::from_sat(100_000_000),
             "RJ7gsKDjUjPS8XZzENqmQMmWJRLuTnw5hp",
@@ -3246,7 +3333,8 @@ mod tests {
             true,
         );
         let preconvert = preconvert_panel(
-            &ui,
+            ui,
+            settings,
             &found,
             "VRSCTEST",
             HONEST_ID,
@@ -3259,7 +3347,8 @@ mod tests {
             true,
         );
         let convert = convert_panel(
-            &ui,
+            ui,
+            settings,
             &ConvertReview {
                 target: &found,
                 source: &found,
@@ -3286,7 +3375,8 @@ mod tests {
     /// reach the terminal, and must not be able to forge a row inside the box.
     #[test]
     fn a_hostile_currency_id_cannot_break_a_panel_that_precedes_a_spend() {
-        for rendered in panels_printing_an_id(&hostile_id()) {
+        let ui = Ui::new(ThemeFlag::Phosphor, false, false);
+        for rendered in panels_printing_an_id(&ui, &settings(), &hostile_id()) {
             let stripped = crate::ui::text::strip_ansi(&rendered);
             assert!(!stripped.contains('\u{1b}'), "escape survived:\n{stripped}");
             assert!(!stripped.contains('\u{7f}'), "delete survived:\n{stripped}");
@@ -3312,7 +3402,8 @@ mod tests {
     /// genuine one on a panel that precedes a broadcast.
     #[test]
     fn an_ordinary_currency_id_survives_every_panel_that_prints_one() {
-        for rendered in panels_printing_an_id(HONEST_ID) {
+        let ui = Ui::new(ThemeFlag::Phosphor, false, false);
+        for rendered in panels_printing_an_id(&ui, &settings(), HONEST_ID) {
             let stripped = crate::ui::text::strip_ansi(&rendered);
             assert!(
                 stripped.contains(HONEST_ID),
@@ -3323,6 +3414,233 @@ mod tests {
             for line in stripped.lines().filter(|line| line.contains(HONEST_ID)) {
                 assert!(!line.contains('…'), "the id row was elided:\n{stripped}");
             }
+        }
+    }
+
+    /// A panel wide enough that no row of these fixtures wraps, so a row
+    /// assertion is about what the row says and not about where it broke.
+    fn wide(ui: &mut Ui) {
+        ui.theme = crate::ui::theme::Theme::with_skin(crate::ui::theme::Skin::Phosphor, 84);
+    }
+
+    /// What one row of a rendered panel says, frame and colour taken off.
+    fn row_saying(rendered: &str, label: &str) -> String {
+        let stripped = crate::ui::text::strip_ansi(rendered);
+        stripped
+            .lines()
+            .map(|line| {
+                line.trim_matches(|c| c == '\u{2502}' || c == ' ')
+                    .to_string()
+            })
+            .find(|line| line.starts_with(label))
+            .unwrap_or_else(|| panic!("no `{label}` row in:\n{stripped}"))
+    }
+
+    /// #53, and the trap in it: a mint has two currencies on one panel. The
+    /// fee is the miner's, in the chain's own coins whatever is being minted,
+    /// while `amount` is new supply of the currency named at the top. Both rows
+    /// were bare, and a bare number invites the question — but labelling either
+    /// with the other's name would answer it falsely, so the negative half is
+    /// asserted too.
+    #[test]
+    fn a_mint_pays_its_fee_in_the_chains_coin_and_mints_something_else() {
+        let mut ui = Ui::new(ThemeFlag::Phosphor, false, false);
+        wide(&mut ui);
+        let found = summary(HONEST_ID);
+        let rendered = mint_panel(
+            &ui,
+            &settings(),
+            &found,
+            Amount::from_sat(100_000_000_000),
+            "RJ7gsKDjUjPS8XZzENqmQMmWJRLuTnw5hp",
+            &envelope(),
+            Amount::from_sat(20_000),
+            "2aada7",
+            true,
+        )
+        .render(&ui.theme);
+
+        let fee = row_saying(&rendered, "fee");
+        assert!(fee.contains("0.00020000 VRSCTEST"), "{fee}");
+        assert!(
+            !fee.contains("Kaiju"),
+            "the fee was labelled as the token: {fee}"
+        );
+
+        let amount = row_saying(&rendered, "amount");
+        assert!(amount.contains("1000.00000000 Kaiju"), "{amount}");
+        assert!(
+            !amount.contains("VRSCTEST"),
+            "new supply was labelled with the chain's coin: {amount}"
+        );
+    }
+
+    /// #53 on the preconvert panel. `--spend` is a reserve of the target and
+    /// need not be the chain's coin, so the fee row is the one row here that is
+    /// in it — `spending` is in whatever is being contributed.
+    #[test]
+    fn a_preconvert_pays_its_fee_in_the_chains_coin_and_spends_a_reserve() {
+        let mut ui = Ui::new(ThemeFlag::Phosphor, false, false);
+        wide(&mut ui);
+        let target = summary(HONEST_ID);
+        let rendered = preconvert_panel(
+            &ui,
+            &settings(),
+            &target,
+            "TST",
+            HONEST_ID,
+            Amount::from_sat(500_000_000),
+            "RJ7gsKDjUjPS8XZzENqmQMmWJRLuTnw5hp",
+            &envelope(),
+            Amount::from_sat(20_000),
+            "2aada7",
+            1_177_000,
+            true,
+        )
+        .render(&ui.theme);
+
+        let fee = row_saying(&rendered, "fee");
+        assert!(fee.contains("0.00020000 VRSCTEST"), "{fee}");
+        assert!(
+            !fee.contains("TST"),
+            "the fee was labelled as the reserve: {fee}"
+        );
+
+        let spending = row_saying(&rendered, "spending");
+        assert!(spending.contains("5.00000000  TST"), "{spending}");
+        assert!(
+            !spending.contains("VRSCTEST"),
+            "the contribution was labelled with the chain's coin: {spending}"
+        );
+    }
+
+    /// #53 on the convert panel, which can have three currencies on it at
+    /// once: what is spent, what comes back, and the coin the miner is paid in.
+    /// The estimate and its floor are in the target's units — `into` says which
+    /// — and the fee is in neither.
+    #[test]
+    fn a_convert_pays_its_fee_in_the_chains_coin_and_receives_the_target() {
+        let mut ui = Ui::new(ThemeFlag::Phosphor, false, false);
+        wide(&mut ui);
+        let target = summary(HONEST_ID);
+        let mut source = summary(HONEST_ID);
+        source.name = "TST".into();
+        let rendered = convert_panel(
+            &ui,
+            &settings(),
+            &ConvertReview {
+                target: &target,
+                source: &source,
+                basket: &target,
+                routed: false,
+                amount: Amount::from_sat(100_000_000),
+                estimated_out: Amount::from_sat(99_000_000),
+                min_out: Some(Amount::from_sat(95_000_000)),
+                recipient: "RJ7gsKDjUjPS8XZzENqmQMmWJRLuTnw5hp",
+                envelope: &envelope(),
+                fee: Amount::from_sat(20_000),
+                txid: "2aada7",
+            },
+            true,
+        )
+        .render(&ui.theme);
+
+        let fee = row_saying(&rendered, "fee");
+        assert!(fee.contains("0.00020000 VRSCTEST"), "{fee}");
+        assert!(
+            !fee.contains("Kaiju") && !fee.contains("TST"),
+            "the fee was labelled as one of the converted currencies: {fee}"
+        );
+
+        for label in ["you receive", "at least"] {
+            let row = row_saying(&rendered, label);
+            assert!(row.contains("Kaiju"), "{row}");
+            assert!(
+                !row.contains("VRSCTEST"),
+                "`{label}` was labelled with the chain's coin: {row}"
+            );
+        }
+    }
+
+    /// #46's rule reaches these panels too. The node answered, so its name is
+    /// the `Known` arm — but a node can answer with nothing in it, and an empty
+    /// unit turns a labelled number back into a bare one without saying so.
+    #[test]
+    fn a_currency_the_node_named_with_nothing_says_so_beside_the_amount() {
+        let mut ui = Ui::new(ThemeFlag::Phosphor, false, false);
+        wide(&mut ui);
+        let mut found = summary(HONEST_ID);
+        found.name = "  ".into();
+        let rendered = mint_panel(
+            &ui,
+            &settings(),
+            &found,
+            Amount::from_sat(100_000_000),
+            "RJ7gsKDjUjPS8XZzENqmQMmWJRLuTnw5hp",
+            &envelope(),
+            Amount::from_sat(20_000),
+            "2aada7",
+            true,
+        )
+        .render(&ui.theme);
+
+        let amount = row_saying(&rendered, "amount");
+        assert!(amount.contains("(name unknown)"), "{amount}");
+    }
+
+    /// The three panels of `panels_printing_an_id`, built against a profile
+    /// that names its chain's coin the given way — which is the half of a fee
+    /// row that comes out of the user's own `config.toml`. Wide enough that no
+    /// row wraps, so a row assertion is about what the row says.
+    fn panels_with_ticker(ticker: &str) -> Vec<String> {
+        let mut settings = settings();
+        settings.profile.currency = ticker.to_string();
+        let mut ui = Ui::new(ThemeFlag::Phosphor, false, false);
+        wide(&mut ui);
+        panels_printing_an_id(&ui, &settings, HONEST_ID)
+    }
+
+    /// The fee row is the one string on these panels that comes from the user's
+    /// own `config.toml` rather than from the node, and it is the half #53 adds.
+    /// `a_hostile_currency_id_cannot_break_a_panel_that_precedes_a_spend` holds
+    /// the node's half to this standard already; a file is no more trustworthy
+    /// than a node when the question is whether a row can forge another row.
+    #[test]
+    fn a_hostile_profile_ticker_cannot_break_a_panel_that_precedes_a_spend() {
+        for rendered in panels_with_ticker(&hostile_id()) {
+            let stripped = crate::ui::text::strip_ansi(&rendered);
+            assert!(!stripped.contains('\u{1b}'), "escape survived:\n{stripped}");
+            assert!(!stripped.contains('\u{7f}'), "delete survived:\n{stripped}");
+            assert!(
+                !stripped.contains('\u{202e}'),
+                "override survived:\n{stripped}"
+            );
+            let widths: Vec<usize> = stripped
+                .lines()
+                .filter(|line| line.starts_with(['┌', '│', '├', '└']))
+                .map(UnicodeWidthStr::width)
+                .collect();
+            assert!(!widths.is_empty(), "nothing was framed:\n{stripped}");
+            assert!(
+                widths.windows(2).all(|pair| pair[0] == pair[1]),
+                "ragged frame {widths:?}:\n{stripped}"
+            );
+        }
+    }
+
+    /// #46's rule, on the config half. A profile with no `currency` set is a
+    /// coin nobody named, and the whole point of #53 is that this row says
+    /// which coin the fee leaves in — so it has to say that it does not know,
+    /// rather than trail off into the bare number it was before.
+    #[test]
+    fn a_profile_that_names_no_currency_says_so_on_the_fee_row() {
+        for rendered in panels_with_ticker("   ") {
+            let fee = row_saying(&rendered, "fee");
+            assert!(fee.contains("(name unknown)"), "{fee}");
+            assert!(
+                !fee.ends_with("0.00020000"),
+                "the fee row fell back to a bare number: {fee}"
+            );
         }
     }
 
