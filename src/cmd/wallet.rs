@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use miette::Diagnostic;
 use thiserror::Error;
 use verus_sdk::decode::{decode_output_script, OutputKind};
-use verus_sdk::money::Amount;
+use verus_sdk::money::{Amount, Utxo};
 use verus_sdk::network::{
     history, native_currency, spendable, AddressUtxo, ChainReader, FlowError, Funding,
     HistoryEntry, MempoolDelta, RpcError, SignedAmount, TokenBalances,
@@ -759,18 +759,24 @@ pub fn utxos(
     let target = resolve_address(ui, &node, settings, address, key)?;
     let (_node, wallet) = gather(ui, node, target.address.clone())?;
     let tip = wallet.funding.tip;
-    let glyphs = ui.theme.glyphs;
-    let palette = ui.theme.palette;
 
-    // An unconfirmed transaction can already be spending a confirmed output.
-    // The chain still shows it unspent and `spendable` still offers it, so
-    // without this a second transaction funded from here would be a double
-    // spend the node rejects.
-    let being_spent = |txid: &str, vout: u32| {
-        wallet
+    // An unreadable mempool leaves this empty, which withholds the double-spend
+    // warning below rather than denying there is one.
+    let unknown = BTreeSet::new();
+    let outputs = Outputs {
+        spendable: &wallet.funding.utxos,
+        withheld: &wallet.funding.immature,
+        conditions: &wallet.funding.other,
+        arriving: wallet
             .pending
             .as_ref()
-            .is_ok_and(|pending| pending.spent.contains(&(txid.to_string(), vout)))
+            .map(|pending| pending.receiving.as_slice())
+            .unwrap_or_default(),
+        spent: wallet
+            .pending
+            .as_ref()
+            .map_or(&unknown, |pending| &pending.spent),
+        mempool_error: wallet.pending.as_ref().err(),
     };
 
     if ui.is_json() {
@@ -784,7 +790,7 @@ pub fn utxos(
                     "vout": utxo.vout,
                     "satoshis": utxo.satoshis.to_sat(),
                     "status": "spendable",
-                    "spent_in_mempool": being_spent(&txid, utxo.vout),
+                    "spent_in_mempool": outputs.being_spent(&txid, utxo.vout),
                     "txid": txid,
                 })
             })
@@ -826,6 +832,65 @@ pub fn utxos(
         return Ok(());
     }
 
+    let Some(panel) = utxos_panel(ui, &target, tip, &outputs) else {
+        ui.note(format!("{} holds no outputs", wallet.address));
+        ui.explain_panel();
+        return Ok(());
+    };
+
+    ui.panel(&panel);
+    ui.explain_panel();
+    Ok(())
+}
+
+/// The outputs at one address, split the way the panel prints them.
+///
+/// Gathered into a struct rather than passed as six arguments so that
+/// [`utxos_panel`] can be one function: what the tests drive is then the panel
+/// the command prints, and a note only a fixture attaches is not a note the
+/// command can quietly lose.
+struct Outputs<'a> {
+    /// What `spendable` offers a builder. Bare `Utxo`s — no height on them.
+    spendable: &'a [Utxo],
+    /// Withheld by the maturity filter, usually an immature coinbase.
+    withheld: &'a [AddressUtxo],
+    /// Not plain P2PKH: reserve, identity, anything CryptoCondition.
+    conditions: &'a [AddressUtxo],
+    /// Unconfirmed and arriving. Not spendable and counted nowhere.
+    arriving: &'a [PendingOutput],
+    /// Confirmed outputs an unconfirmed transaction already spends.
+    spent: &'a BTreeSet<(String, u32)>,
+    /// Why the mempool is unknown, when it is. `None` means it was read.
+    mempool_error: Option<&'a RpcError>,
+}
+
+impl Outputs<'_> {
+    /// Nothing at all at this address — not even something unspendable.
+    fn is_empty(&self) -> bool {
+        self.spendable.is_empty()
+            && self.withheld.is_empty()
+            && self.conditions.is_empty()
+            && self.arriving.is_empty()
+    }
+
+    /// Whether an unconfirmed transaction already claims this output.
+    ///
+    /// The chain still shows it unspent and `spendable` still offers it, so
+    /// without this a second transaction funded from here would be a double
+    /// spend the node rejects.
+    fn being_spent(&self, txid: &str, vout: u32) -> bool {
+        self.spent.contains(&(txid.to_string(), vout))
+    }
+}
+
+/// The UTXOS panel, or `None` when there is nothing to put in one.
+fn utxos_panel(ui: &Ui, target: &Target, tip: u32, outputs: &Outputs) -> Option<Panel> {
+    if outputs.is_empty() {
+        return None;
+    }
+    let glyphs = ui.theme.glyphs;
+    let palette = ui.theme.palette;
+
     // The outpoint is the only column here that may be shortened. CONF and
     // STATUS are what the command is for, and an amount cut from the middle is
     // a different number rather than a shorter one.
@@ -837,9 +902,9 @@ pub fn utxos(
     ])
     .elidable(0);
 
-    for utxo in &wallet.funding.utxos {
+    for utxo in outputs.spendable {
         let txid = utxo.txid.to_string();
-        let (label, style) = if being_spent(&txid, utxo.vout) {
+        let (label, style) = if outputs.being_spent(&txid, utxo.vout) {
             (format!("{} being spent", glyphs.warn), palette.warn)
         } else {
             (format!("{} spendable", glyphs.ok), palette.ok)
@@ -847,22 +912,20 @@ pub fn utxos(
         table.push(vec![
             outpoint(ui, &txid, utxo.vout),
             Text::of(fmt::amount(utxo.satoshis), palette.accent),
-            // `spendable` has already filtered these against the tip, but the
-            // per-output height is not carried through, so there is nothing
-            // honest to print here.
+            // The height these were mined at is not carried through, so there
+            // is nothing honest to print here. Said out loud in a note below,
+            // because a dash on its own reads as "no confirmations".
             Text::of("—", palette.muted),
             Text::of(label, style),
         ]);
     }
-    for (found, label, style) in wallet
-        .funding
-        .immature
+    for (found, label, style) in outputs
+        .withheld
         .iter()
         .map(|found| (found, "not spendable", palette.warn))
         .chain(
-            wallet
-                .funding
-                .other
+            outputs
+                .conditions
                 .iter()
                 .map(|found| (found, "cryptocondition", palette.muted)),
         )
@@ -874,13 +937,7 @@ pub fn utxos(
             Text::of(label, style),
         ]);
     }
-
-    let arriving = wallet
-        .pending
-        .as_ref()
-        .map(|pending| pending.receiving.as_slice())
-        .unwrap_or_default();
-    for output in arriving {
+    for output in outputs.arriving {
         table.push(vec![
             outpoint(ui, &output.txid, output.vout),
             Text::of(fmt::amount(output.satoshis), palette.value),
@@ -889,18 +946,8 @@ pub fn utxos(
         ]);
     }
 
-    if wallet.funding.utxos.is_empty()
-        && wallet.funding.immature.is_empty()
-        && wallet.funding.other.is_empty()
-        && arriving.is_empty()
-    {
-        ui.note(format!("{} holds no outputs", wallet.address));
-        ui.explain_panel();
-        return Ok(());
-    }
-
     let mut panel = Panel::new("UTXOS")
-        .row("address", address_row(ui, &target))
+        .row("address", address_row(ui, target))
         .row("tip", Text::of(fmt::height(tip.into()), palette.accent))
         .rule()
         .table(table)
@@ -909,7 +956,13 @@ pub fn utxos(
             palette.muted,
         ));
 
-    if !arriving.is_empty() {
+    // The em dash the spendable rows print is an unknown, and an unknown that
+    // does not say why reads as a confident nothing — here, as "my coins have
+    // no confirmations".
+    if let Some(note) = missing_conf_note(outputs.spendable) {
+        panel = panel.note(Text::of(note, palette.muted));
+    }
+    if !outputs.arriving.is_empty() {
         panel = panel.note(Text::of(
             "pending: in this node's mempool and in no block. Not spendable, and not counted \
              by `wallet balance` either",
@@ -918,10 +971,11 @@ pub fn utxos(
     }
     // Nothing above says these are unusable, because the chain still says they
     // are fine. Only the mempool disagrees.
-    if wallet.funding.utxos.iter().any(|utxo| {
-        let txid = utxo.txid.to_string();
-        being_spent(&txid, utxo.vout)
-    }) {
+    if outputs
+        .spendable
+        .iter()
+        .any(|utxo| outputs.being_spent(&utxo.txid.to_string(), utxo.vout))
+    {
         panel = panel.note(Text::of(
             "being spent: an unconfirmed transaction already claims this output. Still \
              unspent on chain, so coin selection will offer it — funding a second payment \
@@ -931,16 +985,33 @@ pub fn utxos(
     }
     // Silence here would read as "nothing pending", which is the answer this
     // read exists to avoid giving wrongly.
-    if let Err(error) = &wallet.pending {
+    if let Some(error) = outputs.mempool_error {
         panel = panel.note(Text::of(
             format!("pending outputs unknown: {error}"),
             palette.warn,
         ));
     }
 
-    ui.panel(&panel);
-    ui.explain_panel();
-    Ok(())
+    Some(panel)
+}
+
+/// Why the CONF cell on a spendable row is an em dash rather than a number.
+///
+/// The fear the dash raises is "my coins have no confirmations", so the note
+/// answers that first: `spendable` is built from `getaddressutxos`, which
+/// excludes the mempool, so every row here is confirmed. What is missing is the
+/// count, not the confirmations — the withheld and CryptoCondition rows come
+/// back as `AddressUtxo`, which keeps the block the output was mined in, while
+/// the spendable ones come back as bare `Utxo`s, a type with no height on it at
+/// all.
+///
+/// Only worth a line when such a row is on screen: a note about rows nobody can
+/// see explains nothing.
+fn missing_conf_note(spendable: &[Utxo]) -> Option<&'static str> {
+    (!spendable.is_empty()).then_some(
+        "— in conf: spendable means confirmed. The count is missing, not zero: the height \
+         each of these was mined at does not reach this command",
+    )
 }
 
 /// `pecu wallet history` — every transaction that touched an address.
@@ -2115,6 +2186,88 @@ mod tests {
             assert!(visible.contains("1,204"), "{rendered}");
             assert!(visible.contains("spendable"), "{rendered}");
         }
+    }
+
+    /// A spendable output, which is all `spendable` hands back: a bare `Utxo`,
+    /// with no height on it and so no confirmation count derivable from it.
+    fn spendable_utxo() -> Utxo {
+        Utxo {
+            txid: Txid::from_internal([0x9f; 32]),
+            vout: 0,
+            satoshis: Amount::from_sat(25_000_000),
+            script_pubkey: Vec::new(),
+        }
+    }
+
+    /// The UTXOS panel the command prints, rendered.
+    ///
+    /// Deliberately the production [`utxos_panel`] rather than a copy of it. A
+    /// fixture that reassembled the panel would attach the note itself, and so
+    /// would keep passing with the note gone from the command.
+    fn utxos_render(ui: &Ui, spendable: &[Utxo], withheld: &[AddressUtxo], tip: u32) -> String {
+        let read = BTreeSet::new();
+        let outputs = Outputs {
+            spendable,
+            withheld,
+            conditions: &[],
+            arriving: &[],
+            spent: &read,
+            mempool_error: None,
+        };
+        utxos_panel(ui, &Target::plain(ADDRESS.to_string()), tip, &outputs)
+            .expect("a panel, since there are outputs to put in one")
+            .render(&ui.theme)
+    }
+
+    #[test]
+    fn an_empty_conf_cell_says_why_it_is_empty_rather_than_leaving_it_at_a_dash() {
+        // A dash with no explanation reads as "this output has no
+        // confirmations". The note has to say otherwise, and it has to do it
+        // without costing the column the rows that do have a number.
+        let withheld = utxo(Vec::new(), 100_000_000);
+        for terminal in reachable() {
+            let ui = framed_ui(terminal);
+            let rendered = utxos_render(
+                &ui,
+                &[spendable_utxo()],
+                std::slice::from_ref(&withheld),
+                25_678,
+            );
+            let visible = strip_ansi(&rendered);
+            assert!(
+                visible.contains("— in conf: spendable means confirmed"),
+                "no note at {terminal} columns:\n{rendered}"
+            );
+            assert!(
+                visible.contains("The count is missing, not zero"),
+                "the note leaves the dash readable as zero at {terminal} columns:\n{rendered}"
+            );
+            // The column survives, and so does the evidence in it: 25,678
+            // confirmations on a withheld output is what the docs' claim that
+            // WITHHELD is not always coinbase immaturity rests on.
+            assert!(visible.contains("CONF"), "{rendered}");
+            assert!(visible.contains("25,678"), "{rendered}");
+            // Notes hang below the frame, so none of this may ragged it.
+            let widths = frame_widths(&rendered);
+            assert!(
+                widths.windows(2).all(|pair| pair[0] == pair[1]),
+                "ragged frame at {terminal} columns, widths {widths:?}:\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_spendable_row_means_no_note_about_a_cell_that_is_not_on_screen() {
+        assert!(missing_conf_note(&[]).is_none());
+        let withheld = utxo(Vec::new(), 100_000_000);
+        let ui = framed_ui(80);
+        let rendered = utxos_render(&ui, &[], std::slice::from_ref(&withheld), 25_678);
+        let visible = strip_ansi(&rendered);
+        assert!(
+            !visible.contains("in conf"),
+            "a note about rows nobody can see:\n{rendered}"
+        );
+        assert!(visible.contains("25,678"), "{rendered}");
     }
 
     #[test]
