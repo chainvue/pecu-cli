@@ -219,7 +219,16 @@ impl Panel {
                     )));
                 }
                 Item::Table(table) => {
-                    drawn.extend(table.lines(theme).into_iter().map(Drawn::Content));
+                    // Fitted against the theme's ceiling rather than the final
+                    // panel width, for the reason `Item::Path` above is: the
+                    // panel width is chosen from these lines and so cannot be
+                    // known yet, and it can never exceed the ceiling.
+                    drawn.extend(
+                        table
+                            .fitted_lines(theme, theme.width)
+                            .into_iter()
+                            .map(Drawn::Content),
+                    );
                 }
             }
         }
@@ -407,7 +416,7 @@ mod tests {
     use unicode_width::UnicodeWidthStr;
 
     use super::*;
-    use crate::ui::table::{Align, Table};
+    use crate::ui::table::{Align, Column, Table};
     use crate::ui::theme::Skin;
 
     use crate::ui::text::strip_ansi as visible;
@@ -439,22 +448,63 @@ mod tests {
 
     #[test]
     fn frames_stay_rectangular_with_styled_and_wide_content() {
-        let mut table = Table::headerless([Align::Left, Align::Right]);
-        table.push(vec![
-            Text::of("世界", Style::new().bold()),
-            Text::of("1.00000000", Style::new()),
-        ]);
-        table.push(vec![Text::raw("a"), Text::raw("22.00000000")]);
+        // Eighty columns was the only width this ever ran at, and at eighty
+        // nothing in it was wide enough to reach the border — the assertion
+        // held vacuously while `wallet history` and `key list` were running out
+        // through it in a tmux split. So: a table with headers and a real
+        // thirty-four-character address, at the widths people actually use, and
+        // at the bottom of the theme's own clamp.
+        for terminal in [52, 60, 70, 80] {
+            let theme = Theme::with_skin(Skin::Phosphor, terminal);
 
-        let panel = Panel::new("TITLE")
-            .row("label", Text::of("value", Style::new().bold()))
-            .row("a much longer label", Text::raw("x"))
-            .rule()
-            .table(table)
-            .section("SECTION")
-            .line(Text::raw("plain"))
-            .blank();
-        assert_rectangular(&panel, &phosphor());
+            let mut aligned = Table::headerless([Align::Left, Align::Right]);
+            aligned.push(vec![
+                Text::of("世界", Style::new().bold()),
+                Text::of("1.00000000", Style::new()),
+            ]);
+            aligned.push(vec![Text::raw("a"), Text::raw("22.00000000")]);
+
+            let mut listed = Table::new(vec![
+                Column::left("label"),
+                Column::left("address"),
+                Column::right("created"),
+            ])
+            .elidable(1)
+            .elidable(0);
+            listed.push(vec![
+                Text::of("a-considerably-longer-label", Style::new().bold()),
+                Text::raw("RQC1EG3GhZ9pvT9YgCp3YvxyYBsdb4FYfH"),
+                Text::raw("3h 04m ago"),
+            ]);
+
+            let panel = Panel::new("TITLE")
+                .row("label", Text::of("value", Style::new().bold()))
+                .row("a much longer label", Text::raw("x"))
+                .rule()
+                .table(aligned)
+                .section("SECTION")
+                .table(listed)
+                .line(Text::raw("plain"))
+                .blank();
+            assert_rectangular(&panel, &theme);
+        }
+    }
+
+    #[test]
+    fn a_table_keeps_its_ids_whole_wherever_the_frame_has_room_for_them() {
+        // The other half of the same property, and the one a fit that always
+        // fires would quietly break.
+        let address = "RQC1EG3GhZ9pvT9YgCp3YvxyYBsdb4FYfH";
+        let mut listed = Table::new(vec![Column::left("label"), Column::left("address")])
+            .elidable(1)
+            .elidable(0);
+        listed.push(vec![Text::raw("demo"), Text::raw(address)]);
+
+        let rendered = Panel::new("KEYS").table(listed).render(&phosphor());
+        assert!(
+            visible(&rendered).contains(address),
+            "the address was cut with room to spare:\n{rendered}"
+        );
     }
 
     #[test]

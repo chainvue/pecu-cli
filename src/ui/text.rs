@@ -9,7 +9,7 @@
 use std::fmt::Write as _;
 
 use anstyle::Style;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[derive(Debug, Clone)]
 pub struct Span {
@@ -171,6 +171,118 @@ impl Text {
         lines
     }
 
+    /// Shorten from the middle so the text fits in `max` cells, keeping every
+    /// span's style.
+    ///
+    /// [`crate::ui::fmt::fit`] does this to a plain string, which is no use to a
+    /// table cell: an outpoint is a styled hash beside a differently styled
+    /// `:vout`, and cutting the rendered string would cut through an escape
+    /// sequence. So the cut is made on the spans and the escapes are re-emitted
+    /// around what survives.
+    ///
+    /// Middle-out, like `fmt::fit`, because the tail is what tells two ids
+    /// apart, and weighted towards the tail for the same reason. Text that
+    /// already fits is returned untouched, so a column that has room keeps its
+    /// ids whole and copyable.
+    ///
+    /// Preformatted text is returned untouched, for the same reason [`Text::wrap`]
+    /// leaves it alone: its width is carried rather than measurable, so there is
+    /// no honest way to cut it.
+    pub fn fit(&self, max: usize, ellipsis: &str) -> Text {
+        let marker = UnicodeWidthStr::width(ellipsis);
+        // `max <= marker + 2` is `fmt::fit`'s own refusal: below that the result
+        // is more ellipsis than text and says nothing at all.
+        if self.known_width.is_some() || self.width() <= max || max <= marker + 2 {
+            return self.clone();
+        }
+        let (before, after) = self.around(ellipsis);
+        let content = max - marker;
+        // Weighted towards the tail, like `fmt::fit`: the last characters of an
+        // id are what tell two of them apart. Capped at what is actually there,
+        // so a cut around an existing ellipsis does not reach across it.
+        let tail = (content - content / 3).min(after);
+        let head = (content - tail).min(before);
+        let style = self
+            .spans
+            .first()
+            .map(|span| span.style)
+            .unwrap_or_default();
+
+        let mut out = self.head(head);
+        out = out.push(ellipsis, style);
+        for Span { text, style } in self.tail(tail).spans {
+            out = out.push(text, style);
+        }
+        out
+    }
+
+    /// The cells before the first ellipsis and the cells after the last one, or
+    /// the whole width both ways when the text carries none.
+    ///
+    /// Text that has been elided once already is cut around the hole it has
+    /// rather than given a second one. `wallet history` hands the table a txid
+    /// that `fmt::hash` already shortened to `10…6`; cutting that as if it were
+    /// one long string produces `9f9…f…9f9f9f`, which reads as two holes where
+    /// there is only ever one.
+    fn around(&self, ellipsis: &str) -> (usize, usize) {
+        let plain: String = self.spans.iter().map(|span| span.text.as_str()).collect();
+        if ellipsis.is_empty() {
+            return (self.width(), self.width());
+        }
+        match (plain.find(ellipsis), plain.rfind(ellipsis)) {
+            (Some(first), Some(last)) => (
+                UnicodeWidthStr::width(&plain[..first]),
+                UnicodeWidthStr::width(&plain[last + ellipsis.len()..]),
+            ),
+            _ => (self.width(), self.width()),
+        }
+    }
+
+    /// The leading `cells` display cells. A double-width character that would
+    /// straddle the boundary is dropped rather than half-printed.
+    fn head(&self, cells: usize) -> Text {
+        let mut out = Text::new();
+        let mut used = 0usize;
+        'spans: for span in &self.spans {
+            let mut taken = String::new();
+            for character in span.text.chars() {
+                let step = UnicodeWidthChar::width(character).unwrap_or(0);
+                if used + step > cells {
+                    out = out.push(taken, span.style);
+                    break 'spans;
+                }
+                taken.push(character);
+                used += step;
+            }
+            out = out.push(taken, span.style);
+        }
+        out
+    }
+
+    /// The trailing `cells` display cells, with the same boundary rule.
+    fn tail(&self, cells: usize) -> Text {
+        let mut pieces: Vec<(String, Style)> = Vec::new();
+        let mut used = 0usize;
+        'spans: for span in self.spans.iter().rev() {
+            let mut taken = String::new();
+            for character in span.text.chars().rev() {
+                let step = UnicodeWidthChar::width(character).unwrap_or(0);
+                if used + step > cells {
+                    pieces.push((taken.chars().rev().collect(), span.style));
+                    break 'spans;
+                }
+                taken.push(character);
+                used += step;
+            }
+            pieces.push((taken.chars().rev().collect(), span.style));
+        }
+        let mut out = Text::new();
+        for (text, style) in pieces.into_iter().rev() {
+            out = out.push(text, style);
+        }
+        out
+    }
+
     /// Words and the single spaces between them, each carrying its span's style.
     fn words(&self) -> Vec<(String, Style)> {
         let mut pieces = Vec::new();
@@ -320,5 +432,88 @@ mod tests {
     #[test]
     fn over_wide_text_is_not_truncated() {
         assert_eq!(Text::raw("abcdef").render_padded(3), "abcdef");
+    }
+
+    #[test]
+    fn fitting_cuts_the_middle_and_keeps_both_ends() {
+        let id = "iHBwQo7LUmrTFsc9Kz7RTs2WYNXR44dK9f";
+        let short = Text::raw(id).fit(14, "\u{2026}");
+        assert_eq!(short.width(), 14);
+        assert!(short.render().starts_with("iHBw"), "{}", short.render());
+        assert!(short.render().ends_with("dK9f"), "{}", short.render());
+        assert!(
+            short.render().contains('\u{2026}'),
+            "a cut that does not say it was cut is a different id: {}",
+            short.render()
+        );
+    }
+
+    #[test]
+    fn fitting_leaves_text_that_already_fits_exactly_as_it_was() {
+        // The half of this that matters: an id the frame has room for stays
+        // copyable, character for character.
+        let id = "RQC1EG3GhZ9pvT9YgCp3YvxyYBsdb4FYfH";
+        assert_eq!(Text::raw(id).fit(40, "\u{2026}").render(), id);
+        assert_eq!(Text::raw(id).fit(34, "\u{2026}").render(), id);
+    }
+
+    #[test]
+    fn fitting_keeps_the_styles_on_both_sides_of_the_cut() {
+        // An outpoint: a styled txid and a differently styled `:vout`. Cutting
+        // the rendered string would cut through an escape sequence, and losing
+        // the tail's style would lose the vout's colour.
+        let outpoint = Text::of("9f2c1ab4de77605318bbcafe0021d4e9", Style::new().bold())
+            .push(":137", Style::new().italic());
+        let short = outpoint.fit(16, "\u{2026}");
+        assert_eq!(short.width(), 16);
+        let visible = strip_ansi(&short.render());
+        assert!(visible.starts_with("9f2c"), "{visible}");
+        assert!(
+            visible.ends_with(":137"),
+            "the vout is not decoration: {visible}"
+        );
+        assert!(short.render().contains("\u{1b}[1m"), "bold was dropped");
+        assert!(short.render().contains("\u{1b}[3m"), "italic was dropped");
+    }
+
+    #[test]
+    fn fitting_something_already_elided_does_not_give_it_a_second_hole() {
+        // `wallet history` hands the table a txid that `fmt::hash` already cut
+        // to `10\u{2026}6`. Cutting that as if it were one long string reaches
+        // across the ellipsis and comes back with `9f9\u{2026}f\u{2026}9f9f9f`,
+        // which reads as two holes where there is only ever one.
+        let already = Text::raw("9f9f9f9f9f\u{2026}9f9f9f");
+        for max in 8..=16 {
+            let short = already.fit(max, "\u{2026}");
+            let rendered = short.render();
+            assert_eq!(
+                rendered.matches('\u{2026}').count(),
+                1,
+                "two holes at {max} cells: {rendered}"
+            );
+            assert!(short.width() <= max, "{} cells at {max}", short.width());
+            assert!(rendered.starts_with("9f"), "{rendered}");
+            assert!(rendered.ends_with("9f"), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn fitting_refuses_a_budget_too_small_to_say_anything() {
+        // `fmt::fit`'s own refusal. Under it the answer is more ellipsis than
+        // text, and a caller gets the untouched string and a ragged frame —
+        // which is at least a legible bug.
+        let id = "iHBwQo7LUmrTFsc9Kz7RTs2WYNXR44dK9f";
+        assert_eq!(Text::raw(id).fit(3, "\u{2026}").render(), id);
+    }
+
+    #[test]
+    fn fitting_never_splits_a_double_width_character_in_half() {
+        // An odd budget against two-cell glyphs: the boundary falls inside a
+        // character, and half a glyph is a cell of mojibake, not a narrower
+        // cell.
+        let wide = Text::raw("世界世界世界世界");
+        let short = wide.fit(9, "\u{2026}");
+        assert!(short.width() <= 9, "{} cells", short.width());
+        assert!(!short.render().contains('\u{fffd}'));
     }
 }

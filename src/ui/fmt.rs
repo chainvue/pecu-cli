@@ -208,7 +208,28 @@ pub fn id(text: &str, ellipsis: &str) -> String {
 /// escape run. Base58 contains nothing the filter maps, so an honest address is
 /// unchanged, character for character.
 pub fn address(text: &str, ellipsis: &str) -> String {
-    elide(neutralise(text).trim(), 9, 4, ellipsis)
+    elide(
+        neutralise(text).trim(),
+        ADDRESS_HEAD,
+        ADDRESS_TAIL,
+        ellipsis,
+    )
+}
+
+/// What [`address`] keeps: enough of the front to recognise, enough of the back
+/// to tell two apart.
+const ADDRESS_HEAD: usize = 9;
+const ADDRESS_TAIL: usize = 4;
+
+/// How wide [`address`] renders, in characters.
+///
+/// This is the floor a table column holding an id may be shortened to, and the
+/// reason it is a function rather than a number at the call site: below the
+/// short form an i-address stops being a handle. Every one of them opens with
+/// `i`, so `i…dK9f` is four informative characters — it cannot be copied,
+/// pasted or looked up, which is the whole of what the column was for.
+pub fn address_width(ellipsis: &str) -> usize {
+    ADDRESS_HEAD + ellipsis.chars().count() + ADDRESS_TAIL
 }
 
 /// A 64-character hex hash, shortened. Neutralised first, for the same reason
