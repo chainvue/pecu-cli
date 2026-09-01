@@ -150,7 +150,11 @@ jobs:
     needs: triage
     if: needs.triage.outputs.mode == 'fix'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Same arithmetic as the implementation job: a full `make check` compiles
+    # this tree twice, because `make lint` builds into its own target/lint
+    # directory. A fix attempt that cannot finish one is worse than useless --
+    # it still counts against the three.
+    timeout-minutes: 45
     steps:
       # Installation token for this repository, this job's permissions only.
       - uses: actions/create-github-app-token@v2
@@ -245,9 +249,14 @@ jobs:
                failing assertion.
             2. Make the smallest change that fixes that cause. Do not tidy anything else;
                a fix commit that also refactors is a fix commit nobody can review.
-            3. Run `make check` locally until it passes. If you touched `docs/*.md` or
-               `web/`, run `python web/build.py` too. Never run `make testnet` — it spends
-               real VRSCTEST.
+            3. Verify from the narrowest check outward. Re-run only the thing the log
+               showed failing — `cargo fmt --check`, `cargo clippy --all-targets -- -D
+               warnings`, or `cargo test --test <suite>` — and only once that passes run
+               `make check` in full. `make check` compiles this tree twice, because
+               `make lint` uses its own `target/lint` directory, so running it after every
+               edit is how an attempt burns its budget without pushing anything. If you
+               touched `docs/*.md` or `web/`, run `python web/build.py` too. Never run
+               `make testnet` — it spends real VRSCTEST.
             4. Commit on the current branch and push. The subject line says what was broken
                and what fixed it. Do not open a new pull request; this branch already has
                one. Do not merge.

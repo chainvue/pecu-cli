@@ -180,7 +180,12 @@ jobs:
     needs: [guard, lock]
     if: needs.lock.outputs.taken == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # 45 was the original budget, set before anyone had read what `make check`
+    # actually costs here: `make lint` builds into its own target/lint directory
+    # so clippy's rustc wrapper does not refingerprint the main build, which
+    # means a full check compiles this tree twice. Cold, with the SDK git
+    # dependency in the graph, one pass is minutes and the agent runs several.
+    timeout-minutes: 60
     steps:
       # Installation token for this repository, this job's permissions only.
       - uses: actions/create-github-app-token@v2
@@ -297,8 +302,19 @@ jobs:
                `kriterien_ohne_test`, honestly. An empty list you cannot defend is worse
                than a short one you can.
 
-            4. Verify. Run `make check` — that is fmt-check, clippy with warnings as
-               errors, the offline test suite, and a build — and iterate until it passes.
+            4. Verify, narrowest check first. Iterate with the smallest thing that can
+               fail on what you just changed, and run the full gate once at the end:
+
+               - while iterating: `cargo test --test <suite>` for the suite you touched,
+                 plus `cargo clippy --all-targets -- -D warnings` if you changed code.
+               - once, before you push: `make check`.
+
+               That order matters more than it looks. `make check` runs `make lint`, which
+               builds into its own `target/lint` directory so that clippy's rustc wrapper
+               does not refingerprint the main build — so a full check compiles this tree
+               twice. Running it after every edit is how a run reaches its timeout with
+               nothing pushed.
+
                If you touched `docs/*.md` or `web/`, also run `python web/build.py`; it
                rejects a link to a `.md` file the site does not serve.
 
