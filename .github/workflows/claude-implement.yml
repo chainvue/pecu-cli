@@ -242,7 +242,7 @@ jobs:
           claude_args: |
             --max-turns 150
             --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebFetch,TodoWrite,Task,Agent"
-            --json-schema '{"type":"object","properties":{"outcome":{"type":"string","enum":["pr_opened","blocked"]},"pr_number":{"type":"integer"},"branch":{"type":"string"},"begruendung":{"type":"string"},"kriterien_ohne_test":{"type":"array","items":{"type":"string"}}},"required":["outcome","pr_number","branch","begruendung","kriterien_ohne_test"]}'
+            --json-schema '{"type":"object","properties":{"outcome":{"type":"string","description":"pr_opened only if `gh pr create` succeeded and `make check` passed on the pushed commit. blocked for anything else, including a test that contradicts the spec.","enum":["pr_opened","blocked"]},"pr_number":{"type":"integer","description":"The number `gh pr create` returned. 0 when no pull request was opened."},"branch":{"type":"string","description":"The branch you pushed, or an empty string if you pushed nothing."},"begruendung":{"type":"string","description":"One or two sentences. For pr_opened, what you changed and how you verified it. For blocked, exactly what stopped you - name the test and both sides of the contradiction, or the command and its error."},"kriterien_ohne_test":{"type":"array","items":{"type":"string"},"description":"Every acceptance criterion you could not cover with a test that would fail without your change, quoted from the issue. An empty list you cannot defend is worse than a short one you can."}},"required":["outcome","pr_number","branch","begruendung","kriterien_ohne_test"]}'
           prompt: |
             Implement issue #${{ github.event.issue.number }} of ${{ github.repository }} and
             open a pull request. You are working alone; nobody will answer a question
@@ -319,8 +319,20 @@ jobs:
 
                Do not request reviewers, do not merge, do not approve anything.
 
-            Return the structured result: `outcome`, `pr_number` (0 if none), `branch`,
-            `begruendung` (one or two sentences), `kriterien_ohne_test`.
+            ## Before you answer
+
+            Every field of the result carries a description saying what belongs in it. Read
+            them; they are the specification for your answer, not decoration.
+
+            A placeholder is a failed run. `"test"`, `"a"`, `"TBD"`, a round number you did
+            not derive, an empty array you cannot defend — each of those is worse than an
+            awkward but real answer, because it looks like a verdict and is not one. If you
+            genuinely cannot say something concrete in a field, that inability is itself
+            the finding: write it out in words and let it lower your confidence in the
+            fields that depend on it.
+
+            Do the reasoning before you fill the fields, and make each field follow
+            from something you actually read rather than from the shape of the schema.
 
       # ---------------------------------------------------------------- settle
       - name: Release the lock

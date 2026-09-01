@@ -207,7 +207,7 @@ jobs:
           claude_args: |
             --max-turns 80
             --allowedTools "Bash,Edit,Write,Read,Glob,Grep,TodoWrite,Task,Agent"
-            --json-schema '{"type":"object","properties":{"outcome":{"type":"string","enum":["fixed","blocked"]},"ursache":{"type":"string"},"aenderung":{"type":"string"},"tests_beruehrt":{"type":"boolean"},"begruendung":{"type":"string"}},"required":["outcome","ursache","aenderung","tests_beruehrt","begruendung"]}'
+            --json-schema '{"type":"object","properties":{"outcome":{"type":"string","description":"fixed if `make check` passes on what you pushed. blocked if the honest fix would require weakening an existing test, or if you could not find the cause.","enum":["fixed","blocked"]},"ursache":{"type":"string","description":"One sentence naming the real cause in the code, not the symptom in the log. 'cargo fmt --check failed' is the symptom; 'the new match arm was indented with a tab' is the cause."},"aenderung":{"type":"string","description":"What you changed, naming the file and the function. 'Fixed the formatting' is not an answer."},"tests_beruehrt":{"type":"boolean","description":"true if anything under tests/ changed at all, snapshots included. The reviewer checks this against the diff, so an untrue answer is worse than an inconvenient one."},"begruendung":{"type":"string","description":"If tests_beruehrt is true, why each test change was required by the specification rather than by the build being red. Otherwise one sentence on why this fix is the smallest one that works."}},"required":["outcome","ursache","aenderung","tests_beruehrt","begruendung"]}'
           prompt: |
             CI is failing on `${{ github.event.workflow_run.head_branch }}` in
             ${{ github.repository }}, pull request #${{ needs.triage.outputs.pr }}. This is
@@ -252,8 +252,20 @@ jobs:
                and what fixed it. Do not open a new pull request; this branch already has
                one. Do not merge.
 
-            Return the structured result: `outcome`, `ursache` (one sentence on the real
-            cause), `aenderung` (what you changed), `tests_beruehrt`, `begruendung`.
+            ## Before you answer
+
+            Every field of the result carries a description saying what belongs in it. Read
+            them; they are the specification for your answer, not decoration.
+
+            A placeholder is a failed run. `"test"`, `"a"`, `"TBD"`, a round number you did
+            not derive, an empty array you cannot defend — each of those is worse than an
+            awkward but real answer, because it looks like a verdict and is not one. If you
+            genuinely cannot say something concrete in a field, that inability is itself
+            the finding: write it out in words and let it lower your confidence in the
+            fields that depend on it.
+
+            Do the reasoning before you fill the fields, and make each field follow
+            from something you actually read rather than from the shape of the schema.
 
       - name: Report
         if: always()
@@ -354,7 +366,7 @@ jobs:
           claude_args: |
             --max-turns 40
             --allowedTools "Read,Glob,Grep,TodoWrite,Task,Agent"
-            --json-schema '{"type":"object","properties":{"diagnose":{"type":"string"},"warum_nicht_gefixt":{"type":"string"},"naechster_schritt":{"type":"string"},"spec_problem":{"type":"boolean"}},"required":["diagnose","warum_nicht_gefixt","naechster_schritt","spec_problem"]}'
+            --json-schema '{"type":"object","properties":{"diagnose":{"type":"string","description":"What is actually failing, in the code rather than in the log. Name the file and the assertion or lint. If the three attempts each failed on something different, say so - that usually means the change is bigger than the specification assumed."},"warum_nicht_gefixt":{"type":"string","description":"Why the attempts did not work, quoting what each one tried. Were they circling the same wall, or fixing one thing and breaking another?"},"naechster_schritt":{"type":"string","description":"The single most useful thing a human can do next: a concrete command, file, or decision. 'Investigate further' is not an answer."},"spec_problem":{"type":"boolean","description":"true if the real problem is that the specification was wrong or impossible, rather than that the implementation was bad. This decides whether the issue gets re-specified or re-attempted, so be honest about it."}},"required":["diagnose","warum_nicht_gefixt","naechster_schritt","spec_problem"]}'
           prompt: |
             Three fix attempts on `${{ github.event.workflow_run.head_branch }}` in
             ${{ github.repository }} have not made CI green. You are not fixing it. Write
@@ -385,7 +397,20 @@ jobs:
               distinction that decides whether the issue gets re-specified or re-attempted,
               so be honest about it.
 
-            Return only the structured result.
+            ## Before you answer
+
+            Every field of the result carries a description saying what belongs in it. Read
+            them; they are the specification for your answer, not decoration.
+
+            A placeholder is a failed run. `"test"`, `"a"`, `"TBD"`, a round number you did
+            not derive, an empty array you cannot defend — each of those is worse than an
+            awkward but real answer, because it looks like a verdict and is not one. If you
+            genuinely cannot say something concrete in a field, that inability is itself
+            the finding: write it out in words and let it lower your confidence in the
+            fields that depend on it.
+
+            Do the reasoning before you fill the fields, and make each field follow
+            from something you actually read rather than from the shape of the schema.
 
       - name: Block it
         if: always()
