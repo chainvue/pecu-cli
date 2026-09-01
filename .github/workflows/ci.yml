@@ -65,6 +65,14 @@ jobs:
         with:
           python-version: '3.12'
 
+      # The agent workflows embed a JSON document inside a single-quoted shell
+      # word inside a YAML block scalar. YAML validation sees none of the three
+      # ways that can break, and the failure only shows up minutes into a run
+      # that has already spent tokens -- which is how it was found the first
+      # time. Cheap to check here instead.
+      - name: Agent workflow schemas
+        run: python3 scripts/check-workflow-schemas.py
+
       - name: Website
         run: |
           pip install --disable-pip-version-check markdown==3.7
