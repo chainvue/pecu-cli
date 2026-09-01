@@ -164,9 +164,14 @@ gh secret set CLAUDE_AUTOMATION_PRIVATE_KEY --repo <org>/<repo> < ~/Downloads/<a
 gh variable set CLAUDE_AUTOMATION_CLIENT_ID --repo <org>/<repo> --body 'Iv23li…'
 ```
 
-Each job mints its own token with `actions/create-github-app-token`, scoped to
-the running repository and narrowed to that job's permissions — the review job's
-token cannot write contents at all.
+Each job mints its own token with `actions/create-github-app-token@v2`, scoped
+to the running repository and narrowed to that job's permissions — the review
+job's token cannot write contents at all.
+
+The Client ID goes into the action's `app-id` input. That reads wrong and is
+not: at the `v2` tag the input is called `app-id` and takes either the numeric
+App ID or the Client ID. The `client-id` input exists only on the action's main
+branch, and v2 fails with `Unexpected input(s) 'client-id'` if you use it.
 
 ### Variables (optional)
 

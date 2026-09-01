@@ -59,10 +59,15 @@ jobs:
       # action's default) and narrowed to the permissions this job actually
       # uses. It exists for the same reason a PAT did: writes made with it start
       # the next workflow, which GITHUB_TOKEN does not.
+      #
+      # `app-id` is given the App's *Client ID*, which is not a mistake: at the
+      # v2 tag the input is named app-id and accepts either value, and its own
+      # README says so. Do not rename it to `client-id` -- that input exists
+      # only on the action's main branch, and v2 rejects it outright.
       - uses: actions/create-github-app-token@v2
         id: app-token
         with:
-          client-id: ${{ vars.CLAUDE_AUTOMATION_CLIENT_ID }}
+          app-id: ${{ vars.CLAUDE_AUTOMATION_CLIENT_ID }}
           private-key: ${{ secrets.CLAUDE_AUTOMATION_PRIVATE_KEY }}
           permission-contents: read
           permission-issues: write
@@ -126,7 +131,7 @@ jobs:
       - uses: actions/create-github-app-token@v2
         id: app-token
         with:
-          client-id: ${{ vars.CLAUDE_AUTOMATION_CLIENT_ID }}
+          app-id: ${{ vars.CLAUDE_AUTOMATION_CLIENT_ID }}
           private-key: ${{ secrets.CLAUDE_AUTOMATION_PRIVATE_KEY }}
           permission-contents: read
           permission-issues: write
