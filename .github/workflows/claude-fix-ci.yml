@@ -21,6 +21,19 @@ on:
 permissions:
   contents: read
   actions: read
+  id-token: write
+  issues: read
+  pull-requests: read
+  # These mirror the permission block of the vendor's own claude.yml, which is
+  # known to work. The reads are defensive rather than derived: the agent step
+  # fetches its event context itself and it is not documented which token it
+  # uses for that, and this pipeline has already lost one round trip to a
+  # permission trimmed on a guess.
+  #
+  # id-token: write is not optional and is not dead weight. No `gh` call here
+  # uses it -- claude-code-action exchanges the workflow's OIDC token for its
+  # Claude App installation token, and without it the agent step fails with
+  # "Could not fetch an OIDC token". Do not trim it as unused.
 
 concurrency:
   group: claude-fix-${{ github.event.workflow_run.head_branch }}
