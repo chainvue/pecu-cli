@@ -6,7 +6,11 @@ on:
   pull_request_review_comment:
     types: [created]
   issues:
-    types: [opened, assigned]
+    # `assigned` is deliberately not here. claude-implement.yml assigns
+    # claude[bot] to an issue when it takes the lock, and with `assigned` in
+    # this list that assignment would start a second agent on the same issue
+    # whenever the issue body happened to contain the string "@claude".
+    types: [opened]
   pull_request_review:
     types: [submitted]
 

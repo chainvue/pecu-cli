@@ -1,0 +1,12 @@
+# Plain issues stay open. Bug reports, questions and "this looks wrong" are worth
+# having without a spec, and the pipeline ignores anything that never gets
+# `claude:ready` — so the form is a route in, not a toll gate.
+blank_issues_enabled: true
+
+contact_links:
+  - name: How the automation works
+    url: https://github.com/chainvue/pecu-cli/blob/main/docs/claude-automation.md
+    about: What the claude:* labels mean, and how a spec becomes a pull request.
+  - name: What is proven on chain and what is not
+    url: https://github.com/chainvue/pecu-cli/blob/main/docs/status.md
+    about: Read this before filing "command X refuses a flag that should work".

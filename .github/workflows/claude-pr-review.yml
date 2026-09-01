@@ -1,0 +1,412 @@
+name: Claude PR Review
+
+# Fourth stage, and the one that matters: every pull request, not just the ones
+# the automation opened, gets a reviewer whose stated job is to find reasons not
+# to merge.
+#
+# Three things are decided before the model is asked anything, because they are
+# facts about the diff rather than judgements about it:
+#
+#   * the risk level, from .github/claude-risk-paths.yml
+#   * whether existing tests were removed, skipped or deleted
+#   * which issue this closes, and what that issue said it had to do
+#
+# The model reviews with those in hand and cannot argue with them. A removed
+# `#[test]` forces changes_requested no matter how good the rest of the diff is,
+# and `risk:high` forces a human, no matter how high the score. Those overrides
+# live in the shell step at the bottom, not in the prompt, so no amount of
+# persuasion in a pull request description can move them.
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+# GITHUB_TOKEN only checks the code out. Every write in this workflow goes
+# through the App installation token minted in the job below, so the default
+# token needs nothing else.
+permissions:
+  contents: read
+
+# A newer push supersedes the review in flight: the old commit's verdict is
+# worthless the moment the branch moves.
+concurrency:
+  group: claude-pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  REPO: ${{ github.repository }}
+  PR: ${{ github.event.pull_request.number }}
+  # GH_TOKEN is set per step, never here. A workflow-level token is inherited by
+  # the agent step's environment, and the agents in this pipeline are supposed
+  # to have exactly the reach their tool allowlist gives them and no more.
+
+jobs:
+  review:
+    name: Find reasons not to merge
+    # Pull requests from forks get no secrets from GitHub, so this job cannot
+    # run on them -- and making it run, via pull_request_target, would hand an
+    # outside contributor a workflow with write permissions on a wallet. A
+    # maintainer reviews fork pull requests by hand. See docs/claude-automation.md.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      # A short-lived installation token, scoped to this repository only (the
+      # action's default) and narrowed to the permissions this job actually
+      # uses. It exists for the same reason a PAT did: writes made with it start
+      # the next workflow, which GITHUB_TOKEN does not.
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          client-id: ${{ vars.CLAUDE_AUTOMATION_CLIENT_ID }}
+          private-key: ${{ secrets.CLAUDE_AUTOMATION_PRIVATE_KEY }}
+          permission-contents: read
+          permission-issues: write
+          permission-pull-requests: write
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Risk classifier dependency
+        run: pip install --disable-pip-version-check --quiet pyyaml
+
+      # ------------------------------------------------------------- facts
+      - name: Establish the facts
+        id: facts
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/claude-context"
+          ctx="$RUNNER_TEMP/claude-context"
+
+          git fetch --quiet origin "$BASE_REF"
+          base="origin/$BASE_REF"
+
+          git diff --name-only "$base...HEAD" > "$ctx/changed-files.txt"
+          git diff "$base...HEAD" > "$ctx/diff.patch"
+          git log --oneline "$base..HEAD" > "$ctx/commits.txt"
+          wc -l < "$ctx/diff.patch" | tr -d ' ' > "$ctx/diff-lines.txt"
+
+          # Blast radius. The highest level any touched path matches wins, and a
+          # path matching nothing counts as medium -- a new module is suspicious
+          # until someone classifies it.
+          python3 scripts/classify-risk.py < "$ctx/changed-files.txt" > "$ctx/risk.json"
+          risk=$(jq -r .level "$ctx/risk.json")
+
+          # Did this diff test less than main did?
+          bash scripts/check-test-tampering.sh "$base" HEAD > "$ctx/tests.json"
+          hard=$(jq -r .hard_violation "$ctx/tests.json")
+
+          # The issue this closes, if it says so. `Closes #12`, `Fixes #12`,
+          # `Resolves #12`, case-insensitive -- the three spellings GitHub itself
+          # honours.
+          issue=$(gh pr view "$PR" --repo "$REPO" --json body --jq .body \
+            | grep -ioE '(close[sd]?|fix(e[sd])?|resolve[sd]?) #[0-9]+' \
+            | grep -oE '[0-9]+' | head -1 || true)
+          if [ -n "$issue" ]; then
+            gh issue view "$issue" --repo "$REPO" \
+              --json number,title,body,labels,comments > "$ctx/issue.json" 2>/dev/null \
+              || echo '{}' > "$ctx/issue.json"
+          else
+            echo '{}' > "$ctx/issue.json"
+          fi
+
+          {
+            echo "risk=$risk"
+            echo "hard_violation=$hard"
+            echo "issue=$issue"
+          } >> "$GITHUB_OUTPUT"
+
+          # The risk label is single-valued and is set from the diff, not from
+          # whatever the issue guessed.
+          gh pr edit "$PR" --repo "$REPO" \
+            --remove-label 'risk:low' --remove-label 'risk:medium' --remove-label 'risk:high' \
+            --add-label "risk:$risk" || true
+
+          {
+            echo "risk: **$risk**"
+            echo ""
+            echo "hard test violation: **$hard**"
+            echo ""
+            echo "closes: ${issue:-nothing}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ------------------------------------------------------------- review
+      - name: Review
+        id: review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: |
+            --max-turns 60
+            --allowedTools "Read,Glob,Grep,TodoWrite,Task,Agent,mcp__github_inline_comment__create_inline_comment"
+            --json-schema '{"type":"object","properties":{"score":{"type":"integer","minimum":0,"maximum":10},"korrektheit":{"type":"object","properties":{"score":{"type":"integer","minimum":0,"maximum":10},"findings":{"type":"array","items":{"type":"string"}}},"required":["score","findings"]},"test_coverage":{"type":"object","properties":{"score":{"type":"integer","minimum":0,"maximum":10},"kriterien_ohne_test":{"type":"array","items":{"type":"string"}}},"required":["score","kriterien_ohne_test"]},"security":{"type":"object","properties":{"score":{"type":"integer","minimum":0,"maximum":10},"findings":{"type":"array","items":{"type":"string"}}},"required":["score","findings"]},"scope":{"type":"object","properties":{"score":{"type":"integer","minimum":0,"maximum":10},"scope_creep":{"type":"array","items":{"type":"string"}}},"required":["score","scope_creep"]},"test_manipulation":{"type":"boolean"},"empfehlung":{"type":"string","enum":["merge","changes_requested","reject"]},"begruendung":{"type":"string"}},"required":["score","korrektheit","test_coverage","security","scope","test_manipulation","empfehlung","begruendung"]}'
+          prompt: |
+            You are reviewing pull request #${{ github.event.pull_request.number }} of
+            ${{ github.repository }}, a Rust CLI wallet that holds private keys and signs
+            transactions that move real money.
+
+            **Your job is to find reasons NOT to merge this.** Not to be fair to it, not to
+            balance the good against the bad. Someone else can argue for it. Assume the
+            change is wrong somewhere and go looking for where. If you genuinely cannot find
+            anything after looking properly, say so with a high score — but "I found nothing"
+            has to be the outcome of a search, not the absence of one.
+
+            ## Your inputs
+            - The diff: `${{ runner.temp }}/claude-context/diff.patch`
+            - Files touched: `${{ runner.temp }}/claude-context/changed-files.txt`
+            - Commits: `${{ runner.temp }}/claude-context/commits.txt`
+            - The issue it claims to close: `${{ runner.temp }}/claude-context/issue.json`
+              (`{}` if it does not name one — that is itself worth a mark against `scope`
+              for a change of any size)
+            - Blast radius, already computed: `${{ runner.temp }}/claude-context/risk.json`
+            - What it did to the tests, already computed: `${{ runner.temp }}/claude-context/tests.json`
+            - The repository around the diff. Read `CLAUDE.md` first. Then read the whole
+              of every function the diff touches — a diff hunk hides its own context, and
+              most real bugs are in the interaction with the lines that did not change.
+
+            The two computed files are facts, not opinions. Do not argue with them.
+
+            ## Rubric — score each 0-10, and be stingy
+
+            **korrektheit.** Reachable panics: `unwrap`, `expect`, slicing, integer
+            arithmetic on amounts. Money arithmetic that rounds, truncates, or goes through
+            a float — amounts here exceed what an f64 holds exactly. Errors swallowed into
+            a default. Off-by-one in confirmation counts. A `null`/absent value rendered as
+            zero. Any behaviour change not covered by the issue.
+
+            **test_coverage.** Read the acceptance criteria in issue.json. For each one,
+            find the test that would fail if the change were reverted. Not a test that
+            merely touches the area — one that pins that specific criterion. Every
+            criterion you cannot find such a test for goes in `kriterien_ohne_test`, quoted.
+            Tests here are integration tests in `tests/*.rs` driving the binary with
+            `assert_cmd`; a test that asserts only `.success()` pins nothing.
+
+            **security.** Anything reaching key material, passphrases, signing, broadcast,
+            the air-gap payload parser, or identity revoke/recover. Does a private key or
+            passphrase reach a log, an error message, a file, or the terminal outside the
+            one place that is allowed to print it? Is untrusted hex parsed without a length
+            or format check? Does a refusal fail open? Does an error message leak a path or
+            a key label it should not?
+
+            **scope.** Compare the files touched against what the issue asked for. A
+            refactor travelling alongside a fix is scope creep even when the refactor is an
+            improvement — list it. Formatting churn in untouched functions, a renamed
+            variable in a file the issue never named, a dependency added: all scope creep.
+
+            **test_manipulation.** Set true if this change tests less than main did and the
+            reason is not spelled out in the issue. Read `tests.json`: `hard_violation`
+            means a `#[test]` was removed, an `#[ignore]` added, or a test file deleted —
+            if that is true, set `test_manipulation` true, full stop.
+            `needs_justification` means existing test files or insta snapshots were
+            modified, which is often legitimate: check each change against the acceptance
+            criteria, and set true if any of them narrows what is asserted for a reason the
+            spec did not ask for. Accepting a snapshot that changes lines the spec did not
+            mention is manipulation.
+
+            **score** is your overall number, not an average. The weakest dimension should
+            dominate it.
+
+            ## Inline comments
+
+            For every concrete finding — a specific line you can point at — leave an inline
+            comment on that line with `mcp__github_inline_comment__create_inline_comment`.
+            State what breaks and under which input. One comment per finding, on the line
+            the problem is on, not near it. Findings that are about the change as a whole
+            stay in the JSON only.
+
+            ## Recommendation
+
+            - `reject` — the approach is wrong, not just the execution. Reverting is
+              cheaper than fixing.
+            - `changes_requested` — anything actionable at all. Any `korrektheit` or
+              `security` finding, any entry in `kriterien_ohne_test`, any
+              `test_manipulation`.
+            - `merge` — you looked hard and found nothing actionable.
+
+            `begruendung` is two to four sentences: what you looked for, what you found,
+            and the single thing that most nearly stopped you recommending a merge. If you
+            recommend `merge`, name the thing you were most suspicious of and why it turned
+            out to be fine.
+
+            Return the structured result.
+
+      # ------------------------------------------------------------- verdict
+      - name: Post the verdict
+        if: always()
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RAW: ${{ steps.review.outputs.structured_output }}
+          STEP_OUTCOME: ${{ steps.review.outcome }}
+          RISK: ${{ steps.facts.outputs.risk }}
+          HARD: ${{ steps.facts.outputs.hard_violation }}
+          LINKED_ISSUE: ${{ steps.facts.outputs.issue }}
+          REVIEWERS: ${{ vars.CLAUDE_HIGH_RISK_REVIEWERS }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          ctx="$RUNNER_TEMP/claude-context"
+          reviewers="${REVIEWERS:-@devdudeio}"
+
+          score=$(echo "${RAW:-}" | jq -r '.score // empty' 2>/dev/null || true)
+          if [ "$STEP_OUTCOME" != "success" ] || [ -z "$score" ]; then
+            gh pr edit "$PR" --repo "$REPO" --remove-label 'claude:merge-candidate' || true
+            gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$(printf '%s\n' \
+              "<!-- claude-pr-review -->" \
+              "## Review: no verdict" "" \
+              "The adversarial review did not finish, so this pull request has not been reviewed. [Run log]($RUN_URL)" "" \
+              "Risk from the diff: \`$RISK\`. $reviewers")" >/dev/null
+            exit 1
+          fi
+
+          empfehlung=$(echo "$RAW" | jq -r '.empfehlung')
+          manipulation=$(echo "$RAW" | jq -r '.test_manipulation')
+          ohne_test=$(echo "$RAW" | jq -r '.test_coverage.kriterien_ohne_test | length')
+
+          # ---- the overrides -------------------------------------------------
+          # These sit here, in shell, rather than in the prompt, so that nothing
+          # written in a pull request description can talk its way past them.
+
+          # A removed test, an added #[ignore], or a deleted test file. No score
+          # gets a vote on this.
+          if [ "$HARD" = "true" ]; then
+            manipulation=true
+            empfehlung=changes_requested
+          fi
+          if [ "$manipulation" = "true" ]; then
+            empfehlung=changes_requested
+          fi
+          # The rubric says an unproven acceptance criterion is actionable, so a
+          # review that lists one and still says merge is contradicting itself.
+          # Enforced here rather than trusted to the prompt.
+          if [ "$ohne_test" -gt 0 ] && [ "$empfehlung" = "merge" ]; then
+            empfehlung=changes_requested
+          fi
+
+          final="$empfehlung"
+          # High blast radius never gets a merge recommendation from a machine,
+          # however clean the diff looked.
+          if [ "$RISK" = "high" ] && [ "$final" = "merge" ]; then
+            final=human_review
+          fi
+
+          case "$final" in
+            merge)             headline="no reason found not to merge" ;;
+            human_review)      headline="human review required" ;;
+            changes_requested) headline="changes requested" ;;
+            reject)            headline="reject" ;;
+          esac
+
+          # ---- the label -----------------------------------------------------
+          # Deliberately narrow. A high score is not enough on its own: an
+          # unproven acceptance criterion or a touched test disqualifies it, and
+          # the merge itself stays manual either way.
+          candidate=false
+          if [ "$final" = "merge" ] && [ "$score" -ge 8 ] && [ "$RISK" = "low" ] \
+             && [ "$manipulation" = "false" ] && [ "$ohne_test" -eq 0 ]; then
+            candidate=true
+          fi
+          if [ "$candidate" = "true" ]; then
+            gh pr edit "$PR" --repo "$REPO" --add-label 'claude:merge-candidate' || true
+          else
+            gh pr edit "$PR" --repo "$REPO" --remove-label 'claude:merge-candidate' || true
+          fi
+
+          # ---- the comment ---------------------------------------------------
+          {
+            echo "<!-- claude-pr-review -->"
+            echo "## Review: $headline"
+            echo
+            echo "| | score |"
+            echo "|---|---|"
+            echo "| **Overall** | **$score/10** |"
+            echo "| Correctness | $(echo "$RAW" | jq -r '.korrektheit.score')/10 |"
+            echo "| Test coverage | $(echo "$RAW" | jq -r '.test_coverage.score')/10 |"
+            echo "| Security | $(echo "$RAW" | jq -r '.security.score')/10 |"
+            echo "| Scope | $(echo "$RAW" | jq -r '.scope.score')/10 |"
+            echo
+            echo "Risk: \`$RISK\` · recommendation: \`$final\`$([ "$candidate" = "true" ] && echo " · \`claude:merge-candidate\`" || true)"
+            echo
+            echo "$RAW" | jq -r '.begruendung'
+
+            if [ "$HARD" = "true" ]; then
+              echo
+              echo "### Existing tests were weakened"
+              echo
+              echo "Computed from the diff, before the review ran — this forces \`changes_requested\` regardless of the score:"
+              echo
+              echo '```json'
+              jq -S '{removed_test_attributes, added_ignore_attributes, deleted_test_files, changed_snapshots}' "$ctx/tests.json"
+              echo '```'
+            elif [ "$manipulation" = "true" ]; then
+              echo
+              echo "### Tests changed without a reason in the spec"
+              echo
+              echo "The reviewer judged the test changes in this diff to narrow what is asserted. This forces \`changes_requested\`."
+            fi
+
+            echo "$RAW" | jq -r '
+              if (.korrektheit.findings | length) > 0 then
+                "\n### Correctness\n\n" + ([.korrektheit.findings[] | "- " + .] | join("\n"))
+              else "" end'
+            echo "$RAW" | jq -r '
+              if (.security.findings | length) > 0 then
+                "\n### Security\n\n" + ([.security.findings[] | "- " + .] | join("\n"))
+              else "" end'
+            echo "$RAW" | jq -r '
+              if (.test_coverage.kriterien_ohne_test | length) > 0 then
+                "\n### Acceptance criteria with no test\n\n" +
+                ([.test_coverage.kriterien_ohne_test[] | "- " + .] | join("\n"))
+              else "" end'
+            echo "$RAW" | jq -r '
+              if (.scope.scope_creep | length) > 0 then
+                "\n### Scope creep\n\n" + ([.scope.scope_creep[] | "- " + .] | join("\n"))
+              else "" end'
+
+            if [ "$RISK" = "high" ]; then
+              echo
+              echo "### High blast radius — a human has to merge this"
+              echo
+              echo "This diff touches paths classified \`high\` in \`.github/claude-risk-paths.yml\`: money, key material, identity control, or CI itself. No automated review recommends merging those, whatever it scored."
+              echo
+              echo "$reviewers — please review."
+            fi
+
+            if [ -z "$LINKED_ISSUE" ]; then
+              echo
+              echo "> This pull request names no issue, so the acceptance criteria could not be checked against anything. Add \`Closes #N\` to the description and push to re-run."
+            fi
+
+            echo
+            echo "<details><summary>Machine-readable review</summary>"
+            echo
+            echo '```json'
+            echo "$RAW" | jq -S .
+            echo '```'
+            echo
+            echo "</details>"
+            echo
+            echo "<sub>Adversarial review of \`${{ github.event.pull_request.head.sha }}\` · [run log]($RUN_URL)</sub>"
+          } > "$RUNNER_TEMP/review.md"
+
+          # Sticky: one review comment per pull request, rewritten on every push,
+          # so the thread is the current verdict rather than a pile of old ones.
+          existing=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            --jq '.[] | select(.body | startswith("<!-- claude-pr-review -->")) | .id' \
+            | head -1 || true)
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$existing" \
+              -F body=@"$RUNNER_TEMP/review.md" >/dev/null
+          else
+            gh api -X POST "repos/$REPO/issues/$PR/comments" \
+              -F body=@"$RUNNER_TEMP/review.md" >/dev/null
+          fi
+
+          echo "PR #$PR: $score/10, risk $RISK, $final" >> "$GITHUB_STEP_SUMMARY"

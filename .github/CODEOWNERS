@@ -1,0 +1,53 @@
+# Who has to approve what, when "Require review from Code Owners" is on in the
+# branch protection rule for `main`. See the Branch protection section of the
+# README for the settings this file is useless without.
+#
+# The point of this file is not ownership -- there is one maintainer. It is that
+# an agent can open a pull request touching anything, and there are three kinds
+# of file where a human must be in the loop no matter how good the automated
+# review looked:
+#
+#   1. the automation itself, because a PR that edits the reviewer can pass it
+#   2. the tests, because weakening one is how a red build turns green
+#   3. money, keys and identity control, where a wrong merge is not revertible
+#
+# Replace @devdudeio with a team (e.g. @chainvue/maintainers) when there is one;
+# the paths stay as they are.
+
+# Everything, by default.
+*                           @devdudeio
+
+# --- 1. the automation reviewing the automation ------------------------------
+/.github/                   @devdudeio
+/.github/workflows/         @devdudeio
+/.github/CODEOWNERS         @devdudeio
+/.github/claude-risk-paths.yml @devdudeio
+/scripts/                   @devdudeio
+/CLAUDE.md                  @devdudeio
+
+# --- 2. the tests ------------------------------------------------------------
+# An agent may add tests here freely; it may not quietly change what the
+# existing ones assert. Snapshots are listed separately because accepting a
+# snapshot is a one-command way to make a rendering regression look intentional.
+/tests/                     @devdudeio
+/tests/snapshots/           @devdudeio
+/fixtures/                  @devdudeio
+
+# --- 3. money, keys, identity ------------------------------------------------
+/src/keystore.rs            @devdudeio
+/src/cmd/key.rs             @devdudeio
+/src/cmd/send.rs            @devdudeio
+/src/cmd/airgap.rs          @devdudeio
+/src/cmd/id.rs              @devdudeio
+/src/cmd/lifecycle.rs       @devdudeio
+/src/payload.rs             @devdudeio
+/src/config.rs              @devdudeio
+/src/node.rs                @devdudeio
+
+# --- supply chain ------------------------------------------------------------
+# The SDK is pinned by rev. Moving that pin changes every signature this program
+# produces, and no test in this repo can tell you it was safe.
+/Cargo.toml                 @devdudeio
+/Cargo.lock                 @devdudeio
+/rust-toolchain.toml        @devdudeio
+/Makefile                   @devdudeio

@@ -5,6 +5,12 @@ on:
   push:
     branches: [main]
 
+# This workflow builds and tests; it writes nothing. Declared explicitly because
+# the repository default for GITHUB_TOKEN is `write`, and a workflow with no
+# permissions block silently inherits it.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings

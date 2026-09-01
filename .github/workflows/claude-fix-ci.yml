@@ -1,0 +1,416 @@
+name: Claude Fix CI
+
+# Third stage. When CI goes red on a branch the automation opened, this tries to
+# make it green -- at most three times, and then it stops and asks for a human.
+#
+# The three-attempt cap is the whole point. An agent that can keep pushing at a
+# red build will eventually find a way to make it green, and the cheapest way is
+# always to change the test. The cap plus the no-test-manipulation rule below
+# are what stop that; the adversarial review is the backstop that catches it if
+# they fail.
+#
+# Attempts are counted from marker comments on the pull request rather than from
+# commits, because a single attempt can legitimately be several commits and
+# because the count then survives a rebase.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: claude-fix-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+env:
+  REPO: ${{ github.repository }}
+  BRANCH: ${{ github.event.workflow_run.head_branch }}
+  CI_RUN_ID: ${{ github.event.workflow_run.id }}
+  MAX_ATTEMPTS: '3'
+
+jobs:
+  # ---------------------------------------------------------------- triage
+  triage:
+    name: Count the attempts
+    # Same-repo only. This workflow runs from the default branch with a PAT in
+    # scope, and a fork branch is attacker-controlled code.
+    if: >-
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      startsWith(github.event.workflow_run.head_branch, 'claude/') &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    outputs:
+      pr: ${{ steps.find.outputs.pr }}
+      issue: ${{ steps.find.outputs.issue }}
+      attempt: ${{ steps.find.outputs.attempt }}
+      mode: ${{ steps.find.outputs.mode }}
+    steps:
+      # A short-lived installation token, scoped to this repository only (the
+      # action's default) and narrowed to the permissions this job actually
+      # uses. It exists for the same reason a PAT did: writes made with it start
+      # the next workflow, which GITHUB_TOKEN does not.
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          client-id: ${{ vars.CLAUDE_AUTOMATION_CLIENT_ID }}
+          private-key: ${{ secrets.CLAUDE_AUTOMATION_PRIVATE_KEY }}
+          permission-contents: read
+          permission-issues: write
+          permission-pull-requests: write
+
+      - name: Find the pull request and the attempt count
+        id: find
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+
+          pr=$(jq -r '.workflow_run.pull_requests[0].number // empty' "$GITHUB_EVENT_PATH")
+          if [ -z "$pr" ]; then
+            pr=$(gh pr list --repo "$REPO" --state open --head "$BRANCH" \
+                   --json number --jq '.[0].number // empty')
+          fi
+          if [ -z "$pr" ]; then
+            echo "mode=none" >> "$GITHUB_OUTPUT"
+            echo "No open pull request on $BRANCH -- nothing to fix." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          state=$(gh pr view "$pr" --repo "$REPO" --json state --jq .state)
+          if [ "$state" != "OPEN" ]; then
+            echo "mode=none" >> "$GITHUB_OUTPUT"
+            echo "PR #$pr is $state -- not fixing it." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # `claude/issue-<n>` is what claude-implement.yml creates. A branch
+          # that does not carry an issue number still gets fixed; it just has no
+          # issue to block.
+          issue=""
+          case "$BRANCH" in
+            claude/issue-*)
+              candidate=${BRANCH#claude/issue-}
+              case "$candidate" in
+                ''|*[!0-9]*) ;;
+                *) issue="$candidate" ;;
+              esac
+              ;;
+          esac
+          echo "issue=$issue" >> "$GITHUB_OUTPUT"
+          echo "pr=$pr" >> "$GITHUB_OUTPUT"
+
+          already=$(gh api "repos/$REPO/issues/$pr/comments" --paginate \
+            --jq '.[] | select(.body | startswith("<!-- claude-fix-attempt -->")) | .id' \
+            | wc -l | tr -d ' ')
+          attempt=$((already + 1))
+          echo "attempt=$attempt" >> "$GITHUB_OUTPUT"
+
+          if [ "$already" -ge "$MAX_ATTEMPTS" ]; then
+            echo "mode=diagnose" >> "$GITHUB_OUTPUT"
+            echo "PR #$pr: $already attempts spent, diagnosing instead." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Recorded before the attempt runs, so a run that dies still counts.
+          # Otherwise a crash loop would never reach the cap.
+          gh api -X POST "repos/$REPO/issues/$pr/comments" -f body="$(printf '%s\n' \
+            "<!-- claude-fix-attempt -->" \
+            "CI failed. Starting fix attempt **$attempt of $MAX_ATTEMPTS**. ([failing run](${{ github.server_url }}/$REPO/actions/runs/$CI_RUN_ID))")" >/dev/null
+
+          echo "mode=fix" >> "$GITHUB_OUTPUT"
+          echo "PR #$pr: fix attempt $attempt of $MAX_ATTEMPTS." >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------- fix
+  fix:
+    name: Fix the build
+    needs: triage
+    if: needs.triage.outputs.mode == 'fix'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # Installation token for this repository, this job's permissions only.
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          client-id: ${{ vars.CLAUDE_AUTOMATION_CLIENT_ID }}
+          private-key: ${{ secrets.CLAUDE_AUTOMATION_PRIVATE_KEY }}
+          permission-contents: read
+          permission-issues: write
+          permission-pull-requests: write
+          permission-actions: read
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_branch }}
+          fetch-depth: 0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Website build dependency
+        run: pip install --disable-pip-version-check markdown==3.7
+      - name: Fetch dependencies
+        run: cargo fetch --locked
+
+      - name: Collect the failure
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR: ${{ needs.triage.outputs.pr }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/claude-context"
+          # The log is dumped to a file rather than left for the agent to fetch:
+          # it is the one input that matters and it should not cost a tool call
+          # or depend on the CI MCP server being reachable.
+          gh run view "$CI_RUN_ID" --repo "$REPO" --log-failed \
+            > "$RUNNER_TEMP/claude-context/ci-failure.log" 2>&1 || \
+            echo "could not download the CI log" > "$RUNNER_TEMP/claude-context/ci-failure.log"
+          tail -c 200000 "$RUNNER_TEMP/claude-context/ci-failure.log" \
+            > "$RUNNER_TEMP/claude-context/ci-failure.tail.log"
+          gh pr view "$PR" --repo "$REPO" --json number,title,body,comments \
+            > "$RUNNER_TEMP/claude-context/pr.json"
+
+      - name: Fix
+        id: fix
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          additional_permissions: |
+            actions: read
+          claude_args: |
+            --max-turns 80
+            --allowedTools "Bash,Edit,Write,Read,Glob,Grep,TodoWrite,Task,Agent"
+            --json-schema '{"type":"object","properties":{"outcome":{"type":"string","enum":["fixed","blocked"]},"ursache":{"type":"string"},"aenderung":{"type":"string"},"tests_beruehrt":{"type":"boolean"},"begruendung":{"type":"string"}},"required":["outcome","ursache","aenderung","tests_beruehrt","begruendung"]}'
+          prompt: |
+            CI is failing on `${{ github.event.workflow_run.head_branch }}` in
+            ${{ github.repository }}, pull request #${{ needs.triage.outputs.pr }}. This is
+            fix attempt **${{ needs.triage.outputs.attempt }} of 3**. After the third, the
+            pull request is handed to a human, so spend this attempt on the actual cause
+            rather than on a guess.
+
+            ## Your inputs
+            - The failing CI log: `${{ runner.temp }}/claude-context/ci-failure.tail.log`
+              (the full log is next to it as `ci-failure.log`)
+            - The pull request and its comments: `${{ runner.temp }}/claude-context/pr.json`
+              — earlier fix attempts are in there; do not repeat one that did not work.
+            - `CLAUDE.md` for the conventions and the exact commands.
+
+            ## The rule that outranks everything else
+
+            **You may not delete, skip, rename away, or weaken an existing test to make
+            this build green.** No `#[ignore]`, no loosened assertion, no deleted case.
+            Accepting an insta snapshot counts as changing a test — read the diff line by
+            line and accept it only if every changed line is a change this pull request was
+            supposed to make.
+
+            If the honest fix is that an existing test contradicts what this pull request
+            is trying to do, that is a human's call, not yours. Return `blocked` with the
+            test named and both sides of the contradiction stated.
+
+            Set `tests_beruehrt` to true if you changed anything under `tests/` at all,
+            including snapshots, and justify it in `begruendung`. The reviewer checks this
+            against the diff, so an untrue answer is worse than an inconvenient one.
+
+            ## Steps
+
+            1. Read the log and name the cause before changing anything. `cargo fmt
+               --check` failing is not the same problem as clippy failing, and neither is a
+               failing assertion.
+            2. Make the smallest change that fixes that cause. Do not tidy anything else;
+               a fix commit that also refactors is a fix commit nobody can review.
+            3. Run `make check` locally until it passes. If you touched `docs/*.md` or
+               `web/`, run `python web/build.py` too. Never run `make testnet` — it spends
+               real VRSCTEST.
+            4. Commit on the current branch and push. The subject line says what was broken
+               and what fixed it. Do not open a new pull request; this branch already has
+               one. Do not merge.
+
+            Return the structured result: `outcome`, `ursache` (one sentence on the real
+            cause), `aenderung` (what you changed), `tests_beruehrt`, `begruendung`.
+
+      - name: Report
+        if: always()
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR: ${{ needs.triage.outputs.pr }}
+          ISSUE: ${{ needs.triage.outputs.issue }}
+          RAW: ${{ steps.fix.outputs.structured_output }}
+          STEP_OUTCOME: ${{ steps.fix.outcome }}
+          ATTEMPT: ${{ needs.triage.outputs.attempt }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          outcome=$(echo "${RAW:-}" | jq -r '.outcome // empty' 2>/dev/null || true)
+
+          if [ "$STEP_OUTCOME" != "success" ] || [ -z "$outcome" ]; then
+            gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$(printf '%s\n' \
+              "Fix attempt $ATTEMPT ended without a result. [Run log]($RUN_URL)")" >/dev/null
+            exit 1
+          fi
+
+          {
+            if [ "$outcome" = "fixed" ]; then
+              echo "### Fix attempt $ATTEMPT"
+            else
+              echo "### Fix attempt $ATTEMPT — blocked"
+            fi
+            echo
+            echo "**Cause** — $(echo "$RAW" | jq -r '.ursache')"
+            echo
+            echo "**Change** — $(echo "$RAW" | jq -r '.aenderung')"
+            if [ "$(echo "$RAW" | jq -r '.tests_beruehrt')" = "true" ]; then
+              echo
+              echo "> **Tests were touched.** $(echo "$RAW" | jq -r '.begruendung')"
+              echo ">"
+              echo "> The review checks this against the diff."
+            fi
+            echo
+            echo "<sub>[Run log]($RUN_URL)</sub>"
+          } > "$RUNNER_TEMP/fix-report.md"
+          gh api -X POST "repos/$REPO/issues/$PR/comments" \
+            -F body=@"$RUNNER_TEMP/fix-report.md" >/dev/null
+
+          # A fix that gives up early stops the loop now rather than burning the
+          # remaining attempts on the same wall.
+          if [ "$outcome" = "blocked" ] && [ -n "$ISSUE" ]; then
+            gh issue edit "$ISSUE" --repo "$REPO" --add-label 'claude:blocked' || true
+          fi
+
+  # ---------------------------------------------------------------- diagnose
+  # The fourth failure. No more pushing: read the wreckage, write down what is
+  # actually wrong, and hand it over.
+  diagnose:
+    name: Give up and explain
+    needs: triage
+    if: needs.triage.outputs.mode == 'diagnose'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # Installation token for this repository, this job's permissions only.
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          client-id: ${{ vars.CLAUDE_AUTOMATION_CLIENT_ID }}
+          private-key: ${{ secrets.CLAUDE_AUTOMATION_PRIVATE_KEY }}
+          permission-contents: read
+          permission-issues: write
+          permission-pull-requests: write
+          permission-actions: read
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_branch }}
+          fetch-depth: 0
+
+      - name: Collect the failure
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR: ${{ needs.triage.outputs.pr }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/claude-context"
+          gh run view "$CI_RUN_ID" --repo "$REPO" --log-failed \
+            > "$RUNNER_TEMP/claude-context/ci-failure.log" 2>&1 || \
+            echo "could not download the CI log" > "$RUNNER_TEMP/claude-context/ci-failure.log"
+          tail -c 200000 "$RUNNER_TEMP/claude-context/ci-failure.log" \
+            > "$RUNNER_TEMP/claude-context/ci-failure.tail.log"
+          gh pr view "$PR" --repo "$REPO" --json number,title,body,comments \
+            > "$RUNNER_TEMP/claude-context/pr.json"
+          git log --oneline origin/main..HEAD > "$RUNNER_TEMP/claude-context/commits.txt"
+          git diff origin/main...HEAD > "$RUNNER_TEMP/claude-context/diff.patch"
+
+      - name: Diagnose
+        id: diagnose
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: |
+            --max-turns 40
+            --allowedTools "Read,Glob,Grep,TodoWrite,Task,Agent"
+            --json-schema '{"type":"object","properties":{"diagnose":{"type":"string"},"warum_nicht_gefixt":{"type":"string"},"naechster_schritt":{"type":"string"},"spec_problem":{"type":"boolean"}},"required":["diagnose","warum_nicht_gefixt","naechster_schritt","spec_problem"]}'
+          prompt: |
+            Three fix attempts on `${{ github.event.workflow_run.head_branch }}` in
+            ${{ github.repository }} have not made CI green. You are not fixing it. Write
+            the handover note that saves the human who picks this up from re-deriving
+            everything.
+
+            ## Your inputs
+            - Failing CI log: `${{ runner.temp }}/claude-context/ci-failure.tail.log`
+            - The pull request and every fix attempt's comment: `${{ runner.temp }}/claude-context/pr.json`
+            - The commits: `${{ runner.temp }}/claude-context/commits.txt`
+            - The full diff against main: `${{ runner.temp }}/claude-context/diff.patch`
+            - The repository, and `CLAUDE.md` for what the conventions actually are.
+
+            You have read-only tools. Do not attempt a fix.
+
+            Answer four things:
+
+            - `diagnose` — what is actually failing, in the code, not in the log. Name the
+              file and the assertion or the lint. If the three attempts each failed on a
+              different thing, say that: it usually means the change is bigger than the
+              spec assumed.
+            - `warum_nicht_gefixt` — why the attempts did not work. Were they circling the
+              same wall, or fixing one thing and breaking another? Quote what they tried.
+            - `naechster_schritt` — the single most useful thing a human can do next. A
+              concrete command, file, or decision — not "investigate further".
+            - `spec_problem` — true if the real problem is that the specification was wrong
+              or impossible, rather than that the implementation was bad. This is the
+              distinction that decides whether the issue gets re-specified or re-attempted,
+              so be honest about it.
+
+            Return only the structured result.
+
+      - name: Block it
+        if: always()
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR: ${{ needs.triage.outputs.pr }}
+          ISSUE: ${{ needs.triage.outputs.issue }}
+          RAW: ${{ steps.diagnose.outputs.structured_output }}
+          STEP_OUTCOME: ${{ steps.diagnose.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CI_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          {
+            echo "<!-- claude-fix-exhausted -->"
+            echo "## Giving up after 3 fix attempts"
+            echo
+            if [ "$STEP_OUTCOME" = "success" ] && [ -n "${RAW:-}" ]; then
+              echo "**What is failing** — $(echo "$RAW" | jq -r '.diagnose')"
+              echo
+              echo "**Why the attempts did not work** — $(echo "$RAW" | jq -r '.warum_nicht_gefixt')"
+              echo
+              echo "**Next step** — $(echo "$RAW" | jq -r '.naechster_schritt')"
+              echo
+              if [ "$(echo "$RAW" | jq -r '.spec_problem')" = "true" ]; then
+                echo "> This looks like a **specification** problem rather than an implementation one."
+                echo "> Re-specifying the issue is more likely to help than another attempt."
+              else
+                echo "> This looks like an implementation problem. The spec is probably fine."
+              fi
+            else
+              echo "The diagnosis run itself failed. [Run log]($RUN_URL)"
+            fi
+            echo
+            echo "<sub>[Last failing CI run]($CI_URL) · [diagnosis log]($RUN_URL)</sub>"
+          } > "$RUNNER_TEMP/diagnosis.md"
+
+          gh api -X POST "repos/$REPO/issues/$PR/comments" \
+            -F body=@"$RUNNER_TEMP/diagnosis.md" >/dev/null
+
+          if [ -n "$ISSUE" ]; then
+            gh issue edit "$ISSUE" --repo "$REPO" --add-label 'claude:blocked' || true
+            gh issue comment "$ISSUE" --repo "$REPO" --body \
+              "CI on #$PR could not be fixed in 3 attempts. The diagnosis is on the pull request." || true
+          fi
+          echo "PR #$PR blocked after $MAX_ATTEMPTS attempts." >> "$GITHUB_STEP_SUMMARY"

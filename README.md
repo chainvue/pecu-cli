@@ -198,6 +198,45 @@ the chain, which needs DeFi enabled on the test chain — see
 
 **Not in scope:** shielded/z-address operations, marketplace offers.
 
+## Contributing
+
+Issues use the [Spec template](.github/ISSUE_TEMPLATE/spec.yml), and a specified
+issue can be picked up by an automated pipeline: a spec gate reviews it, an agent
+implements it, and an adversarial reviewer scores the pull request before a human
+reads it. Nothing merges itself. [docs/claude-automation.md](docs/claude-automation.md)
+is the operating manual; [CLAUDE.md](CLAUDE.md) is what the agents read before
+touching the code.
+
+Pull requests from forks are reviewed by hand — a workflow with write permissions
+should not run against code an outsider controls, and on a wallet that is not a
+close call.
+
+### Branch protection
+
+The automation assumes these are set, and several of its guarantees are only
+guarantees because they are. They cannot be configured from a file; set them in
+**Settings → Branches → Add rule** for `main`, or as a ruleset.
+
+- **Require a pull request before merging.** Nothing pushes to `main` directly.
+- **Require approvals: 1.** The pipeline exists to produce reviewable pull
+  requests, not to merge them.
+- **Require review from Code Owners.** This is what makes
+  [`.github/CODEOWNERS`](.github/CODEOWNERS) do anything. Without it, an agent
+  could change the workflow that reviews it, or the tests that constrain it,
+  with no human in the loop.
+- **Dismiss stale approvals when new commits are pushed.** An approval of a
+  diff that no longer exists is worse than no approval.
+- **Require status checks to pass**, and select **`fmt, clippy, test`** (the job
+  in `ci.yml`) and **`Find reasons not to merge`** (the review job). Also tick
+  *Require branches to be up to date before merging*.
+- **Do not allow force pushes**, and **do not allow deletions**.
+- **Do not** enable auto-merge. The score on a pull request is advice.
+
+One more, outside branch protection: **Settings → Actions → General → Workflow
+permissions** must have *Allow GitHub Actions to create and approve pull
+requests* enabled, or the implementation agent cannot open one. In an
+organisation, the same switch exists at organisation level and overrides this.
+
 ## License
 
 Apache-2.0, matching the SDK.

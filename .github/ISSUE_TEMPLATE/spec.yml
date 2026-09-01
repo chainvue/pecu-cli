@@ -1,0 +1,127 @@
+name: Spec
+description: A change specified well enough that it can be implemented and reviewed without another conversation.
+title: "<one line: what should be true when this is done>"
+
+# NOTE: `labels:` is deliberately absent.
+#
+# Labels declared here are applied when the issue is created, no matter who
+# opened it -- which would let anyone outside the project start an automated run
+# on a wallet by filling in a form. Applying a label is a permission GitHub only
+# grants at triage and above; leaving this empty keeps it that way. A maintainer
+# adds `claude:ready` by hand once the spec reads well. See
+# docs/claude-automation.md.
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This form feeds an automated pipeline. A maintainer adds `claude:ready`,
+        an agent reviews the spec against this template, and only a spec that
+        survives that review gets implemented.
+
+        The whole thing hinges on one property: **every acceptance criterion has
+        to be checkable by a test.** "Improve the error message" cannot be
+        implemented or reviewed. "`pecu send` to an unknown recipient prints the
+        daemon's own wording rather than `pecu::send::unknown_recipient`" can.
+
+        Not every issue needs this form. Bug reports and questions are welcome
+        as plain issues — they just never enter the pipeline.
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: One or two sentences. What should be true when this is done that is not true now?
+      placeholder: |
+        `pecu wallet utxos` prints a confirmation count for every unspent output,
+        so a person can tell a spendable output from one that is still settling.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: >
+        A checklist. Each line must be something a test can assert — a concrete command,
+        a concrete input, and the exact output or refusal it produces. If you cannot
+        imagine the assertion, the criterion is not finished.
+      value: |
+        - [ ] `pecu <command> …` prints … 
+        - [ ] `pecu <command> --json` carries the same fact as the field `…`
+        - [ ] `pecu <command> …` refuses … with exit code … and the code `pecu::…`
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope-in
+    attributes:
+      label: In scope
+      description: The modules and paths this change is allowed to touch. Be specific — a path per line.
+      placeholder: |
+        src/cmd/wallet.rs
+        tests/wallet.rs
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope-out
+    attributes:
+      label: Out of scope
+      description: >
+        What must NOT change, said out loud. This is the half that keeps a fix from
+        turning into a refactor, and the reviewer checks the diff against it.
+      value: |
+        - The UI kit (`src/ui/**`) and its snapshots — no rendering changes.
+        - The shape of any existing `--json` field.
+        - Anything under `src/keystore.rs` or `src/cmd/key.rs`.
+    validations:
+      required: true
+
+  - type: textarea
+    id: tests
+    attributes:
+      label: Test requirements
+      description: >
+        Which tests must exist and be green. Name the file. Say whether an existing test
+        has to change and why — a spec that requires changing a test has to say so here,
+        or the reviewer will treat the change as test manipulation.
+      placeholder: |
+        - New: `tests/wallet.rs` — an unspent output at N confirmations prints N.
+        - New: `tests/wallet.rs` — the `--json` output carries `confirmations`.
+        - Unchanged: every existing test in `tests/wallet.rs` still passes as written.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: risk
+    attributes:
+      label: Risk
+      description: >
+        Blast radius if this goes wrong. The spec gate re-checks this against
+        .github/claude-risk-paths.yml and will correct it — but say what you think.
+      options:
+        - "low — visible immediately, costs nothing (UI, docs, tests)"
+        - "medium — shows a person a wrong number or a wrong refusal"
+        - "high — money, key material, identity control, or CI itself"
+    validations:
+      required: true
+
+  - type: textarea
+    id: risk-why
+    attributes:
+      label: Why that risk level
+      description: One or two sentences. What is the worst thing that happens if this is wrong?
+      placeholder: >
+        Read-only command; the worst case is a wrong number on screen, and no path
+        from here reaches signing or the keystore.
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: Prior art, a linked issue, a transcript, the reason the obvious approach does not work.
+    validations:
+      required: false

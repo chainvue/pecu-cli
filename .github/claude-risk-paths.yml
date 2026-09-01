@@ -1,0 +1,82 @@
+# Blast radius per path, for the automated PR review.
+#
+# `scripts/classify-risk.py` reads this, matches every file a pull request
+# touches, and the highest level any file matches becomes the PR's risk label.
+# A path that matches nothing lands in `default` -- which is `medium` on
+# purpose, so a new module is treated as suspicious until someone classifies it.
+#
+# The levels mean blast radius, not code quality:
+#
+#   high    getting this wrong loses money, leaks key material, hands over an
+#           identity, or changes what runs in CI. A human always reviews.
+#   medium  getting this wrong shows a person the wrong number or the wrong
+#           refusal. Bad, recoverable, not silent.
+#   low     getting this wrong is visible immediately and costs nothing.
+#
+# Globs are matched with fnmatch against repo-relative paths, so `src/ui/**`
+# matches `src/ui/table.rs` and `**/*.snap` matches anywhere.
+
+default: medium
+
+high:
+  # Key material at rest. Argon2id + ChaCha20-Poly1305, and the envelope whose
+  # associated data is the only thing stopping a swapped address.
+  - "src/keystore.rs"
+  # The one command group allowed to print a private key to a terminal.
+  - "src/cmd/key.rs"
+  # Moves money: builds, signs and broadcasts.
+  - "src/cmd/send.rs"
+  # The air-gap ceremony -- and `payload.rs` parses hex that came from another
+  # machine, which is the only untrusted input this program takes.
+  - "src/cmd/airgap.rs"
+  - "src/payload.rs"
+  # Identity control. `register` is two transactions with a gap that matters;
+  # `revoke`/`recover` decide who may change an identity afterwards.
+  - "src/cmd/id.rs"
+  - "src/cmd/lifecycle.rs"
+  # Where the keys live and which chain we are pointed at. A wrong answer here
+  # sends mainnet funds from a testnet-shaped command line.
+  - "src/config.rs"
+  # The client that can broadcast.
+  - "src/node.rs"
+  # Supply chain and CI. The SDK is pinned by rev; moving that pin moves every
+  # signature this program produces.
+  - "Cargo.toml"
+  - "Cargo.lock"
+  - "rust-toolchain.toml"
+  - "Makefile"
+  - ".github/**"
+  - "scripts/**"
+  - "CLAUDE.md"
+
+medium:
+  # The command surface itself: a misplaced flag is a misfired command.
+  - "src/cli.rs"
+  - "src/cmd/mod.rs"
+  # Read-only, but they are what a person believes about their money.
+  - "src/cmd/wallet.rs"
+  - "src/cmd/tx.rs"
+  - "src/cmd/currency.rs"
+  - "src/currency_name.rs"
+  # Exit codes and the one place a JSON document reaches stdout. Scripts
+  # depend on both.
+  - "src/failure.rs"
+  # `--explain` is the feature the program is an argument for; wrong text here
+  # teaches the wrong SDK call.
+  - "src/explain.rs"
+
+low:
+  # Nothing here writes an escape sequence anywhere else, and every mistake is
+  # visible on the first run.
+  - "src/ui/**"
+  - "src/cmd/dev.rs"
+  # Tests are low *blast radius* -- they ship nothing. They are not low trust:
+  # weakening one is caught by the review's `test_manipulation` check and by
+  # CODEOWNERS, neither of which reads this file.
+  - "tests/**"
+  - "fixtures/**"
+  - "docs/**"
+  - "web/**"
+  - "README.md"
+  - "LICENSE"
+  - ".gitignore"
