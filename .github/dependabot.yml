@@ -1,0 +1,51 @@
+# Dependabot for pecu, the CLI wallet.
+#
+# Ecosystems found in the repo: cargo (a single-package Cargo.toml with a
+# committed Cargo.lock) and github-actions (ci.yml, pages.yml and the
+# claude-* workflows). web/ is a static site built by a Python script with no
+# requirements.txt or pyproject.toml, so there is no pip manifest to watch.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # Crate families that only work in lockstep, grouped so a bump cannot
+      # land half-applied. The reason this repo bothers: in peculium-wallet
+      # Dependabot bumped `vitest` and left `@vitest/coverage-v8` behind, and
+      # the resulting peer mismatch broke CI. Cargo has no peer dependencies to
+      # catch that for us, so the coupling is spelled out here.
+      #
+      # clap_complete is generated from clap's derive types and anstream/anstyle
+      # are the colour stack clap renders through: a major on one without the
+      # others does not compile.
+      clap:
+        patterns:
+          - clap
+          - "clap_*"
+          - anstream
+          - anstyle
+      # RustCrypto: shared trait crates, so the KDF, the AEAD and zeroize have
+      # to agree on the same trait major.
+      rustcrypto:
+        patterns:
+          - argon2
+          - chacha20poly1305
+          - zeroize
+          - getrandom
+      dev-dependencies:
+        dependency-type: development
+        update-types: ["minor", "patch"]
+    ignore:
+      # verus-sdk is a git dependency pinned by revision on purpose: the CLI and
+      # chainvue-web-wallet pin the same commit so the two cannot build
+      # different transactions from the same inputs. Moving it is a deliberate,
+      # coordinated change, not a weekly bump.
+      - dependency-name: verus-sdk
