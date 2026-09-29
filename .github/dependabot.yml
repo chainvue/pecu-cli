@@ -40,6 +40,12 @@ updates:
           - chacha20poly1305
           - zeroize
           - getrandom
+      # rqrr decodes an image::GrayImage built by this crate, so an image
+      # major without the matching rqrr does not compile.
+      image:
+        patterns:
+          - image
+          - rqrr
       dev-dependencies:
         dependency-type: development
         update-types: ["minor", "patch"]

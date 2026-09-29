@@ -60,7 +60,11 @@ jobs:
     # run on them -- and making it run, via pull_request_target, would hand an
     # outside contributor a workflow with write permissions on a wallet. A
     # maintainer reviews fork pull requests by hand. See docs/claude-automation.md.
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    # Dependabot runs get no Actions secrets either, and the action rejects bot
+    # actors; skipped here, the required check still reports success.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
